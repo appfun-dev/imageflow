@@ -70,6 +70,35 @@ Cardinality is bounded by construction: 3 operations × 6 results = at most 18 s
 
 Registration: the client registers these collectors with the `prometheus.Registerer` passed in `registry.Options.Registerer` (in the manager: `sigs.k8s.io/controller-runtime/pkg/metrics.Registry`); `nil` disables metrics.
 
+## T4 mapping metrics
+
+The Mapping push path (`internal/controller`: ImageStreamMapping reconciler + task TTL GC) exposes task duration, failure rate and garbage-collection activity. One observation is recorded per task that reaches a terminal state, and per GC deletion; re-reconciling a finished task records nothing.
+
+- `imageflow_mapping_registrations_total{outcome}` – Counter. Total ImageStreamMapping task completions. Failure rate is derived from the `outcome` label, e.g.:
+
+  ```promql
+  sum(rate(imageflow_mapping_registrations_total{outcome="failed"}[5m]))
+    /
+  sum(rate(imageflow_mapping_registrations_total[5m]))
+  ```
+
+- `imageflow_mapping_task_duration_seconds{result}` – Histogram. Task duration (`status.completedAt - status.startedAt`, both stamped from the injected clock seam) observed when the task reaches its terminal state. Buckets (seconds): `0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300`.
+
+- `imageflow_mapping_gc_deletions_total{kind}` – Counter. Task objects deleted by TTL garbage collection. GC applies uniformly to both task kinds (success TTL `--mapping-ttl-success`, failure TTL `--mapping-ttl-failure`); deletions are attributed per kind.
+
+Label vocabularies (bounded; this is the documented exception to the reconcile-oriented `result` values in the label convention above):
+
+- `outcome` – one of `changed`, `noop`, `failed`:
+  - `changed` – the registration recorded a real Image Change (the tag's current association moved to the new digest); this series is also the Image Change count for the push path;
+  - `noop` – idempotent re-registration of the current `(stream, tag, digest)`: no Image Change, no stream status write (pipeline-retry semantics, ADR-004);
+  - `failed` – terminal task failure; the diagnosable code (`StreamNotFound`, `InvalidImageReference`) lives in the Complete condition message and the `MappingFailed` Event, not in a label.
+- `result` – one of `success`, `failure` (mirrors the terminal Complete condition reason `Succeeded`/`Failed`).
+- `kind` – one of `mapping` (ImageStreamMapping), `import` (ImageStreamImport).
+
+Cardinality is bounded by construction: 3 outcomes + 2 results + 2 kinds = at most 7 series (plus histogram buckets). There are deliberately **no namespace/name labels** — task objects are short-lived and high-churn, so per-object attribution belongs to kube Events (`MappingRegistered`, `MappingFailed`, `ImageChanged`, `TagHistoryOverflow`, `ImageArtifactCreated`, `TaskGarbageCollected`) and structured logs, not to these metrics.
+
+Registration: the T4 registration units register these collectors once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`); duplicate registration attempts are tolerated so test managers can coexist.
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.
