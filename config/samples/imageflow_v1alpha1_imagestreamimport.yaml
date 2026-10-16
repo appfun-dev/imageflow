@@ -1,0 +1,19 @@
+# ImageStreamImport is a short-lived task that pulls image metadata from an
+# external registry into the catalog (ADR-002 R6, ADR-004). The pull secret is a
+# dockerconfigjson secret reference; credentials never appear in spec/status.
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageStreamImport
+metadata:
+  name: payments-api-stable-import
+  namespace: imageflow-system
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  stream: payments-api
+  tag: stable
+  from:
+    kind: DockerImage
+    name: quay.io/example/payments-api:stable
+  pullSecretRef:
+    name: quay-robot-pull-secret

@@ -1,0 +1,17 @@
+# ImageStreamMapping is the v1 bridge from build output into the catalog
+# (ADR-002 R7, ADR-004): CI pipelines create it after a successful BuildRun to
+# register repo@digest onto (stream, tag). The image must be a digest reference;
+# tag-only references are rejected. Re-registering the same (stream, tag, digest)
+# is an idempotent no-op success.
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageStreamMapping
+metadata:
+  name: payments-api-stable-mapping
+  namespace: imageflow-system
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  stream: payments-api
+  tag: stable
+  image: quay.io/example/payments-api@sha256:5e8f3a2c1d4b6a8e0f2c4d6b8a1e3f5c7d9b0a2e4c6d8f1a3b5c7e9d0f2a4b6c

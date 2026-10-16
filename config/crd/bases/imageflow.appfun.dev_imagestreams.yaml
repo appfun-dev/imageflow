@@ -1,0 +1,261 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: imagestreams.imageflow.appfun.dev
+spec:
+  group: imageflow.appfun.dev
+  names:
+    kind: ImageStream
+    listKind: ImageStreamList
+    plural: imagestreams
+    singular: imagestream
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImageStream is the catalog's single source of truth for tag-to-digest
+          associations (ADR-002 R1). It stores no image layers and is not a registry
+          (ADR-007). The catalog namespace is imageflow-system.
+
+          Admission note (ticket T2 acceptance): the constraint that stream names must not
+          contain "--" (so mirror names <stream>--<tag> split injectively on the first
+          "--", ADR-002) is enforced by the validating webhook in ticket T3, not here.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ImageStreamSpec declares the tags of the stream. Write paths are exactly two
+              (ADR-002 R1): users edit spec; Import/Mapping task controllers update status.
+            properties:
+              tags:
+                description: Tags declared on this stream, keyed by tag name.
+                items:
+                  description: TagReference declares one tag of a stream (ImageStream.spec.tags[]).
+                  properties:
+                    from:
+                      description: |-
+                        From is the external registry source for this tag (pull path). Required for
+                        scheduled imports; on-demand ImageStreamImport tasks may override it.
+                      properties:
+                        kind:
+                          default: DockerImage
+                          description: Kind of the image source. v1 supports DockerImage
+                            only.
+                          enum:
+                          - DockerImage
+                          type: string
+                        name:
+                          description: |-
+                            Name is the full external image reference, e.g. quay.io/team/app:stable or
+                            quay.io/team/app@sha256:<64hex>. Tag references are required for scheduled
+                            imports so tag drift can be detected (digest references cannot drift).
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    importPolicy:
+                      description: ImportPolicy controls periodic re-imports of From.
+                      properties:
+                        intervalSeconds:
+                          default: 900
+                          description: |-
+                            IntervalSeconds is the period of a scheduled import. Defaults to 900s
+                            (ADR-004). The controller may additionally clamp the effective interval via
+                            its flags.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        scheduled:
+                          default: false
+                          description: |-
+                            Scheduled makes the controller periodically re-import the tag's external
+                            source (spec.tags[].from) so tag drift is discovered automatically
+                            (user story 10).
+                          type: boolean
+                      type: object
+                    name:
+                      description: |-
+                        Name of the tag, e.g. "stable". OCI tag grammar. Note: the mirror object name
+                        encoding <stream>--<tag> (ADR-002) additionally requires DNS-1123-safe tags;
+                        tags with uppercase or underscore characters may be normalized by the mirror
+                        synthesis controller (spec fields remain authoritative, names are indexes).
+                      maxLength: 128
+                      minLength: 1
+                      pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: 'spec.tags[].from is required when importPolicy.scheduled
+                      is true: a scheduled import needs a persistent external source
+                      to poll'
+                    rule: '!has(self.importPolicy) || !self.importPolicy.scheduled
+                      || has(self.from)'
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+            type: object
+          status:
+            description: |-
+              ImageStreamStatus carries the tag-to-digest associations with bounded history.
+              Controller-owned through the status subresource; the ImageStream is the single
+              source of truth for the catalog (ADR-002 R1).
+            properties:
+              conditions:
+                description: Conditions of the stream (e.g. import failures), keyed
+                  by type.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the stream generation last processed
+                  by the controller.
+                format: int64
+                type: integer
+              tags:
+                description: Tags with their current association and bounded history,
+                  keyed by tag name.
+                items:
+                  description: NamedTagEventList carries the bounded association history
+                    of one tag.
+                  properties:
+                    items:
+                      description: |-
+                        Items are the tag-to-digest associations, most recent first.
+                        Bounded to StreamTagHistoryMaxItems (3) at CRD level (ADR-008).
+                      items:
+                        description: |-
+                          TagEvent records one tag-to-digest association in the bounded per-tag history
+                          (ImageStream.status.tags[].items, cap StreamTagHistoryMaxItems = 3, ADR-008).
+                          Items are ordered most recent first. Overflow falls to kube Events and audit
+                          logs; enforcement of the runtime bound is the catalog controller's job (flags),
+                          the CRD cap is the structural guard.
+                        properties:
+                          created:
+                            description: Created is when this association was recorded
+                              on the stream.
+                            format: date-time
+                            type: string
+                          digest:
+                            description: |-
+                              Digest of the associated image, sha256:<64hex>. The digest is the change
+                              detection key: same tag + new digest = real image change (ADR-004).
+                            pattern: ^sha256:[0-9a-f]{64}$
+                            type: string
+                          generation:
+                            description: |-
+                              Generation is the ImageStream metadata.generation observed when this
+                              association was recorded.
+                            format: int64
+                            type: integer
+                          imageReference:
+                            description: ImageReference is the canonical digest reference
+                              <repo>@sha256:<64hex>.
+                            pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
+                            type: string
+                        required:
+                        - created
+                        - digest
+                        - imageReference
+                        type: object
+                      maxItems: 3
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    tag:
+                      description: Tag name this history belongs to (matches a spec.tags[].name).
+                      maxLength: 128
+                      minLength: 1
+                      type: string
+                  required:
+                  - tag
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - tag
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

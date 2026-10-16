@@ -1,0 +1,24 @@
+# ImageSubscription declares that workload image fields follow a catalog stream
+# tag (ADR-002 R3). The source uses the logical "<stream>:<tag>" colon form;
+# users never write encoded mirror object names.
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageSubscription
+metadata:
+  name: payments-api-stable
+  namespace: app-team
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  source:
+    kind: ImageStreamTag
+    name: payments-api:stable
+    namespace: imageflow-system
+  targets:
+  - targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      namespace: app-team
+      name: payments-api
+    containerNames:
+    - payments-api

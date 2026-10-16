@@ -28,6 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/clock"
 	"github.com/appfun-dev/imageflow/internal/config"
 	"github.com/appfun-dev/imageflow/internal/controller"
@@ -41,6 +42,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(imageflowv1alpha1.AddToScheme(scheme))
 }
 
 func main() {

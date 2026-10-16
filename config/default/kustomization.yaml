@@ -15,7 +15,7 @@ namePrefix: imageflow-
 #    someName: someValue
 
 resources:
-#- ../crd
+- ../crd
 - ../rbac
 - ../manager
 # [WEBHOOK] Webhook service exposed by the manager.

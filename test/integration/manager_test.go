@@ -31,14 +31,18 @@ func TestIntegration(t *testing.T) {
 	RunSpecs(t, "Integration Suite")
 }
 
-var _ = Describe("Manager", func() {
+// Manager runs the full manager exactly once for the whole ordered container.
+// Starting it per spec fails in CI: controller-runtime validates controller names
+// against its process-global metrics registry, so a second manager.Run in the same
+// process aborts with "controller with name noop already exists".
+var _ = Describe("Manager", Ordered, func() {
 	var (
 		env    *envtest.Environment
 		ctx    context.Context
 		cancel context.CancelFunc
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		assets := os.Getenv("KUBEBUILDER_ASSETS")
 		if assets == "" {
 			Skip("KUBEBUILDER_ASSETS not set")
@@ -55,6 +59,13 @@ var _ = Describe("Manager", func() {
 		scheme := runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 
+		// The webhook server only starts when it has certificates to serve
+		// (see internal/manager/run.go), so materialize a self-signed pair.
+		certDir, err := os.MkdirTemp("", "webhook-certs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(writeSelfSignedWebhookCerts(certDir)).To(Succeed())
+		DeferCleanup(func() { _ = os.RemoveAll(certDir) })
+
 		ctx, cancel = context.WithCancel(context.Background())
 		go func() {
 			defer GinkgoRecover()
@@ -64,6 +75,9 @@ var _ = Describe("Manager", func() {
 				MetricsBindAddress:     "127.0.0.1:28443",
 				HealthProbeBindAddress: "127.0.0.1:28081",
 				WebhookPort:            29443,
+				WebhookCertPath:        certDir,
+				WebhookCertName:        "tls.crt",
+				WebhookCertKey:         "tls.key",
 				MetricsSecure:          false,
 				LeaderElection:         false,
 				ControllerOptions: controller.Options{
@@ -79,7 +93,7 @@ var _ = Describe("Manager", func() {
 			if err != nil {
 				return err
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("healthz status %d", resp.StatusCode)
 			}
@@ -87,9 +101,13 @@ var _ = Describe("Manager", func() {
 		}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
-	AfterEach(func() {
-		cancel()
-		Expect(env.Stop()).To(Succeed())
+	AfterAll(func() {
+		if cancel != nil {
+			cancel()
+		}
+		if env != nil {
+			Expect(env.Stop()).To(Succeed())
+		}
 	})
 
 	It("serves metrics containing controller-runtime queue depth", func() {
@@ -98,7 +116,7 @@ var _ = Describe("Manager", func() {
 			if err != nil {
 				return ""
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			return string(body)
 		}, 10*time.Second, 500*time.Millisecond).Should(ContainSubstring("workqueue_depth"))
@@ -112,7 +130,7 @@ var _ = Describe("Manager", func() {
 		}
 		resp, err := client.Get("https://127.0.0.1:29443/")
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		// No handlers are registered, so the server returns 404, which proves it is listening.
 		Expect(resp.StatusCode).To(BeNumerically(">=", 400))
 		body, _ := io.ReadAll(resp.Body)
