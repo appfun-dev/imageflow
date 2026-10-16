@@ -1,0 +1,10 @@
+# This patch enables the webhook server inside the manager deployment.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-port=9443
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    containerPort: 9443
+    name: webhook-server
+    protocol: TCP
