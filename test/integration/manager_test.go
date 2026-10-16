@@ -31,6 +31,10 @@ func TestIntegration(t *testing.T) {
 	RunSpecs(t, "Integration Suite")
 }
 
+// Manager runs the full manager exactly once for the whole ordered container.
+// Starting it per spec fails in CI: controller-runtime validates controller names
+// against its process-global metrics registry, so a second manager.Run in the same
+// process aborts with "controller with name noop already exists".
 var _ = Describe("Manager", Ordered, func() {
 	var (
 		env    *envtest.Environment
@@ -55,6 +59,13 @@ var _ = Describe("Manager", Ordered, func() {
 		scheme := runtime.NewScheme()
 		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
 
+		// The webhook server only starts when it has certificates to serve
+		// (see internal/manager/run.go), so materialize a self-signed pair.
+		certDir, err := os.MkdirTemp("", "webhook-certs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(writeSelfSignedWebhookCerts(certDir)).To(Succeed())
+		DeferCleanup(func() { _ = os.RemoveAll(certDir) })
+
 		ctx, cancel = context.WithCancel(context.Background())
 		go func() {
 			defer GinkgoRecover()
@@ -64,6 +75,9 @@ var _ = Describe("Manager", Ordered, func() {
 				MetricsBindAddress:     "127.0.0.1:28443",
 				HealthProbeBindAddress: "127.0.0.1:28081",
 				WebhookPort:            29443,
+				WebhookCertPath:        certDir,
+				WebhookCertName:        "tls.crt",
+				WebhookCertKey:         "tls.key",
 				MetricsSecure:          false,
 				LeaderElection:         false,
 				ControllerOptions: controller.Options{
@@ -88,8 +102,12 @@ var _ = Describe("Manager", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		cancel()
-		Expect(env.Stop()).To(Succeed())
+		if cancel != nil {
+			cancel()
+		}
+		if env != nil {
+			Expect(env.Stop()).To(Succeed())
+		}
 	})
 
 	It("serves metrics containing controller-runtime queue depth", func() {

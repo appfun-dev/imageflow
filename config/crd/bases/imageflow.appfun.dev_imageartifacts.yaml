@@ -1,0 +1,177 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: imageartifacts.imageflow.appfun.dev
+spec:
+  group: imageflow.appfun.dev
+  names:
+    kind: ImageArtifact
+    listKind: ImageArtifactList
+    plural: imageartifacts
+    singular: imageartifact
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.imageReference
+      name: ImageReference
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImageArtifact is the cluster-scoped, content-addressed image metadata store:
+          one object per digest, globally deduplicated (ADR-002 R2). spec/status are
+          controller-owned; the user-writable surface is exactly metadata.annotations.
+          Write access = controller SA + platform-admin RBAC.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ImageArtifactSpec is the content-addressed image metadata (ADR-002 R2).
+              It is written once by the controller at registration time (Import/Mapping paths)
+              and never updated: the artifact identity is the digest, so the spec is immutable
+              by construction. The CEL transition rule below rejects every spec update —
+              including user writes — without depending on webhook availability; the user's
+              only writable surface on this object is metadata.annotations (which the
+              controller preserves and never overwrites).
+            properties:
+              architecture:
+                description: Architecture of the image, e.g. amd64.
+                maxLength: 64
+                type: string
+              created:
+                description: Created is the image creation time from the registry
+                  metadata.
+                format: date-time
+                type: string
+              digest:
+                description: |-
+                  Digest is the immutable image identity, sha256:<64hex>. The object name is
+                  derived from it (sha256-<64hex>, RFC 1123); one artifact per digest exists
+                  cluster-wide (global dedup).
+                pattern: ^sha256:[0-9a-f]{64}$
+                type: string
+              imageReference:
+                description: |-
+                  ImageReference is a canonical digest reference <repo>@sha256:<64hex>
+                  observed at registration time.
+                pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
+                type: string
+              mediaType:
+                description: MediaType of the image manifest, e.g. application/vnd.oci.image.manifest.v1+json.
+                maxLength: 512
+                type: string
+              os:
+                description: OS of the image, e.g. linux.
+                maxLength: 64
+                type: string
+              sizeBytes:
+                description: |-
+                  SizeBytes is the total size of the image blobs as reported by the registry.
+                  ImageFlow stores metadata only, never blobs (ADR-007).
+                format: int64
+                minimum: 0
+                type: integer
+            required:
+            - digest
+            type: object
+            x-kubernetes-validations:
+            - message: ImageArtifact spec is controller-owned and immutable; only
+                metadata.annotations are user-writable (ADR-002 R2)
+              rule: self == oldSelf
+          status:
+            description: |-
+              ImageArtifactStatus is controller-owned status synced from the registration
+              paths. User writes are structurally impossible: the status subresource strips
+              status from main-endpoint writes, and /status RBAC is restricted to the
+              controller service account (ADR-002 R2, P5 RBAC). CRD-level CEL cannot be
+              identity-aware, so it guards the spec instead (see ImageArtifactSpec).
+            properties:
+              conditions:
+                description: Conditions of the artifact, keyed by type.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

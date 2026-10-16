@@ -105,6 +105,17 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("create manager: %w", err)
 	}
 
+	// controller-runtime adds the webhook server to the manager runnables lazily,
+	// on the first GetWebhookServer call. ImageFlow ships a single webhook service
+	// (ADR-001) that must listen as soon as the process is configured with
+	// certificates, even before handlers are registered, so touch the server here
+	// to start it eagerly. Without a certificate path TLS serving is impossible;
+	// the server is then intentionally left unstarted (webhook enablement and
+	// cert-manager wiring land with the webhook ticket).
+	if opts.WebhookCertPath != "" {
+		_ = mgr.GetWebhookServer()
+	}
+
 	if err := controller.Setup(mgr, opts.ControllerOptions); err != nil {
 		return fmt.Errorf("set up controllers: %w", err)
 	}

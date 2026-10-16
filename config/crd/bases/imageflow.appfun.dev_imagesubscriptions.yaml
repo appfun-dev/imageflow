@@ -1,0 +1,524 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: imagesubscriptions.imageflow.appfun.dev
+spec:
+  group: imageflow.appfun.dev
+  names:
+    kind: ImageSubscription
+    listKind: ImageSubscriptionList
+    plural: imagesubscriptions
+    singular: imagesubscription
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.source.name
+      name: Source
+      type: string
+    - jsonPath: .status.rolloutStatus
+      name: Rollout
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ImageSubscription declares that the image fields of N workload targets follow a
+          catalog stream tag (ADR-002 R3, ADR-003, ADR-005, ADR-008). The value written to
+          targets is always a digest reference; delivery is latest-wins with per-field SSA
+          exclusivity; per-target outcomes are reported independently and aggregated to
+          the worst state.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ImageSubscriptionSpec declares source + targets (+ optional per-target status
+              policy). Users own the spec; the controller owns the status.
+            properties:
+              source:
+                description: |-
+                  Source of the image changes: a catalog stream tag in logical
+                  "<stream>:<tag>" form (ADR-002). Cross-namespace sources are allowed;
+                  authorization follows ADR-003 (SubjectAccessReview of the subscription
+                  creator against every target).
+                properties:
+                  kind:
+                    description: Kind of the source. v1 supports ImageStreamTag only.
+                    enum:
+                    - ImageStreamTag
+                    type: string
+                  name:
+                    description: Name in logical "<stream>:<tag>" form, e.g. "payments-api:stable".
+                    maxLength: 512
+                    minLength: 3
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace of the source stream; may differ from the subscription namespace
+                      (catalog namespace is imageflow-system).
+                    maxLength: 63
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                - namespace
+                type: object
+              targets:
+                description: |-
+                  Targets are the workloads whose image fields follow the source. One source
+                  may drive many targets across namespaces (user story 22).
+                items:
+                  description: |-
+                    SubscriptionTarget declares one workload whose image fields follow the
+                    subscription source. Locator fields are mutually exclusive: built-in Kinds
+                    (Deployment/StatefulSet/DaemonSet, ADR-006) locate images by containerNames;
+                    third-party CRDs locate them by restricted imageFields paths (ADR-005 grammar).
+
+                    Division of enforcement (spec decision 6): the mutual exclusion of
+                    containerNames/imageFields, the imageFields path grammar, path overlap and
+                    duplicate detection are validated by the T3 validating webhook — deliberately
+                    NOT by CRD-level CEL here, so webhook-owned named cases stay testable. The
+                    structural shape below only guarantees both locators exist and are well-formed
+                    strings.
+                  properties:
+                    containerNames:
+                      description: |-
+                        ContainerNames locates image fields of built-in workload Kinds by container
+                        name (pod template containers). Required non-empty for built-in Kinds; no
+                        default guessing is performed (spec decision 6). Mutually exclusive with
+                        imageFields (webhook-enforced).
+                      items:
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    imageFields:
+                      description: |-
+                        ImageFields locates image fields of third-party CRDs by restricted path
+                        (ADR-005 grammar, e.g. .spec.runtime.containers[name=edge].image). Full
+                        grammar, overlap and duplicate validation is webhook-enforced (T3).
+                        Mutually exclusive with containerNames.
+                      items:
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    statusPolicyRef:
+                      description: |-
+                        StatusPolicyRef optionally references the CUE status policy ConfigMap used
+                        to evaluate rollout/health for this target (ADR-005 §4). Without an
+                        evaluable policy, rollout/health report Unknown — never success.
+                      properties:
+                        key:
+                          description: Key of the policy document inside the ConfigMap
+                            data.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        name:
+                          description: Name of the ConfigMap holding the policy.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: Namespace of the ConfigMap.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - key
+                      - name
+                      - namespace
+                      type: object
+                    targetRef:
+                      description: TargetRef locates the workload object.
+                      properties:
+                        apiVersion:
+                          description: APIVersion of the target object, e.g. apps/v1.
+                          maxLength: 256
+                          minLength: 1
+                          type: string
+                        kind:
+                          description: Kind of the target object, e.g. Deployment.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        name:
+                          description: Name of the target object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the target object. Targets may live in any namespace;
+                            cross-namespace access is authorized via SubjectAccessReview (ADR-003).
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                  required:
+                  - targetRef
+                  type: object
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+            required:
+            - source
+            - targets
+            type: object
+          status:
+            description: ImageSubscriptionStatus is the controller-owned observation
+              surface.
+            properties:
+              conditions:
+                description: Conditions of the whole subscription, keyed by type.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the subscription generation last
+                  processed.
+                format: int64
+                type: integer
+              recentDeliveries:
+                description: |-
+                  RecentDeliveries keeps the most recent delivery results, bounded to
+                  SubscriptionDeliveryMaxItems (5) at CRD level (ADR-008); overflow falls to
+                  kube Events and audit logs.
+                items:
+                  description: |-
+                    DeliveryResult records one image change delivered to one target (design §12.9,
+                    GLOSSARY "Delivery Result"). ImageSubscription.status.recentDeliveries keeps the
+                    most recent SubscriptionDeliveryMaxItems (5) entries (ADR-008); the full history
+                    lives in kube Events and the cluster audit pipeline.
+                  properties:
+                    healthResult:
+                      description: HealthResult is the health outcome at record time.
+                      enum:
+                      - Healthy
+                      - Unhealthy
+                      - Unknown
+                      type: string
+                    imageApplied:
+                      description: ImageApplied reports whether the field write succeeded.
+                      type: boolean
+                    newImage:
+                      description: NewImage is the delivered digest reference <repo>@sha256:<64hex>.
+                      pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
+                      type: string
+                    observedAt:
+                      description: ObservedAt is when this delivery outcome was observed.
+                      format: date-time
+                      type: string
+                    oldImage:
+                      description: |-
+                        OldImage is the previously delivered digest reference, empty for the first
+                        delivery to this target.
+                      maxLength: 2048
+                      type: string
+                    reason:
+                      description: Reason is a stable machine-readable reason.
+                      maxLength: 256
+                      type: string
+                    rolloutResult:
+                      description: |-
+                        RolloutResult is the rollout outcome at record time, including Superseded
+                        (latest-wins, ADR-008) and Conflict terminal states.
+                      enum:
+                      - Progressing
+                      - Succeeded
+                      - Failed
+                      - Unknown
+                      - Superseded
+                      - Conflict
+                      type: string
+                    source:
+                      description: Source is the subscription source at delivery time.
+                      properties:
+                        kind:
+                          description: Kind of the source. v1 supports ImageStreamTag
+                            only.
+                          enum:
+                          - ImageStreamTag
+                          type: string
+                        name:
+                          description: Name in logical "<stream>:<tag>" form, e.g.
+                            "payments-api:stable".
+                          maxLength: 512
+                          minLength: 3
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the source stream; may differ from the subscription namespace
+                            (catalog namespace is imageflow-system).
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    targetRef:
+                      description: TargetRef is the workload this delivery went to.
+                      properties:
+                        apiVersion:
+                          description: APIVersion of the target object, e.g. apps/v1.
+                          maxLength: 256
+                          minLength: 1
+                          type: string
+                        kind:
+                          description: Kind of the target object, e.g. Deployment.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        name:
+                          description: Name of the target object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the target object. Targets may live in any namespace;
+                            cross-namespace access is authorized via SubjectAccessReview (ADR-003).
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                  required:
+                  - newImage
+                  - observedAt
+                  - source
+                  - targetRef
+                  type: object
+                maxItems: 5
+                type: array
+                x-kubernetes-list-type: atomic
+              rolloutStatus:
+                description: |-
+                  RolloutStatus is the aggregate worst-state across targets
+                  (Failed > Unknown > Progressing > Succeeded, ADR-008). No cross-target
+                  rollback exists.
+                enum:
+                - Progressing
+                - Succeeded
+                - Failed
+                - Unknown
+                - Superseded
+                - Conflict
+                type: string
+              targets:
+                description: Targets carries per-target Outcome Stages, one entry
+                  per spec target.
+                items:
+                  description: |-
+                    TargetDeliveryStatus is the per-target Outcome Stages report frozen by ADR-005
+                    §3: imageApplied must never be interpreted as rollout success; rollout and health
+                    are independent dimensions.
+                  properties:
+                    desiredImage:
+                      description: |-
+                        DesiredImage is the digest reference <repo>@sha256:<64hex> resolved from the
+                        source. Digest references only (ADR-005 §2).
+                      pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
+                      type: string
+                    healthStatus:
+                      description: |-
+                        HealthStatus is the health dimension for this target; Unknown without an
+                        evaluable status policy (ADR-005 §5).
+                      enum:
+                      - Healthy
+                      - Unhealthy
+                      - Unknown
+                      type: string
+                    imageApplied:
+                      description: |-
+                        ImageApplied reports whether the observed field value equals DesiredImage.
+                        true does NOT imply rollout success (ADR-005 §3).
+                      type: boolean
+                    lastTransitionTime:
+                      description: LastTransitionTime is when the target last changed
+                        rollout/health state.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message is a human-readable explanation.
+                      maxLength: 32768
+                      type: string
+                    nextRetryTime:
+                      description: NextRetryTime is when the controller will next
+                        retry a failed attempt.
+                      format: date-time
+                      type: string
+                    observedGeneration:
+                      description: ObservedGeneration is the subscription generation
+                        processed for this target.
+                      format: int64
+                      type: integer
+                    observedImage:
+                      description: |-
+                        ObservedImage is the image value currently observed in the target field(s).
+                        Before the first apply it may be any reference (tag or digest), so no
+                        pattern is enforced here.
+                      maxLength: 2048
+                      type: string
+                    reason:
+                      description: |-
+                        Reason is a stable machine-readable reason (e.g. Forbidden, Conflict,
+                        Unsupported, WaitingForRollout).
+                      maxLength: 256
+                      type: string
+                    retryCount:
+                      description: |-
+                        RetryCount is the number of consecutive failed apply/observe attempts for
+                        the current image change.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    rolloutStatus:
+                      description: |-
+                        RolloutStatus is the rollout dimension for this target, including the
+                        Superseded/Conflict terminal states (ADR-008).
+                      enum:
+                      - Progressing
+                      - Succeeded
+                      - Failed
+                      - Unknown
+                      - Superseded
+                      - Conflict
+                      type: string
+                    targetRef:
+                      description: TargetRef echoes the spec target this status belongs
+                        to.
+                      properties:
+                        apiVersion:
+                          description: APIVersion of the target object, e.g. apps/v1.
+                          maxLength: 256
+                          minLength: 1
+                          type: string
+                        kind:
+                          description: Kind of the target object, e.g. Deployment.
+                          maxLength: 63
+                          minLength: 1
+                          type: string
+                        name:
+                          description: Name of the target object.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace of the target object. Targets may live in any namespace;
+                            cross-namespace access is authorized via SubjectAccessReview (ADR-003).
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                  required:
+                  - targetRef
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
