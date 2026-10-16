@@ -70,6 +70,24 @@ Cardinality is bounded by construction: 3 operations × 6 results = at most 18 s
 
 Registration: the client registers these collectors with the `prometheus.Registerer` passed in `registry.Options.Registerer` (in the manager: `sigs.k8s.io/controller-runtime/pkg/metrics.Registry`); `nil` disables metrics.
 
+## T5 mirror metrics
+
+The mirror synthesis controller (`internal/controller`, controller name `mirror`) exposes write activity, bounded-window overflow and synthesis lag for the read-only ImageStreamTag/ImageTag views (ADR-002 R4/R9/R10, ADR-008).
+
+- `imageflow_mirror_object_writes_total{kind, action, result}` – Counter. Mirror object writes performed by the synthesis loop. An idempotent no-op reconcile performs no write at all and is not counted, which makes this counter the observability surface of the no-write-amplification contract.
+  - `kind` – one of `ImageStreamTag`, `ImageTag`.
+  - `action` – one of `create`, `update` (main resource; e.g. restoring a drifted ownerRef), `status_update`, `delete` (stale-mirror pruning and the cascade sweep after stream deletion).
+  - `result` – one of `success`, `error`.
+  - Cardinality is bounded by construction: 2 kinds × 4 actions × 2 results = at most 16 series.
+
+- `imageflow_mirror_events_truncated_total{kind}` – Counter. Mirror status event entries dropped by the bounded window (`--mirror-event-limit`, CRD cap `MirrorEventMaxItems` = 5), counted only when a status write occurred. Per ADR-008 the overflow additionally surfaces as an `EventSummaryTruncated` kube Event on the mirror object and in the audit log. Bounded: 2 series.
+
+- `imageflow_mirror_synthesis_lag_seconds{kind}` – Histogram. Age of the catalog association at the moment it was written to the mirror (injected clock now minus the association's `created` timestamp), observed only on actual mirror status writes. Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300`. ADR-002 promises seconds-level mirror lag; alert on p99 of this histogram. Bounded: 2 series × buckets.
+
+There are deliberately no `name`/`namespace` labels on these metrics — mirror identity would be unbounded; per-object detail belongs to structured logs and kube Events. Reconcile-level health is read from the unchanged controller-runtime metrics (`controller_runtime_reconcile_total{controller="mirror"}`, `workqueue_*{name="mirror"}`).
+
+Registration: the collectors are registered at package init with `sigs.k8s.io/controller-runtime/pkg/metrics.Registry` (the manager's registry), so they appear on the same metrics endpoint as the T1 exposure.
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.
