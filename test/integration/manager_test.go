@@ -31,14 +31,14 @@ func TestIntegration(t *testing.T) {
 	RunSpecs(t, "Integration Suite")
 }
 
-var _ = Describe("Manager", func() {
+var _ = Describe("Manager", Ordered, func() {
 	var (
 		env    *envtest.Environment
 		ctx    context.Context
 		cancel context.CancelFunc
 	)
 
-	BeforeEach(func() {
+	BeforeAll(func() {
 		assets := os.Getenv("KUBEBUILDER_ASSETS")
 		if assets == "" {
 			Skip("KUBEBUILDER_ASSETS not set")
@@ -87,7 +87,7 @@ var _ = Describe("Manager", func() {
 		}, 20*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
-	AfterEach(func() {
+	AfterAll(func() {
 		cancel()
 		Expect(env.Stop()).To(Succeed())
 	})
