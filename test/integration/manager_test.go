@@ -79,7 +79,7 @@ var _ = Describe("Manager", func() {
 			if err != nil {
 				return err
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("healthz status %d", resp.StatusCode)
 			}
@@ -98,7 +98,7 @@ var _ = Describe("Manager", func() {
 			if err != nil {
 				return ""
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			body, _ := io.ReadAll(resp.Body)
 			return string(body)
 		}, 10*time.Second, 500*time.Millisecond).Should(ContainSubstring("workqueue_depth"))
@@ -112,7 +112,7 @@ var _ = Describe("Manager", func() {
 		}
 		resp, err := client.Get("https://127.0.0.1:29443/")
 		Expect(err).NotTo(HaveOccurred())
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		// No handlers are registered, so the server returns 404, which proves it is listening.
 		Expect(resp.StatusCode).To(BeNumerically(">=", 400))
 		body, _ := io.ReadAll(resp.Body)
