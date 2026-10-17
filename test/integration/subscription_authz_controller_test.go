@@ -430,7 +430,7 @@ var _ = Describe("T8 subscription authorization gate", Label("t8"), Ordered, fun
 
 			result, err := reconciler.Reconcile(ctx, t8Request("t8-ac2-granular"))
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(t8HandPeriod)))
+			Expect(result.RequeueAfter).To(Equal(t8HandPeriod))
 
 			got = t8GetSub("t8-ac2-granular")
 			cond := t8Condition(got)
