@@ -51,6 +51,8 @@ const (
 	t7CanaryPassword = "t7-canary-super-secret-password"
 	t7CanaryUser     = "imageflow+t7robot"
 	t7PullSecretName = "quay-pull-secret"
+	// t7TestIntervalSeconds is the per-tag cadence the scheduled tests use.
+	t7TestIntervalSeconds = 600
 )
 
 var (
@@ -115,6 +117,7 @@ func (s *stubRegistry) ListTags(_ context.Context, ref registry.Reference, creds
 type t7TestEnv struct {
 	t         *testing.T
 	client    client.Client
+	watchCl   client.WithWatch
 	recorder  *record.FakeRecorder
 	clock     *clock.Fake
 	cfg       config.Config
@@ -143,9 +146,11 @@ func newT7TestEnv(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object)
 	if funcs != nil {
 		builder = builder.WithInterceptorFuncs(*funcs)
 	}
+	built := builder.Build()
 	env := &t7TestEnv{
 		t:        t,
-		client:   builder.Build(),
+		client:   built,
+		watchCl:  built,
 		recorder: record.NewFakeRecorder(256),
 		clock:    clock.NewFake(t7TestT0),
 		cfg: config.Config{
@@ -188,9 +193,12 @@ func t7Stream(tags ...imageflowv1alpha1.TagReference) *imageflowv1alpha1.ImageSt
 	}
 }
 
-func t7ScheduledTag(name, from string, intervalSeconds int32) imageflowv1alpha1.TagReference {
+// t7ScheduledTag renders a scheduled tag declaration polling from, with the
+// interval every cadence test uses (10 minutes).
+func t7ScheduledTag(from string) imageflowv1alpha1.TagReference {
+	intervalSeconds := int32(t7TestIntervalSeconds)
 	return imageflowv1alpha1.TagReference{
-		Name: name,
+		Name: t7TestTag,
 		From: &imageflowv1alpha1.ImageSourceReference{Kind: importSourceKindDockerImage, Name: from},
 		ImportPolicy: imageflowv1alpha1.TagImportPolicy{
 			Scheduled:       ptrTrue(),
@@ -256,7 +264,7 @@ func countEvents(events []string, reason string) int {
 	return n
 }
 
-func (e *t7TestEnv) streamItems(tag string) []imageflowv1alpha1.TagEvent {
+func (e *t7TestEnv) streamItems() []imageflowv1alpha1.TagEvent {
 	e.t.Helper()
 	var stream imageflowv1alpha1.ImageStream
 	if err := e.client.Get(context.Background(),
@@ -264,7 +272,7 @@ func (e *t7TestEnv) streamItems(tag string) []imageflowv1alpha1.TagEvent {
 		e.t.Fatalf("get stream: %v", err)
 	}
 	for _, entry := range stream.Status.Tags {
-		if entry.Tag == tag {
+		if entry.Tag == t7TestTag {
 			return entry.Items
 		}
 	}
@@ -310,7 +318,7 @@ func TestImportReconcileResolvesTagAndRegistersThroughSharedMachinery(t *testing
 		t.Errorf("unexpected reference handed to the S2 seam: %+v", got)
 	}
 
-	items := env.streamItems(t7TestTag)
+	items := env.streamItems()
 	if len(items) != 1 || items[0].Digest != t7DigestA || items[0].ImageReference != t7RefA {
 		t.Fatalf("stream association not recorded: %+v", items)
 	}
@@ -327,6 +335,14 @@ func TestImportReconcileResolvesTagAndRegistersThroughSharedMachinery(t *testing
 		t.Errorf("artifact spec = %+v", artifact.Spec)
 	}
 
+	assertImportSuccessSurfaces(t, env)
+}
+
+// assertImportSuccessSurfaces checks the audit and metric surface of one
+// successful first-association import (split out to keep the registering test
+// readable).
+func assertImportSuccessSurfaces(t *testing.T, env *t7TestEnv) {
+	t.Helper()
 	events := env.events()
 	if countEvents(events, EventReasonImportSucceeded) != 1 {
 		t.Errorf("want one %s event, got %v", EventReasonImportSucceeded, events)
@@ -386,7 +402,7 @@ func TestImportReconcileNoDriftIsNoopWithoutImageChange(t *testing.T) {
 	env.reconcileImport("import-1")
 	first := env.events()
 	changedBefore := countEvents(first, EventReasonImageChanged)
-	itemsBefore := env.streamItems(t7TestTag)
+	itemsBefore := env.streamItems()
 
 	env.clock.Advance(time.Minute)
 	env.reconcileImport("import-2")
@@ -399,7 +415,7 @@ func TestImportReconcileNoDriftIsNoopWithoutImageChange(t *testing.T) {
 	if !strings.Contains(cond.Message, "No drift") {
 		t.Errorf("message must state the absence of drift, got %q", cond.Message)
 	}
-	items := env.streamItems(t7TestTag)
+	items := env.streamItems()
 	if len(items) != len(itemsBefore) {
 		t.Errorf("history must not grow without drift: %v -> %v", itemsBefore, items)
 	}
@@ -426,7 +442,7 @@ func TestImportReconcileDetectsTagDriftAndAttributesItToTheImportPath(t *testing
 	env.clock.Advance(10 * time.Minute)
 	env.reconcileImport("import-b")
 
-	items := env.streamItems(t7TestTag)
+	items := env.streamItems()
 	if len(items) != 2 || items[0].Digest != t7DigestB || items[1].Digest != t7DigestA {
 		t.Fatalf("drift must be recorded most-recent-first: %+v", items)
 	}
@@ -454,6 +470,57 @@ func TestImportReconcileDetectsTagDriftAndAttributesItToTheImportPath(t *testing
 	}
 }
 
+func TestImportScheduledFailureIsReportedOnTheStream(t *testing.T) {
+	newTask := func(name string, scheduled bool) *imageflowv1alpha1.ImageStreamImport {
+		task := t7ImportTask(name, t7TagRef)
+		if scheduled {
+			task.Labels = map[string]string{LabelImportSource: LabelValueScheduledImport}
+			task.Annotations = map[string]string{AnnotationScheduledInterval: "10m0s"}
+		}
+		return task
+	}
+
+	t.Run("scheduled", func(t *testing.T) {
+		env := newT7TestEnv(t, nil, t7Stream(imageflowv1alpha1.TagReference{Name: t7TestTag}),
+			newTask("import-scheduled-fail", true))
+		env.images.err = &registry.NotFoundError{Registry: t7TestRegistry, Target: t7TagRef,
+			Code: "MANIFEST_UNKNOWN"}
+
+		env.reconcileImport("import-scheduled-fail")
+
+		events := env.events()
+		onStream := findEvent(events, EventReasonScheduledImportFailed)
+		if onStream == "" {
+			t.Fatalf("want a %s event on the stream, got %v",
+				EventReasonScheduledImportFailed, events)
+		}
+		for _, want := range []string{importFailManifestNotFound, t7TestTag, t7TagRef, "10m0s"} {
+			if !strings.Contains(onStream, want) {
+				t.Errorf("stream event %q must mention %q", onStream, want)
+			}
+		}
+		if findEvent(events, EventReasonImportFailed) == "" {
+			t.Errorf("the task must carry its own failure event: %v", events)
+		}
+	})
+
+	t.Run("on-demand stays on the task", func(t *testing.T) {
+		env := newT7TestEnv(t, nil, t7Stream(imageflowv1alpha1.TagReference{Name: t7TestTag}),
+			newTask("import-ondemand-fail", false))
+		env.images.err = &registry.NotFoundError{Registry: t7TestRegistry, Target: t7TagRef}
+
+		env.reconcileImport("import-ondemand-fail")
+
+		events := env.events()
+		if findEvent(events, EventReasonScheduledImportFailed) != "" {
+			t.Errorf("an on-demand failure must not spam the stream: %v", events)
+		}
+		if findEvent(events, EventReasonImportFailed) == "" {
+			t.Errorf("want the task failure event, got %v", events)
+		}
+	})
+}
+
 func TestImportReconcileTerminalTaskIsEffectFree(t *testing.T) {
 	env := newT7TestEnv(t, nil, t7Stream(imageflowv1alpha1.TagReference{Name: t7TestTag}),
 		t7ImportTask("import-1", t7TagRef))
@@ -473,6 +540,49 @@ func TestImportReconcileTerminalTaskIsEffectFree(t *testing.T) {
 	}
 	if events := env.events(); len(events) != 0 {
 		t.Errorf("a terminal task must emit nothing, got %v", events)
+	}
+}
+
+func TestImportReconcileRechecksTerminalStateAgainstTheAPIReader(t *testing.T) {
+	// A queued re-reconcile can read a stale (still non-terminal) task from the
+	// manager cache. The API reader is strongly consistent, so the controller
+	// must re-check with it before performing any effect: no duplicate registry
+	// call, no duplicate Event, no duplicate metric.
+	env := newT7TestEnv(t, nil, t7Stream(imageflowv1alpha1.TagReference{Name: t7TestTag}),
+		t7ImportTask("import-done", t7TagRef))
+	env.reconcileImport("import-done")
+	_ = env.events()
+	resolveBefore := env.images.resolveCalls
+
+	lagging := interceptor.NewClient(env.watchCl, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey,
+			obj client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if task, ok := obj.(*imageflowv1alpha1.ImageStreamImport); ok {
+				task.Status.Conditions = nil // pretend the cache has not caught up
+			}
+			return nil
+		},
+	})
+	reconciler := NewImportReconciler(lagging, env.client, env.recorder, env.clock,
+		env.cfg, env.images, env.metrics)
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: t7TestNS, Name: "import-done"},
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if env.images.resolveCalls != resolveBefore {
+		t.Error("the stale-cache re-reconcile must not call the registry again")
+	}
+	if events := env.events(); len(events) != 0 {
+		t.Errorf("the stale-cache re-reconcile must not emit Events, got %v", events)
+	}
+	if got := testutil.ToFloat64(env.metrics.tasks.WithLabelValues(
+		importResultSuccess, imageflowv1alpha1.ReasonSucceeded)); got != 1 {
+		t.Errorf("tasks_total{success} = %v, want exactly 1", got)
 	}
 }
 
@@ -740,7 +850,7 @@ func TestImportTransientAPIErrorsRequeueWithoutTerminalStatus(t *testing.T) {
 		t.Errorf("the task must stay open after a transient write failure: %+v", task.Status)
 	}
 	// The catalog side effects landed; a retry must not duplicate them.
-	if items := env.streamItems(t7TestTag); len(items) != 1 {
+	if items := env.streamItems(); len(items) != 1 {
 		t.Errorf("registration should have landed once, got %+v", items)
 	}
 }
@@ -852,7 +962,7 @@ func TestImportScheduleDecision(t *testing.T) {
 }
 
 func TestScheduledImportCreatesOwnedLabelledTaskAndRequeues(t *testing.T) {
-	tag := t7ScheduledTag(t7TestTag, t7TagRef, 600)
+	tag := t7ScheduledTag(t7TagRef)
 	env := newT7TestEnv(t, nil, t7Stream(tag))
 
 	res, err := env.scheduled.Reconcile(context.Background(), ctrl.Request{
@@ -946,7 +1056,7 @@ func TestScheduledImportIgnoresTagsWithoutPolicyOrSource(t *testing.T) {
 func ptrFalse() *bool { v := false; return &v }
 
 func TestScheduledImportDoesNotStackWhileATaskIsInFlight(t *testing.T) {
-	tag := t7ScheduledTag(t7TestTag, t7TagRef, 600)
+	tag := t7ScheduledTag(t7TagRef)
 	env := newT7TestEnv(t, nil, t7Stream(tag))
 
 	for i := range 2 {
@@ -967,7 +1077,7 @@ func TestScheduledImportDoesNotStackWhileATaskIsInFlight(t *testing.T) {
 }
 
 func TestScheduledImportRunsAgainAfterTheIntervalUnderTheInjectedClock(t *testing.T) {
-	tag := t7ScheduledTag(t7TestTag, t7TagRef, 600)
+	tag := t7ScheduledTag(t7TagRef)
 	env := newT7TestEnv(t, nil, t7Stream(tag))
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: t7TestNS, Name: t7TestStream}}
 
@@ -994,7 +1104,7 @@ func TestScheduledImportRunsAgainAfterTheIntervalUnderTheInjectedClock(t *testin
 }
 
 func TestScheduledImportReportsCreationFailures(t *testing.T) {
-	tag := t7ScheduledTag(t7TestTag, t7TagRef, 600)
+	tag := t7ScheduledTag(t7TagRef)
 	boom := apierrors.NewInternalError(errors.New("simulated create outage"))
 	env := newT7TestEnv(t, &interceptor.Funcs{
 		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object,

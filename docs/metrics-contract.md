@@ -117,6 +117,41 @@ There are deliberately no `name`/`namespace` labels on these metrics — mirror 
 
 Registration: the collectors are registered at package init with `sigs.k8s.io/controller-runtime/pkg/metrics.Registry` (the manager's registry), so they appear on the same metrics endpoint as the T1 exposure.
 
+## T7 import metrics
+
+The Import pull path (`internal/controller`: ImageStreamImport reconciler + scheduled-import cadence controller) exposes import duration and failure rate, the catalog outcome of successful imports (drift detection) and scheduled task creation activity. One observation is recorded per task that reaches a terminal state and per scheduled task creation; re-reconciling a finished task records nothing.
+
+- `imageflow_import_duration_seconds{result}` – Histogram. **Import duration**: the task lifetime (`status.completedAt - status.startedAt`, both stamped from the injected clock seam) observed when the task reaches its terminal state. Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300`. The registry round trip itself is measured separately by the T6 client metrics (`imageflow_registry_request_duration_seconds{operation="resolve_digest"|"fetch_manifest"}`); the difference between the two is controller and API-server overhead.
+
+- `imageflow_import_tasks_total{result, reason}` – Counter. Total ImageStreamImport tasks that reached a terminal state. **Import failure rate** is derived from the `result` label, and the `reason` label breaks failures down by the same diagnosable code that prefixes the `Complete` condition message:
+
+  ```promql
+  sum(rate(imageflow_import_tasks_total{result="failure"}[5m]))
+    /
+  sum(rate(imageflow_import_tasks_total[5m]))
+  ```
+
+  ```promql
+  sum by (reason) (rate(imageflow_import_tasks_total{result="failure"}[15m]))
+  ```
+
+- `imageflow_import_registrations_total{outcome}` – Counter. Catalog registrations performed by SUCCESSFUL imports. On the pull path `changed` is the drift-detection counter: the external tag pointed at a different digest than the catalog, so a real Image Change was recorded (the corresponding Events are `TagDriftDetected` on the stream and `ImageChanged` attributed to `ImageStreamImport`). `noop` means the tag already referenced the resolved digest: no Image Change, no stream status write.
+
+- `imageflow_import_scheduled_creations_total{result}` – Counter. ImageStreamImport tasks created by the scheduled-import controller (`spec.tags[].importPolicy.scheduled`). `error` means a due task could not be created; the cause is reported on the stream as a `ScheduledImportError` Event. Not-due reconciles record nothing, which keeps the counter a clean "imports per period" signal.
+
+Label vocabularies (bounded; this is the documented exception to the reconcile-oriented `result` values in the label convention above):
+
+- `result` (tasks / duration) – one of `success`, `failure` (mirrors the terminal `Complete` condition reason `Succeeded`/`Failed`).
+- `reason` – `Succeeded` for successes; for failures one of the frozen import failure codes: `NetworkUnreachable`, `RegistryTimeout` (network problems); `Unauthorized`, `PullSecretNotFound`, `PullSecretInvalid` (credential problems); `ManifestNotFound`, `DigestMismatch` (manifest problems); `RegistryDenied` (allowlist/SSRF guard), `RegistryError` (429/5xx and protocol violations), `InvalidImageReference`, `UnsupportedImageSourceKind`, `StreamNotFound` (request/catalog problems). Registry-side detail at the HTTP level belongs to the T6 `result` vocabulary (`denied`, `not_found`, `unauthorized`, `timeout`, `error`).
+- `outcome` – one of `changed`, `noop` (same vocabulary as `imageflow_mapping_registrations_total`, minus `failed`: import failures are counted by `imageflow_import_tasks_total`).
+- `result` (scheduled creations) – one of `created`, `error`.
+
+Cardinality is bounded by construction: 2 + (2 results × 12 reasons, of which only 12 pairs occur) + 2 + 2 = at most ~18 series (plus histogram buckets). There are deliberately **no registry-host, namespace or name labels** — hosts come from user-authored references and task objects are short-lived and high-churn, so per-object attribution belongs to kube Events (`ImportSucceeded`, `ImportFailed`, `TagDriftDetected`, `ScheduledImportCreated`, `ScheduledImportError`, plus the shared `ImageChanged`, `ImageArtifactCreated`, `TagHistoryOverflow`, `TaskGarbageCollected`) and structured logs. Credential material can never reach a label: the label vocabularies are closed enumerations and the registry host is not a label.
+
+Task GC of the Import kind is instrumented by T4 and is not duplicated here: `imageflow_mapping_gc_deletions_total{kind="import"}`.
+
+Registration: the T7 registration units register these collectors once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`); duplicate registration attempts are tolerated so test managers can coexist.
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.

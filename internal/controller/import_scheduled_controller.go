@@ -84,6 +84,10 @@ const (
 // the tasks it creates (cascade GC with the stream).
 const scheduledTaskOwnerKind = "ImageStream"
 
+// AnnotationScheduledInterval records the effective interval a task was created
+// with. It is audit metadata only — the schedule is never read back from it.
+const AnnotationScheduledInterval = "imageflow.appfun.dev/scheduled-interval"
+
 // ScheduledImportReconciler polls ImageStreams for due scheduled tag imports.
 type ScheduledImportReconciler struct {
 	client   client.Client
@@ -227,10 +231,6 @@ func (r *ScheduledImportReconciler) createScheduledTask(
 	}
 	return task, nil
 }
-
-// AnnotationScheduledInterval records the effective interval a task was created
-// with. It is audit metadata only — the schedule is never read back from it.
-const AnnotationScheduledInterval = "imageflow.appfun.dev/scheduled-interval"
 
 // listScheduledTasks returns the scheduled tasks of one namespace. The label
 // selector keeps user-created (on-demand) tasks out of the schedule; the

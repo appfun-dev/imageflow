@@ -446,8 +446,7 @@ func writeRegistryError(w http.ResponseWriter, status int, code, message string)
 // metadata exists here — the double never serves blobs, mirroring ImageFlow's
 // own boundary (ADR-007: never blob/layer data).
 func Schema2Manifest(seed string) []byte {
-	configBlob := []byte(`{"architecture":"amd64","os":"linux","seed":` + strconv.Quote(seed) + `}`)
-	layerBlob := []byte("imageflow-registry-double-rootfs:" + seed)
+	configBlob, layerBlob := Schema2Blobs(seed)
 	manifest := map[string]any{
 		"schemaVersion": 2,
 		"mediaType":     registry.MediaTypeDockerSchema2,
@@ -459,6 +458,16 @@ func Schema2Manifest(seed string) []byte {
 		panic(err)
 	}
 	return payload
+}
+
+// Schema2Blobs returns the config and rootfs-layer blobs that
+// Schema2Manifest(seed) references. A test that pushes the manifest into a REAL
+// registry (the quay leg of the e2e switch) uploads exactly these two blobs, so
+// both legs serve byte-identical content for the same seed.
+func Schema2Blobs(seed string) (config []byte, layer []byte) {
+	config = []byte(`{"architecture":"amd64","os":"linux","seed":` + strconv.Quote(seed) + `}`)
+	layer = []byte("imageflow-registry-double-rootfs:" + seed)
+	return config, layer
 }
 
 // DigestOf computes the "sha256:<64 hex>" digest of a payload.

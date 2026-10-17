@@ -98,6 +98,10 @@ const (
 	// EventReasonScheduledImportError reports a scheduled task that could not
 	// be created (never silent, user story 32 pattern).
 	EventReasonScheduledImportError = "ScheduledImportError"
+	// EventReasonScheduledImportFailed reports a scheduled import that failed on
+	// the STREAM: the task itself is short-lived (TTL GC), so a repeatedly
+	// failing poll must also be visible where operators look at the catalog.
+	EventReasonScheduledImportFailed = "ScheduledImportFailed"
 )
 
 // Failure taxonomy of the Import path: the code prefixes the Complete
@@ -338,6 +342,21 @@ func (r *ImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	if taskIsTerminal(&task.Status.TaskObjectStatus) {
 		return ctrl.Result{}, nil // idempotence: a finished task has zero effects
+	}
+	// The manager cache can lag behind this controller's own status writes, and
+	// the workqueue re-runs a reconcile for every watch event it saw while the
+	// previous one was working. Re-confirm against the API server (strongly
+	// consistent) before performing ANY effect, so a queued re-reconcile of an
+	// already finished task stays effect-free: no duplicate registry call, no
+	// duplicate Event, no duplicate metric.
+	if err := r.apiReader.Get(ctx, req.NamespacedName, &task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("re-read import task: %w", err)
+	}
+	if taskIsTerminal(&task.Status.TaskObjectStatus) {
+		return ctrl.Result{}, nil
 	}
 
 	if err := r.ensureStartedAt(ctx, req.NamespacedName); err != nil {
@@ -698,10 +717,41 @@ func (r *ImportReconciler) failTask(
 	r.metrics.tasks.WithLabelValues(importResultFailure, failure.code).Inc()
 	r.observeTaskDuration(completed, importResultFailure)
 	r.recorder.Eventf(completed, corev1.EventTypeWarning, EventReasonImportFailed, "%s", failure.message)
+	r.reportScheduledFailureOnStream(ctx, completed, failure)
 	log.FromContext(ctx).Info("import failed",
 		"stream", task.Spec.Stream, "tag", task.Spec.Tag, "from", task.Spec.From.Name,
 		"reason", failure.code, "trigger", importTrigger(completed))
 	return ctrl.Result{}, nil
+}
+
+// reportScheduledFailureOnStream mirrors a FAILED SCHEDULED import onto the
+// stream as a Warning Event. Scheduled tasks are created by the controller and
+// collected by TTL GC, so without this the only trace of a failing poll would
+// be a churning set of task objects; on-demand failures stay on the task, which
+// the user created and therefore looks at. Best effort: the task is already
+// terminal, so a missing or unreadable stream must not change the outcome.
+func (r *ImportReconciler) reportScheduledFailureOnStream(
+	ctx context.Context,
+	task *imageflowv1alpha1.ImageStreamImport,
+	failure importFailure,
+) {
+	if task.Labels[LabelImportSource] != LabelValueScheduledImport {
+		return
+	}
+	var stream imageflowv1alpha1.ImageStream
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Spec.Stream}
+	if err := r.client.Get(ctx, key, &stream); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "cannot report the scheduled import failure on the stream",
+				"stream", key)
+		}
+		return
+	}
+	r.recorder.Eventf(&stream, corev1.EventTypeWarning, EventReasonScheduledImportFailed,
+		"Scheduled import of tag %q from %s failed (%s): %s — the poll repeats every %s; "+
+			"see ImageStreamImport %s for the full status",
+		task.Spec.Tag, task.Spec.From.Name, failure.code, failure.message,
+		task.Annotations[AnnotationScheduledInterval], task.Name)
 }
 
 // importCompletion is the terminal status payload (Complete=True, reason from

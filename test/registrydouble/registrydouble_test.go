@@ -141,7 +141,8 @@ func TestDoubleBasicAuthMatchesThePullSecretPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Anonymous access must be refused with the S2 unauthorized classification.
-	if _, err := client.ResolveDigest(ctx, referenceOf(srv), registry.Credentials{}); !errors.Is(err, registry.ErrUnauthorized) {
+	_, err = client.ResolveDigest(ctx, referenceOf(srv), registry.Credentials{})
+	if !errors.Is(err, registry.ErrUnauthorized) {
 		t.Fatalf("anonymous access must fail as unauthorized, got %v", err)
 	}
 
