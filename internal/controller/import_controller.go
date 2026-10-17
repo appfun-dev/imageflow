@@ -534,7 +534,9 @@ func (r *ImportReconciler) classifyResolveFailure(
 	ctx context.Context,
 	err error,
 ) (string, *importFailure, error) {
-	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		// Our own context is done (manager shutdown, reconcile deadline): the
+		// registry is not at fault and the task must stay open for the retry.
 		return "", nil, fmt.Errorf("resolve image reference: %w", err)
 	}
 	failure := classifyRegistryError(err)
