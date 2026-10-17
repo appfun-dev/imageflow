@@ -1,0 +1,39 @@
+# [CERTMANAGER] Serving certificate of the single ImageFlow webhook service
+# (ADR-001). The self-signed Issuer signs a Certificate whose Secret is mounted
+# into the manager deployment (config/default/manager_webhook_patch.yaml) and
+# consumed through --webhook-cert-path. The CA is injected into both webhook
+# configurations by cert-manager's cainjector via the replacements enabled in
+# config/default/kustomization.yaml.
+#
+# Metrics certificates deliberately stay out of scope here: the metrics
+# exposure posture (plaintext :8080 today) is a T12 deployment-hardening
+# decision; enabling secure metrics must not silently change the webhook chain.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+  name: selfsigned-issuer
+  namespace: system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+  name: serving-cert
+  namespace: system
+spec:
+  # SERVICE_NAME and SERVICE_NAMESPACE are substituted by the config/default
+  # replacements from the webhook Service metadata.
+  dnsNames:
+  - webhook-service.system.svc
+  - webhook-service.system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: selfsigned-issuer
+  secretName: webhook-server-cert

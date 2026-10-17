@@ -1,0 +1,207 @@
+package webhook
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
+	"github.com/appfun-dev/imageflow/internal/imagefields"
+)
+
+// sourceKindImageStreamTag is the only subscription source kind of v1
+// (ADR-002 R3, spec decision: v1 仅 kind=ImageStreamTag).
+const sourceKindImageStreamTag = "ImageStreamTag"
+
+// streamNameSeparator is the mirror-name separator banned inside ImageStream
+// names so the "<stream>--<tag>" / "<stream>--sha256-<hex>" encoding stays
+// injective when split on its first occurrence (ADR-002, ticket T3).
+const streamNameSeparator = "--"
+
+// ociTagPattern is the tag grammar frozen on TagReference.Name by the T2 CRD
+// shape; the SourceRef "<stream>:<tag>" tag part must match it so the logical
+// form always maps to a declarable stream tag.
+var ociTagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
+
+// builtinWorkloadKinds is the first-batch built-in adapter set (ADR-006).
+// Targets referencing one of these apps/v1 Kinds must locate images by
+// containerNames — required, non-empty, no default guessing (spec decision 6).
+var builtinWorkloadKinds = map[string]bool{
+	"Deployment":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+}
+
+// subscriptionGK identifies the ImageSubscription kind in Invalid errors.
+var subscriptionGK = schema.GroupKind{
+	Group: imageflowv1alpha1.GroupVersion.Group,
+	Kind:  "ImageSubscription",
+}
+
+// +kubebuilder:webhook:path=/validate-imageflow-appfun-dev-v1alpha1-imagesubscription,mutating=false,failurePolicy=fail,sideEffects=None,groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=create;update,versions=v1alpha1,name=vimagesubscription.kb.io,admissionReviewVersions=v1,timeoutSeconds=10
+
+// subscriptionValidator enforces the subscription shape rules that spec
+// decision 6 assigns to the validating webhook — deliberately NOT to CRD-level
+// CEL (T2 handoff): the SourceRef logical form, the containerNames/imageFields
+// mutual exclusion, the imageFields grammar and path duplicate/overlap
+// rejection.
+type subscriptionValidator struct{}
+
+var _ admission.CustomValidator = &subscriptionValidator{}
+
+// ValidateCreate implements admission.CustomValidator.
+func (v *subscriptionValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+	return nil, validateSubscriptionShape(obj.(*imageflowv1alpha1.ImageSubscription))
+}
+
+// ValidateUpdate implements admission.CustomValidator. The full shape is
+// re-validated on every update; the old object adds no exempt state.
+func (v *subscriptionValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+	return nil, validateSubscriptionShape(newObj.(*imageflowv1alpha1.ImageSubscription))
+}
+
+// ValidateDelete implements admission.CustomValidator; deletes always pass.
+func (v *subscriptionValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+	return nil, nil
+}
+
+// validateSubscriptionShape aggregates every shape violation of one
+// subscription into a single Invalid error, so a misconfiguration is rejected
+// as a whole with a complete report instead of one error at a time.
+func validateSubscriptionShape(sub *imageflowv1alpha1.ImageSubscription) error {
+	var errs field.ErrorList
+	errs = append(errs, validateSourceRef(field.NewPath("spec", "source"), sub.Spec.Source)...)
+	targetsPath := field.NewPath("spec", "targets")
+	for i := range sub.Spec.Targets {
+		errs = append(errs, validateTarget(targetsPath.Index(i), &sub.Spec.Targets[i])...)
+	}
+	if len(errs) > 0 {
+		return apierrors.NewInvalid(subscriptionGK, sub.Name, errs)
+	}
+	return nil
+}
+
+// validateSourceRef checks the logical "<stream>:<tag>" form (ADR-002): users
+// never write encoded mirror object names, and the referenced stream tag must
+// be declarable on an ImageStream (stream name grammar without "--", OCI tag
+// grammar).
+func validateSourceRef(p *field.Path, src imageflowv1alpha1.SubscriptionSourceRef) field.ErrorList {
+	var errs field.ErrorList
+	if src.Kind != sourceKindImageStreamTag {
+		errs = append(errs, field.NotSupported(p.Child("kind"), src.Kind, []string{sourceKindImageStreamTag}))
+	}
+	if strings.Count(src.Name, ":") != 1 {
+		return append(errs, field.Invalid(p.Child("name"), src.Name,
+			`must be the logical "<stream>:<tag>" form with exactly one ":"`+
+				` (users never write encoded mirror object names, ADR-002)`))
+	}
+	stream, tag, _ := strings.Cut(src.Name, ":")
+	if strings.Contains(stream, streamNameSeparator) {
+		errs = append(errs, field.Invalid(p.Child("name"), src.Name,
+			`stream part must not contain "--": mirror names are split on the first "--" and that split is only injective when stream names never contain it (ADR-002)`))
+	}
+	for _, msg := range validation.IsDNS1123Subdomain(stream) {
+		errs = append(errs, field.Invalid(p.Child("name"), src.Name,
+			"stream part is not a valid ImageStream name (RFC 1123 subdomain): "+msg))
+	}
+	if !ociTagPattern.MatchString(tag) {
+		errs = append(errs, field.Invalid(p.Child("name"), src.Name,
+			"tag part must match the OCI tag grammar "+ociTagPattern.String()))
+	}
+	return errs
+}
+
+// validateTarget enforces the per-target locator contract: exactly one of
+// containerNames / imageFields (mutual exclusion, no default guessing), the
+// built-in Kind binding to containerNames (ADR-006 + spec decision 6), and the
+// full grammar/duplicate/overlap validation of imageFields (ADR-005).
+func validateTarget(p *field.Path, t *imageflowv1alpha1.SubscriptionTarget) field.ErrorList {
+	var errs field.ErrorList
+	hasContainers := len(t.ContainerNames) > 0
+	hasFields := len(t.ImageFields) > 0
+
+	switch {
+	case hasContainers && hasFields:
+		errs = append(errs, field.Forbidden(p,
+			"containerNames and imageFields are mutually exclusive: built-in Kinds locate images by"+
+				" container name, third-party Kinds by restricted imageFields paths (ADR-005/ADR-006);"+
+				" the whole configuration is rejected"))
+	case !hasContainers && !hasFields:
+		errs = append(errs, field.Required(p,
+			"exactly one locator is required: containerNames (built-in Kinds) or imageFields"+
+				" (third-party Kinds); ImageFlow never guesses a default (spec decision 6)"))
+	}
+
+	if isBuiltinWorkload(t.TargetRef) && hasFields {
+		errs = append(errs, field.Forbidden(p.Child("imageFields"),
+			fmt.Sprintf("built-in Kind %s must locate images by containerNames (ADR-006);"+
+				" imageFields is the locator for third-party Kinds", t.TargetRef.Kind)))
+	}
+
+	errs = append(errs, validateContainerNames(p.Child("containerNames"), t.ContainerNames)...)
+	errs = append(errs, validateImageFields(p.Child("imageFields"), t.ImageFields)...)
+	return errs
+}
+
+// isBuiltinWorkload reports whether the target references the first-batch
+// built-in adapter set (apps/v1 Deployment/StatefulSet/DaemonSet, ADR-006).
+// Group and version must both match: a third-party CRD may legitimately reuse
+// a Kind name and then follows the generic imageFields path.
+func isBuiltinWorkload(ref imageflowv1alpha1.TargetReference) bool {
+	group, version, found := strings.Cut(ref.APIVersion, "/")
+	if !found || group != "apps" || version != "v1" {
+		return false
+	}
+	return builtinWorkloadKinds[ref.Kind]
+}
+
+// validateContainerNames checks that entries are real Kubernetes container
+// names (DNS-1123 labels) and unique — a target must never declare the same
+// container twice.
+func validateContainerNames(p *field.Path, names []string) field.ErrorList {
+	var errs field.ErrorList
+	seen := make(map[string]struct{}, len(names))
+	for i, name := range names {
+		if msgs := validation.IsDNS1123Label(name); len(msgs) > 0 {
+			errs = append(errs, field.Invalid(p.Index(i), name,
+				"container names are Kubernetes container names (DNS-1123 label): "+msgs[0]))
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			errs = append(errs, field.Duplicate(p.Index(i), name))
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	return errs
+}
+
+// validateImageFields runs the frozen ADR-005 grammar and the set-level
+// duplicate/overlap detection of internal/imagefields, mapping violations to
+// field-precise errors.
+func validateImageFields(p *field.Path, paths []string) field.ErrorList {
+	var errs field.ErrorList
+	_, violations := imagefields.ValidateSet(paths)
+	for _, v := range violations {
+		switch v.Kind {
+		case imagefields.ViolationGrammar:
+			errs = append(errs, field.Invalid(p.Index(v.Index), v.Path, v.Reason))
+		case imagefields.ViolationDuplicate:
+			errs = append(errs, field.Invalid(p.Index(v.Other), v.OtherPath,
+				fmt.Sprintf("duplicates imageFields[%d]: the same image field must not be declared twice in one target", v.Index)))
+		case imagefields.ViolationOverlap:
+			errs = append(errs, field.Invalid(p.Index(v.Other), v.OtherPath,
+				fmt.Sprintf("overlaps imageFields[%d] (%q): one path addresses a prefix of the other,"+
+					" so both writes would touch the same field; the whole configuration is rejected (ADR-005)", v.Index, v.Path)))
+		}
+	}
+	return errs
+}
