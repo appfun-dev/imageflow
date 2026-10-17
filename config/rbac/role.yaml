@@ -21,6 +21,12 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
   - imageflow.appfun.dev
   resources:
   - imageartifacts
@@ -33,8 +39,8 @@ rules:
   - imageflow.appfun.dev
   resources:
   - imagestreamimports
-  - imagestreammappings
   verbs:
+  - create
   - delete
   - get
   - list
@@ -42,6 +48,7 @@ rules:
 - apiGroups:
   - imageflow.appfun.dev
   resources:
+  - imagestreamimports/status
   - imagestreammappings/status
   - imagestreams/status
   - imagestreamtags/status
@@ -50,6 +57,15 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreammappings
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
 - apiGroups:
   - imageflow.appfun.dev
   resources:
