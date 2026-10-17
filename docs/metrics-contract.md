@@ -117,6 +117,29 @@ There are deliberately no `name`/`namespace` labels on these metrics — mirror 
 
 Registration: the collectors are registered at package init with `sigs.k8s.io/controller-runtime/pkg/metrics.Registry` (the manager's registry), so they appear on the same metrics endpoint as the T1 exposure.
 
+## T8 authorization metrics
+
+The subscription authorization gate (ADR-003, `internal/authz` — consumed by the admission authorizer in `internal/webhook` and the `subscription-authz` controller in `internal/controller`) exposes the SAR cache hit rate required by the T8 ticket plus the verdict mix. One lookup is recorded per gate check of one (identity, target) pair; one verdict is recorded per check outcome, cache hits included. The webhook-side and controller-side gates of one process share a single collector set, so the counters describe the whole-process SAR surface.
+
+- `imageflow_subscription_sar_cache_lookups_total{result}` – Counter. SAR result cache lookups. The cache hit rate is derived from the `result` label, e.g.:
+
+  ```promql
+  sum(rate(imageflow_subscription_sar_cache_lookups_total{result="hit"}[5m]))
+    /
+  sum(rate(imageflow_subscription_sar_cache_lookups_total[5m]))
+  ```
+
+- `imageflow_subscription_sar_checks_total{verdict}` – Counter. Target authorization verdicts returned by the gate. The denial rate is alertable directly from the `verdict` label.
+
+Label vocabularies (bounded; documented exception to the reconcile-oriented `result` values in the label convention above):
+
+- `result` – one of `hit` (definitive verdict served from cache, zero API calls), `miss` (cache empty or entry expired at the TTL, a rate-limited or fresh SAR check follows).
+- `verdict` – one of `allowed`, `denied` (SAR said the creator lacks `update` — the Forbidden surface follows), `rate_limited` (SAR creation shed by the token-bucket limiter; the check is retried later, the gate never fails open), `unknown` (target kind not installed, SAR API failure, authorizer evaluation error — callers requeue without touching the persisted surface).
+
+Cardinality is bounded by construction: 2 results + 4 verdicts = at most 6 series. There are deliberately **no identity/target labels** — usernames and target names are unbounded user input; per-target and per-creator attribution belongs to the Forbidden condition, per-target `status.targets[].reason`, kube Events (`TargetsForbidden`, `TargetsAuthorized`, `MissingCreatorIdentity`) and structured logs. Reconcile-level health of the periodic re-verification is read from the unchanged controller-runtime metrics (`controller_runtime_reconcile_total{controller="subscription-authz"}`, `workqueue_*{name="subscription-authz"}`).
+
+Registration: the shared collector set is registered once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`) on first gate construction; duplicate registration attempts are tolerated so test managers can coexist.
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.

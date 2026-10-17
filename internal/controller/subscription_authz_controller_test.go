@@ -246,8 +246,8 @@ func TestSubscriptionAuthzForbiddenTargetZeroWrites(t *testing.T) {
 	if cond == nil {
 		t.Fatal("Forbidden condition missing")
 	}
-	if cond.Status != metav1.ConditionTrue || cond.Reason != reasonTargetsUnauthorized {
-		t.Errorf("condition = %s/%s, want True/%s", cond.Status, cond.Reason, reasonTargetsUnauthorized)
+	if cond.Status != metav1.ConditionTrue || cond.Reason != ReasonTargetsUnauthorized {
+		t.Errorf("condition = %s/%s, want True/%s", cond.Status, cond.Reason, ReasonTargetsUnauthorized)
 	}
 	if !strings.Contains(cond.Message, t8DeniedTarget) || !strings.Contains(cond.Message, t8CreatorAnnoT8) {
 		t.Errorf("condition message %q must name the denied target and the creator", cond.Message)
@@ -306,9 +306,9 @@ func TestSubscriptionAuthzAuthorizedCreatorPasses(t *testing.T) {
 	if cond == nil {
 		t.Fatal("Forbidden condition missing")
 	}
-	if cond.Status != metav1.ConditionFalse || cond.Reason != reasonAuthorized {
+	if cond.Status != metav1.ConditionFalse || cond.Reason != ReasonAuthorized {
 		t.Errorf("condition = %s/%s, want False/%s (no false Forbidden)",
-			cond.Status, cond.Reason, reasonAuthorized)
+			cond.Status, cond.Reason, ReasonAuthorized)
 	}
 	if len(got.Status.Targets) != 0 {
 		t.Errorf("per-target entries = %+v, want none for an authorized target", got.Status.Targets)
@@ -387,7 +387,7 @@ func TestSubscriptionAuthzTargetsChangeGranularity(t *testing.T) {
 	}
 	got = t8GetSub(t, reconciler)
 	cond = t8ForbiddenCondition(got)
-	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reasonAuthorized {
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonAuthorized {
 		t.Fatalf("condition = %+v, want False/Authorized after re-grant", cond)
 	}
 	if len(got.Status.Targets) != 0 {
@@ -424,8 +424,8 @@ func TestSubscriptionAuthzMissingIdentityFailsClosed(t *testing.T) {
 
 	got := t8GetSub(t, reconciler)
 	cond := t8ForbiddenCondition(got)
-	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != reasonMissingIdentity {
-		t.Fatalf("condition = %+v, want True/%s", cond, reasonMissingIdentity)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonMissingIdentity {
+		t.Fatalf("condition = %+v, want True/%s", cond, ReasonMissingIdentity)
 	}
 	if !strings.Contains(cond.Message, webhook.CreatedByAnnotation) {
 		t.Errorf("message %q must name the missing annotation", cond.Message)
@@ -575,7 +575,7 @@ func TestSubscriptionAuthzPreservesDeliveryEngineFields(t *testing.T) {
 	sub.Status.Conditions = []metav1.Condition{{
 		Type:               imageflowv1alpha1.ConditionTypeForbidden,
 		Status:             metav1.ConditionTrue,
-		Reason:             reasonTargetsUnauthorized,
+		Reason:             ReasonTargetsUnauthorized,
 		Message:            "stale denial",
 		LastTransitionTime: transition,
 	}}

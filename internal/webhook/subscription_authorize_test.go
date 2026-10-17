@@ -24,11 +24,11 @@ import (
 )
 
 // T8 admission-authorization unit suite (fake client + interceptor, per spec
-// testing decision 2: SAR 门两个方向 allow/deny). The real-RBAC direction
-// belongs to the kind layer (envtest defaults to AlwaysAllow); these tests
-// pin the handler behavior: fail-closed denials, targets-change re-check,
-// rate-limit shedding, kind-not-installed warnings and the T3 shape rules
-// staying untouched and first in line.
+// testing decision 2: SAR 门两个方向 allow/deny). These tests pin the handler
+// behavior of the advisory admission half of the gate: denials and unresolved
+// checks surface as admission WARNINGS (enforcement is the controller-side
+// Forbidden condition + zero writes), targets-change re-checks run, and the
+// T3 shape rules stay untouched, rejection-owning and first in line.
 
 const (
 	t8CreatorValue = "user:t8-creator@example.com"
@@ -151,7 +151,7 @@ func TestValidateCreateAllowsAuthorizedCreator(t *testing.T) {
 	}
 }
 
-func TestValidateCreateDeniesUnauthorizedTarget(t *testing.T) {
+func TestValidateCreateWarnsOnUnauthorizedTarget(t *testing.T) {
 	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
 	rec.decide = func(sar *authorizationv1.SubjectAccessReview) {
 		sar.Status.Allowed = false
@@ -159,46 +159,55 @@ func TestValidateCreateDeniesUnauthorizedTarget(t *testing.T) {
 	}
 	sub := t8Subscription("billing-stable", t8CreatorValue, t8Target(t8AppTarget, "Deployment"))
 
-	_, err := validator.ValidateCreate(context.Background(), sub)
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
 
-	if err == nil {
-		t.Fatal("ValidateCreate() must deny an unauthorized target")
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v; the advisory half must not deny "+
+			"(enforcement is the controller-side Forbidden condition)", err)
 	}
-	if !apierrors.IsForbidden(err) {
-		t.Fatalf("error = %v, want a Forbidden admission denial", err)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one authorization warning", warnings)
 	}
-	for _, want := range []string{t8CreatorUser, t8AppTarget, "lacks update permission", t8DenyMessage} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("denial message %q must mention %q", err.Error(), want)
+	for _, want := range []string{t8CreatorUser, t8AppTarget, "lacks update permission",
+		t8DenyMessage, "ZERO writes", "Forbidden"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning %q must mention %q", warnings[0], want)
 		}
 	}
 }
 
-func TestValidateCreateDeniesWithoutTrustedIdentity(t *testing.T) {
+func TestValidateCreateWarnsWithoutTrustedIdentity(t *testing.T) {
 	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
 	sub := t8Subscription("no-identity", "", t8Target(t8AppTarget, "Deployment"))
 
-	_, err := validator.ValidateCreate(context.Background(), sub)
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
 
-	if !apierrors.IsForbidden(err) {
-		t.Fatalf("error = %v, want fail-closed Forbidden without a created-by identity", err)
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want the advisory warning path", err)
 	}
-	if !strings.Contains(err.Error(), CreatedByAnnotation) {
-		t.Errorf("message %q must name the missing annotation", err.Error())
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "MissingIdentity") {
+		t.Fatalf("warnings = %v, want one warning announcing the fail-closed MissingIdentity state",
+			warnings)
+	}
+	if !strings.Contains(warnings[0], CreatedByAnnotation) {
+		t.Errorf("warning %q must name the missing annotation", warnings[0])
 	}
 	if rec.calls != 0 {
 		t.Errorf("SAR calls = %d, want 0 (no identity, nothing to check)", rec.calls)
 	}
 }
 
-func TestValidateCreateDeniesMalformedIdentity(t *testing.T) {
+func TestValidateCreateWarnsOnMalformedIdentity(t *testing.T) {
 	validator, _ := newT8AuthorizerFixture(t, authz.Options{})
 	sub := t8Subscription("bad-identity", "robot:not-a-known-kind", t8Target(t8AppTarget, "Deployment"))
 
-	_, err := validator.ValidateCreate(context.Background(), sub)
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
 
-	if !apierrors.IsForbidden(err) {
-		t.Fatalf("error = %v, want fail-closed Forbidden on a malformed identity", err)
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want the advisory warning path", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "unknown identity kind") {
+		t.Fatalf("warnings = %v, want one warning carrying the parse failure", warnings)
 	}
 }
 
@@ -219,7 +228,7 @@ func TestValidateUpdateWithoutTargetsChangeSkipsSAR(t *testing.T) {
 	}
 }
 
-func TestValidateUpdateWithNewUnauthorizedTargetDenies(t *testing.T) {
+func TestValidateUpdateWithNewUnauthorizedTargetWarns(t *testing.T) {
 	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
 	rec.decide = func(sar *authorizationv1.SubjectAccessReview) {
 		if sar.Spec.ResourceAttributes.Name == "audit-log" {
@@ -233,49 +242,60 @@ func TestValidateUpdateWithNewUnauthorizedTargetDenies(t *testing.T) {
 	updated := old.DeepCopy()
 	updated.Spec.Targets = append(updated.Spec.Targets, t8Target("audit-log", "StatefulSet"))
 
-	_, err := validator.ValidateUpdate(context.Background(), old, updated)
+	warnings, err := validator.ValidateUpdate(context.Background(), old, updated)
 
-	if !apierrors.IsForbidden(err) {
-		t.Fatalf("error = %v, want Forbidden for the newly added unauthorized target", err)
+	if err != nil {
+		t.Fatalf("ValidateUpdate() error = %v, want the advisory warning path", err)
 	}
-	if !strings.Contains(err.Error(), "audit-log") {
-		t.Errorf("message %q must name the new denied target", err.Error())
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly one authorization warning", warnings)
 	}
-	if strings.Contains(err.Error(), t8DenyMessage) {
-		t.Errorf("message %q must not misreport the authorized target", err.Error())
+	if !strings.Contains(warnings[0], "audit-log") {
+		t.Errorf("warning %q must name the new denied target", warnings[0])
+	}
+	if strings.Contains(warnings[0], t8DenyMessage) {
+		t.Errorf("warning %q must not misreport the authorized target", warnings[0])
 	}
 	if rec.calls != 2 {
 		t.Errorf("SAR calls = %d, want 2 (both targets re-checked on targets change)", rec.calls)
 	}
 }
 
-func TestValidateCreateRateLimitedFailsClosedRetryable(t *testing.T) {
+func TestValidateCreateRateLimitedDefersToControllerReverification(t *testing.T) {
 	validator, rec := newT8AuthorizerFixture(t, authz.Options{LimiterQPS: 1, LimiterBurst: 1})
 	sub := t8Subscription("burst", t8CreatorValue,
 		t8Target("burst-one", "Deployment"), t8Target("burst-two", "StatefulSet"))
 
-	_, err := validator.ValidateCreate(context.Background(), sub)
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
 
-	if !apierrors.IsTooManyRequests(err) {
-		t.Fatalf("error = %v, want a retryable TooManyRequests denial when the limiter sheds", err)
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want the advisory warning path", err)
 	}
-	if !strings.Contains(err.Error(), "never fails open") {
-		t.Errorf("message %q must state the fail-closed contract", err.Error())
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "burst-two") ||
+		!strings.Contains(warnings[0], authz.ReasonRateLimited) {
+		t.Fatalf("warnings = %v, want one warning naming the shed target and the RateLimited code",
+			warnings)
+	}
+	if !strings.Contains(warnings[0], "zero writes") {
+		t.Errorf("warning %q must state the fail-closed contract", warnings[0])
 	}
 	if rec.calls != 1 {
 		t.Errorf("SAR calls = %d, want 1 (the shed check must not reach the API)", rec.calls)
 	}
 }
 
-func TestValidateCreateSARFailureFailsClosedRetryable(t *testing.T) {
+func TestValidateCreateSARFailureWarns(t *testing.T) {
 	validator, sarRec := newT8AuthorizerFixture(t, authz.Options{})
 	sarRec.createErr = errors.New("apiserver unreachable")
 	sub := t8Subscription("outage", t8SACreator, t8Target(t8AppTarget, "Deployment"))
 
-	_, err := validator.ValidateCreate(context.Background(), sub)
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
 
-	if !apierrors.IsServiceUnavailable(err) {
-		t.Fatalf("error = %v, want a retryable ServiceUnavailable denial on SAR API failure", err)
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want the advisory warning path", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], authz.ReasonSubjectAccessReviewFailed) {
+		t.Fatalf("warnings = %v, want one warning carrying the SAR failure code", warnings)
 	}
 }
 
@@ -300,8 +320,10 @@ func TestValidateCreateUnmappedKindAllowsWithWarning(t *testing.T) {
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "edge-fabric") {
 		t.Fatalf("warnings = %v, want one warning naming the target", warnings)
 	}
-	if !strings.Contains(warnings[0], "re-verifies") {
-		t.Errorf("warning %q must point at the periodic re-verification", warnings[0])
+	if !strings.Contains(warnings[0], authz.ReasonKindNotInstalled) ||
+		!strings.Contains(warnings[0], "re-verifies") {
+		t.Errorf("warning %q must carry the KindNotInstalled code and point at the "+
+			"periodic re-verification", warnings[0])
 	}
 	if rec.calls != 0 {
 		t.Errorf("SAR calls = %d, want 0 for an unmapped kind", rec.calls)

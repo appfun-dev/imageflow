@@ -20,8 +20,11 @@
 // T8 addition: the subscription validating handler also carries the
 // admission-time half of the SubjectAccessReview authorization gate
 // (subscription_authorize.go, ADR-003 timings "创建 admission" and "targets
-// 变更"): the shape rules above are untouched and always run first, then the
-// created-by identity is authorized against every target.
+// 变更"): the shape rules above are untouched, always run first and keep sole
+// ownership of admission rejection; the authorization findings surface as
+// admission warnings, while the authoritative Forbidden condition and the
+// zero-write guarantee are enforced controller-side (internal/controller
+// subscription-authz).
 //
 // The imageFields grammar is deliberately NOT claimed to be compatible with
 // the OpenShift fieldPath annotation syntax (ADR-005 §1, ticket T3 acceptance

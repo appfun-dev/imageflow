@@ -86,16 +86,18 @@ const kindImageSubscription = "ImageSubscription"
 const TargetReasonForbidden = "Forbidden"
 
 // Condition reasons of the Forbidden condition (stable, machine-readable;
-// additional reason vocabulary on top of the frozen T2 condition types).
+// additional reason vocabulary on top of the frozen T2 condition types,
+// exported as part of the T8→T9 contract: the delivery engine keys its
+// zero-write decision off the condition and the per-target reason).
 const (
-	// reasonTargetsUnauthorized is used with Forbidden=True when at least one
+	// ReasonTargetsUnauthorized is used with Forbidden=True when at least one
 	// target failed the SubjectAccessReview check.
-	reasonTargetsUnauthorized = "TargetsUnauthorized"
-	// reasonMissingIdentity is used with Forbidden=True when the created-by
+	ReasonTargetsUnauthorized = "TargetsUnauthorized"
+	// ReasonMissingIdentity is used with Forbidden=True when the created-by
 	// annotation is absent or malformed (fail closed).
-	reasonMissingIdentity = "MissingIdentity"
-	// reasonAuthorized is used with Forbidden=False when every target passed.
-	reasonAuthorized = "Authorized"
+	ReasonMissingIdentity = "MissingIdentity"
+	// ReasonAuthorized is used with Forbidden=False when every target passed.
+	ReasonAuthorized = "Authorized"
 )
 
 // Event reasons of the authorization surface (Event.reason vocabulary).
@@ -315,7 +317,7 @@ func (o authorizationOutcome) desiredCondition(generation int64) metav1.Conditio
 	switch {
 	case o.identityErr != nil:
 		base.Status = metav1.ConditionTrue
-		base.Reason = reasonMissingIdentity
+		base.Reason = ReasonMissingIdentity
 		base.Message = authz.TruncateMessage(fmt.Sprintf(
 			"No trusted creator identity: %v. ImageFlow performs zero writes to any target "+
 				"until the %s annotation records a verifiable creator (ADR-003; the mutating "+
@@ -323,7 +325,7 @@ func (o authorizationOutcome) desiredCondition(generation int64) metav1.Conditio
 			o.identityErr, webhook.CreatedByAnnotation), 1024)
 	case len(o.denied) > 0:
 		base.Status = metav1.ConditionTrue
-		base.Reason = reasonTargetsUnauthorized
+		base.Reason = ReasonTargetsUnauthorized
 		base.Message = authz.TruncateMessage(fmt.Sprintf(
 			"Creator %q lacks update permission on %d of %d target(s): %s. Zero writes are "+
 				"performed for these targets (ADR-003); grant standard RBAC update in the "+
@@ -331,7 +333,7 @@ func (o authorizationOutcome) desiredCondition(generation int64) metav1.Conditio
 			o.creator, len(o.denied), o.targetCount, authz.FormatDeniedTargets(o.denied)), 2048)
 	default:
 		base.Status = metav1.ConditionFalse
-		base.Reason = reasonAuthorized
+		base.Reason = ReasonAuthorized
 		base.Message = fmt.Sprintf(
 			"Creator %q is authorized to update all %d target(s) (SubjectAccessReview gate, ADR-003).",
 			o.creator, o.targetCount)
@@ -403,7 +405,7 @@ func (r *SubscriptionAuthzReconciler) syncAuthorizationStatus(
 			wrote:            true,
 			nowForbidden:     nowForbidden,
 			becameAuthorized: !nowForbidden && wasForbidden,
-			identity:         nowForbidden && desired.Reason == reasonMissingIdentity,
+			identity:         nowForbidden && desired.Reason == ReasonMissingIdentity,
 			message:          desired.Message,
 		}
 		return nil

@@ -4,12 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"strings"
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -21,25 +18,34 @@ import (
 // Admission-time half of the subscription authorization gate (ticket T8,
 // ADR-003 timings 1+2): every CREATE, and every UPDATE that changes
 // spec.targets, re-verifies via SubjectAccessReview that the created-by
-// identity holds the update verb on every target. Denials fail closed:
+// identity holds the update verb on every target.
 //
-//   - denied target(s)            → 403 Forbidden, listing the targets and
-//     the standard-RBAC remedy (the ADR-003 "feature, not a defect" path);
-//   - rate-limited check(s)       → 429 TooManyRequests (retry shortly; the
-//     limiter sheds load, the gate never fails open);
-//   - SAR API failure             → 503 ServiceUnavailable (retry shortly);
-//   - target kind not installed   → allowed WITH a warning: a subscription
-//     may legitimately be created before its target CRD (ADR-003 double
-//     insurance), delivery is structurally impossible while the kind is
-//     absent, and the controller-side periodic re-verification picks the
-//     target up once the kind exists.
+// Enforcement split (ADR-003: "不满足 → 订阅报 Forbidden Condition 且对该
+// 目标零写入"): the authoritative consequence of a denial is the persisted
+// Forbidden condition plus the zero-write guarantee, both owned by the
+// controller-side gate (internal/controller subscription-authz). This
+// admission half is the immediate-feedback surface: findings are returned as
+// admission WARNINGS (visible in kubectl apply output), never as denials, so
+//
+//   - a subscription may legitimately be created before its RBAC grant or
+//     before its target kind/object exists (ADR-003 double insurance) and
+//     self-heals into delivery once the grant lands — no recreate needed;
+//   - the security property ("写不动创建者无权的 Workload") never depends on
+//     the webhook: the controller gate fails closed independently;
+//   - the T3 shape rules keep sole ownership of admission rejection.
+//
+// Warning cases: denied targets (naming them and the RBAC remedy), a missing
+// or malformed created-by identity (the controller will report
+// Forbidden/MissingIdentity), rate-limited or failed SAR checks (the
+// controller re-verifies and fails closed), and target kinds the cluster does
+// not serve yet.
 //
 // The authorizer is additive to the T3 shape rules: shape violations are
 // reported first and unchanged; authorization only runs once the shape is
 // valid. The identity subject is the created-by ANNOTATION (not the current
 // requester): the mutating webhook runs before validation and pins the
-// annotation to the creator on every write, so admission always authorizes
-// the creator per ADR-003 — including updates by other principals.
+// annotation to the creator on every write, so admission always checks the
+// creator per ADR-003 — including updates by other principals.
 //
 // Updates that do not change spec.targets skip the SAR check entirely: RBAC
 // drift on an unchanged target set is owned by the controller-side periodic
@@ -49,22 +55,13 @@ import (
 // internal/config) sizing the admission-side SAR cache TTL. The webhook
 // registration seam reads the flag surface instead of manager options — the
 // same no-shared-file-edit pattern the webhook enablement gate established in
-// internal/controller/webhook.go — so one cache TTL governs both halves of
-// the gate in a production process.
+// internal/controller/webhook.go — so one TTL semantics governs both halves
+// of the gate in a production process.
 const sarRecheckPeriodFlag = "sar-recheck-period"
 
-// admissionRetryAfterSeconds hints retry timing on rate-limited admissions.
-const admissionRetryAfterSeconds = 2
-
-// subscriptionGR identifies the ImageSubscription resource in admission
-// denials.
-var subscriptionGR = schema.GroupResource{
-	Group:    imageflowv1alpha1.GroupVersion.Group,
-	Resource: "imagesubscriptions",
-}
-
 // subscriptionAuthorizer performs the admission-time SAR checks through a
-// cached, rate-limited authz.Gate.
+// cached, rate-limited authz.Gate and maps every non-allowed finding to an
+// admission warning.
 type subscriptionAuthorizer struct {
 	gate *authz.Gate
 }
@@ -95,7 +92,7 @@ func recheckPeriodFromFlags() time.Duration {
 }
 
 // authorizeCreate is the "创建 admission" timing (ADR-003): every target of a
-// new subscription is checked before the object is accepted.
+// new subscription is checked as the object is admitted.
 func (a *subscriptionAuthorizer) authorizeCreate(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
@@ -115,17 +112,20 @@ func (a *subscriptionAuthorizer) authorizeUpdate(
 	return a.authorizeTargets(ctx, newSub)
 }
 
-// authorizeTargets runs the gate over every target and maps the verdict
-// picture onto admission responses (fail closed on everything except the
-// structurally-undeliverable KindNotInstalled case).
+// authorizeTargets runs the gate over every target and renders the findings
+// as admission warnings. It never denies: the persisted Forbidden surface
+// and the zero-write guarantee are enforced by the controller-side gate
+// regardless of what happens here.
 func (a *subscriptionAuthorizer) authorizeTargets(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
 ) (admission.Warnings, error) {
 	subject, err := SARSubject(sub.GetAnnotations()[CreatedByAnnotation])
 	if err != nil {
-		return nil, apierrors.NewForbidden(subscriptionGR, sub.Name, fmt.Errorf(
-			"subscription authorization requires a trusted created-by identity (ADR-003): %v", err))
+		return admission.Warnings{fmt.Sprintf(
+			"[imageflow] no trusted creator identity: %v. The subscription will report "+
+				"Forbidden (MissingIdentity) and receive zero writes to every target until "+
+				"the created-by annotation records a verifiable creator (ADR-003).", err)}, nil
 	}
 
 	refs := make([]imageflowv1alpha1.TargetReference, 0, len(sub.Spec.Targets))
@@ -135,45 +135,37 @@ func (a *subscriptionAuthorizer) authorizeTargets(
 	verdicts := a.gate.CheckTargets(ctx, subject, refs)
 
 	var warnings admission.Warnings
-	var denied, rateLimited, failed []authz.TargetVerdict
+	var denied, unresolved []authz.TargetVerdict
 	for _, verdict := range verdicts {
 		switch verdict.Verdict {
 		case authz.VerdictDenied:
 			denied = append(denied, verdict)
 		case authz.VerdictUnknown:
-			switch {
-			case strings.HasPrefix(verdict.Reason, authz.ReasonKindNotInstalled):
-				warnings = append(warnings, fmt.Sprintf(
-					"target %s could not be authorization-checked: %s. The subscription "+
-						"controller re-verifies it periodically and performs zero writes "+
-						"until it is authorized.",
-					authz.FormatTarget(verdict.Target), verdict.Reason))
-			case strings.HasPrefix(verdict.Reason, authz.ReasonRateLimited):
-				rateLimited = append(rateLimited, verdict)
-			default:
-				failed = append(failed, verdict)
-			}
+			unresolved = append(unresolved, verdict)
 		}
 	}
 
-	switch {
-	case len(denied) > 0:
-		return warnings, apierrors.NewForbidden(subscriptionGR, sub.Name, fmt.Errorf(
-			"creator %q lacks update permission on %d of %d target(s): %s. ImageFlow "+
-				"subscriptions never write to unauthorized targets (ADR-003); grant standard "+
-				"RBAC update in the target namespace(s) first",
+	if len(denied) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"[imageflow] creator %q lacks update permission on %d of %d target(s): %s. "+
+				"The subscription reports Forbidden and ImageFlow performs ZERO writes to these "+
+				"targets (ADR-003); grant standard RBAC update in the target namespace(s) and "+
+				"the periodic re-verification flips the state without a recreate.",
 			subject.Username, len(denied), len(refs), authz.FormatDeniedTargets(denied)))
-	case len(rateLimited) > 0:
-		return warnings, apierrors.NewTooManyRequests(fmt.Sprintf(
-			"subscription authorization is rate limited (%d of %d target checks shed); "+
-				"retry shortly — the authorization gate never fails open",
-			len(rateLimited), len(refs)), admissionRetryAfterSeconds)
-	case len(failed) > 0:
-		return warnings, apierrors.NewServiceUnavailable(fmt.Sprintf(
-			"subscription authorization could not be verified for %d of %d target(s) "+
-				"(%s: %s); retry shortly — the authorization gate never fails open",
-			len(failed), len(refs), authz.FormatTarget(failed[0].Target),
-			authz.TruncateMessage(failed[0].Reason, authz.MaxTargetReasonLength)))
+	}
+	for _, verdict := range unresolved {
+		warnings = append(warnings, fmt.Sprintf(
+			"[imageflow] target %s could not be authorization-checked at admission (%s). "+
+				"The subscription controller re-verifies it periodically and performs zero "+
+				"writes until it is authorized.",
+			authz.FormatTarget(verdict.Target), summarizeUnresolved(verdict.Reason)))
 	}
 	return warnings, nil
+}
+
+// summarizeUnresolved caps an unresolved-verdict reason for the warning text;
+// the reason already carries its stable code as a prefix.
+func summarizeUnresolved(reason string) string {
+	const summaryLength = 160
+	return authz.TruncateMessage(reason, summaryLength)
 }

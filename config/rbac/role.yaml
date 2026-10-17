@@ -21,6 +21,12 @@ rules:
   - create
   - patch
 - apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
   - imageflow.appfun.dev
   resources:
   - imageartifacts
@@ -45,6 +51,7 @@ rules:
   - imagestreammappings/status
   - imagestreams/status
   - imagestreamtags/status
+  - imagesubscriptions/status
   - imagetags/status
   verbs:
   - get
