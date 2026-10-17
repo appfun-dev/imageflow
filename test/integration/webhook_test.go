@@ -550,7 +550,7 @@ var _ = Describe("Admission webhooks", Ordered, func() {
 		Expect(k8sClient.Create(ctx, imageTag)).To(Succeed())
 
 		By("rejecting mirror spec hijacking through CEL alone")
-		mirror.Spec.Tag = "hijacked"
+		mirror.Spec.Tag = "hijack-attempt"
 		err = k8sClient.Update(ctx, mirror)
 		Expect(err).To(HaveOccurred())
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "CEL rejection must surface as Invalid")
