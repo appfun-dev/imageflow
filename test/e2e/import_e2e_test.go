@@ -592,26 +592,32 @@ func t7NewSource() (*t7Source, []*registrydouble.Server) {
 		if path := os.Getenv("IMAGEFLOW_E2E_REGISTRY_CA"); path != "" {
 			source.CABundle = t7MustReadFile(path)
 		}
+		readUser, readPassword := "", ""
 		if path := os.Getenv("IMAGEFLOW_E2E_PULL_SECRET"); path != "" {
 			source.PullSecretJSON = t7MustReadFile(path)
 			source.AuthHost = host
 			source.AuthPullSecretJSON = source.PullSecretJSON
+			readUser, readPassword = t7CredentialsFromDockerConfig(source.PullSecretJSON)
 		}
-		user := os.Getenv("IMAGEFLOW_E2E_REGISTRY_PUSH_USERNAME")
-		password := os.Getenv("IMAGEFLOW_E2E_REGISTRY_PUSH_PASSWORD")
-		if user != "" && password != "" {
+		// Reading the current digest only needs pull access, so the on-demand
+		// case also runs against a registry whose content the operator
+		// published beforehand.
+		source.digestOf = func() string {
+			digest, err := t7ResolveDigest(host, repo, tag, readUser, readPassword, source.CABundle)
+			if err != nil {
+				_, _ = fmt.Fprintf(GinkgoWriter, "resolve %s/%s:%s failed: %v\n", repo, tag, host, err)
+				return ""
+			}
+			return digest
+		}
+		pushUser := os.Getenv("IMAGEFLOW_E2E_REGISTRY_PUSH_USERNAME")
+		pushPassword := os.Getenv("IMAGEFLOW_E2E_REGISTRY_PUSH_PASSWORD")
+		if pushUser != "" && pushPassword != "" {
 			push := func(seed string) (string, error) {
-				return t7PushSchema2(host, repo, tag, user, password, source.CABundle, seed)
+				return t7PushSchema2(host, repo, tag, pushUser, pushPassword, source.CABundle, seed)
 			}
 			source.repoint = push
 			source.repointAuth = push
-			source.digestOf = func() string {
-				digest, err := t7ResolveDigest(host, repo, tag, user, password, source.CABundle)
-				if err != nil {
-					return ""
-				}
-				return digest
-			}
 		}
 		return source, nil
 	}
@@ -706,28 +712,46 @@ func t7MustReadFile(path string) []byte {
 // t7PasswordFromDockerConfig extracts the password of the first entry so the
 // leak assertions have a canary that works against a real registry too.
 func t7PasswordFromDockerConfig(payload []byte) string {
+	_, password := t7CredentialsFromDockerConfig(payload)
+	return password
+}
+
+// t7CredentialsFromDockerConfig reads the first usable username/password pair
+// of a dockerconfigjson payload. The test needs it to publish and read content
+// on a real registry; ImageFlow itself only ever hands the payload to
+// registry.CredentialsFromSecret.
+func t7CredentialsFromDockerConfig(payload []byte) (string, string) {
 	var cfg struct {
 		Auths map[string]struct {
+			Username string `json:"username"`
 			Password string `json:"password"`
 			Auth     string `json:"auth"`
 		} `json:"auths"`
 	}
 	if err := json.Unmarshal(payload, &cfg); err != nil {
-		return ""
+		return "", ""
 	}
 	for _, entry := range cfg.Auths {
 		if entry.Password != "" {
-			return entry.Password
+			return entry.Username, entry.Password
 		}
 		if entry.Auth != "" {
 			if decoded, err := base64.StdEncoding.DecodeString(entry.Auth); err == nil {
-				if _, secret, found := strings.Cut(string(decoded), ":"); found {
-					return secret
+				if user, secret, found := strings.Cut(string(decoded), ":"); found && secret != "" {
+					return user, secret
 				}
 			}
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// t7SetAuth attaches basic credentials only when there are any, so anonymous
+// reads do not send an empty "Basic base64(:)" header.
+func t7SetAuth(req *http.Request, user, password string) {
+	if user != "" || password != "" {
+		req.SetBasicAuth(user, password)
+	}
 }
 
 // t7SecretManifest renders a dockerconfigjson Secret. The payload is base64
@@ -790,7 +814,7 @@ func t7PushSchema2(host, repo, tag, user, password string, caPEM []byte, seed st
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(user, password)
+	t7SetAuth(req, user, password)
 	req.Header.Set("Content-Type", "application/vnd.docker.distribution.manifest.v2+json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -820,7 +844,7 @@ func t7UploadBlob(client *http.Client, host, repo, user, password string, blob [
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(user, password)
+	t7SetAuth(req, user, password)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -844,7 +868,7 @@ func t7UploadBlob(client *http.Client, host, repo, user, password string, blob [
 	if err != nil {
 		return err
 	}
-	put.SetBasicAuth(user, password)
+	t7SetAuth(put, user, password)
 	put.Header.Set("Content-Type", "application/octet-stream")
 	put.ContentLength = int64(len(blob))
 	putResp, err := client.Do(put)
@@ -866,7 +890,7 @@ func t7Probe(client *http.Client, target, user, password string) int {
 	if err != nil {
 		return 0
 	}
-	req.SetBasicAuth(user, password)
+	t7SetAuth(req, user, password)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0
@@ -886,7 +910,7 @@ func t7ResolveDigest(host, repo, tag, user, password string, caPEM []byte) (stri
 	if err != nil {
 		return "", err
 	}
-	req.SetBasicAuth(user, password)
+	t7SetAuth(req, user, password)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
