@@ -44,6 +44,8 @@ rules:
   resources:
   - imagestreammappings/status
   - imagestreams/status
+  - imagestreamtags/status
+  - imagetags/status
   verbs:
   - get
   - patch
@@ -52,7 +54,21 @@ rules:
   - imageflow.appfun.dev
   resources:
   - imagestreams
+  - imagesubscriptions
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags
+  - imagetags
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
