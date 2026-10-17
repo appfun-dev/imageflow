@@ -30,8 +30,9 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 		"Default interval for on-demand ImageStream import polling.")
 	fs.DurationVar(&c.ScheduledDefaultInterval, "scheduled-default-interval", 15*time.Minute,
 		"Default interval for scheduled ImageStream tag imports.")
-	fs.DurationVar(&c.SARRecheckPeriod, "sar-recheck-period", 5*time.Minute,
-		"How often to re-check SubjectAccessReview permissions for subscription targets.")
+	fs.DurationVar(&c.SARRecheckPeriod, "sar-recheck-period", 10*time.Minute,
+		"How often to re-check SubjectAccessReview permissions for subscription targets "+
+			"(ADR-003 default; also the SAR result cache TTL of the T8 authorization gate).")
 	fs.IntVar(&c.StreamTagHistoryLimit, "stream-tag-history-limit", 3,
 		"Maximum number of historic images kept per ImageStream tag.")
 	fs.IntVar(&c.SubscriptionDeliveryLimit, "subscription-delivery-limit", 5,

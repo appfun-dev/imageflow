@@ -53,19 +53,46 @@ var subscriptionGK = schema.GroupKind{
 // CEL (T2 handoff): the SourceRef logical form, the containerNames/imageFields
 // mutual exclusion, the imageFields grammar and path duplicate/overlap
 // rejection.
-type subscriptionValidator struct{}
+//
+// T8 addition (additive, shape semantics unchanged): when an authorizer is
+// configured, the admission-time SubjectAccessReview gate (ADR-003) runs
+// AFTER the shape validation passed — create admission checks every target,
+// update admission re-checks whenever spec.targets changed. A zero-value
+// validator (no authorizer) behaves exactly like the original T3 shape-only
+// validator.
+type subscriptionValidator struct {
+	authorizer *subscriptionAuthorizer
+}
 
 var _ admission.CustomValidator = &subscriptionValidator{}
 
-// ValidateCreate implements admission.CustomValidator.
-func (v *subscriptionValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	return nil, validateSubscriptionShape(obj.(*imageflowv1alpha1.ImageSubscription))
+// ValidateCreate implements admission.CustomValidator: shape first (T3),
+// then the T8 admission-time authorization of the created-by identity against
+// every target.
+func (v *subscriptionValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	sub := obj.(*imageflowv1alpha1.ImageSubscription)
+	if err := validateSubscriptionShape(sub); err != nil {
+		return nil, err
+	}
+	if v.authorizer == nil {
+		return nil, nil
+	}
+	return v.authorizer.authorizeCreate(ctx, sub)
 }
 
 // ValidateUpdate implements admission.CustomValidator. The full shape is
-// re-validated on every update; the old object adds no exempt state.
-func (v *subscriptionValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
-	return nil, validateSubscriptionShape(newObj.(*imageflowv1alpha1.ImageSubscription))
+// re-validated on every update; the old object adds no exempt state. The T8
+// authorization re-check runs only when spec.targets changed (ADR-003
+// "targets 变更" timing).
+func (v *subscriptionValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	newSub := newObj.(*imageflowv1alpha1.ImageSubscription)
+	if err := validateSubscriptionShape(newSub); err != nil {
+		return nil, err
+	}
+	if v.authorizer == nil {
+		return nil, nil
+	}
+	return v.authorizer.authorizeUpdate(ctx, oldObj.(*imageflowv1alpha1.ImageSubscription), newSub)
 }
 
 // ValidateDelete implements admission.CustomValidator; deletes always pass.

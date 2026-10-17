@@ -17,6 +17,12 @@
 // library shared with the subscription controller admission re-validation (T8)
 // and the runtime generic image field resolver (T10).
 //
+// T8 addition: the subscription validating handler also carries the
+// admission-time half of the SubjectAccessReview authorization gate
+// (subscription_authorize.go, ADR-003 timings "创建 admission" and "targets
+// 变更"): the shape rules above are untouched and always run first, then the
+// created-by identity is authorized against every target.
+//
 // The imageFields grammar is deliberately NOT claimed to be compatible with
 // the OpenShift fieldPath annotation syntax (ADR-005 §1, ticket T3 acceptance
 // criteria); the frozen grammar is documented in internal/imagefields.
@@ -57,7 +63,8 @@ func Register(mgr ctrl.Manager) {
 	server.Register(PathMutateImageSubscription,
 		&crwebhook.Admission{Handler: &subscriptionMutator{decoder: admission.NewDecoder(scheme)}})
 	server.Register(PathValidateImageSubscription,
-		admission.WithCustomValidator(scheme, &imageflowv1alpha1.ImageSubscription{}, &subscriptionValidator{}))
+		admission.WithCustomValidator(scheme, &imageflowv1alpha1.ImageSubscription{},
+			&subscriptionValidator{authorizer: newSubscriptionAuthorizer(mgr)}))
 	server.Register(PathMutateImageStream,
 		admission.WithCustomDefaulter(scheme, &imageflowv1alpha1.ImageStream{}, &imageStreamDefaulter{}))
 	server.Register(PathValidateImageStream,

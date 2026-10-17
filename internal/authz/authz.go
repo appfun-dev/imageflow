@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -149,6 +150,52 @@ func (v TargetVerdict) Denied() bool { return v.Verdict == VerdictDenied }
 // admission messages, condition messages and Events.
 func FormatTarget(ref imageflowv1alpha1.TargetReference) string {
 	return ref.APIVersion + " " + ref.Kind + " " + ref.Namespace + "/" + ref.Name
+}
+
+// Bounds of the user-facing denied-target rendering shared by the admission
+// authorizer (internal/webhook) and the subscription-authz controller
+// (internal/controller): one consistent vocabulary across admission denials,
+// Forbidden condition messages and Events.
+const (
+	// MaxListedDeniedTargets caps how many denied targets are spelled out
+	// before the remainder is summarized.
+	MaxListedDeniedTargets = 5
+	// MaxTargetReasonLength caps one SAR denial reason inside a list or a
+	// per-target status message.
+	MaxTargetReasonLength = 256
+)
+
+// FormatDeniedTargets renders the bounded denied-target list: at most
+// MaxListedDeniedTargets entries of the form
+// "<apiVersion> <Kind> <ns>/<name> (<SAR reason>)", the remainder summarized.
+func FormatDeniedTargets(denied []TargetVerdict) string {
+	var b strings.Builder
+	for i, verdict := range denied {
+		if i == MaxListedDeniedTargets {
+			fmt.Fprintf(&b, "; and %d more", len(denied)-MaxListedDeniedTargets)
+			break
+		}
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		fmt.Fprintf(&b, "%s (%s)", FormatTarget(verdict.Target),
+			TruncateMessage(verdict.Reason, MaxTargetReasonLength))
+	}
+	return b.String()
+}
+
+// TruncateMessage caps a user-visible message at max bytes on a rune
+// boundary, marking the cut.
+func TruncateMessage(message string, max int) string {
+	if len(message) <= max {
+		return message
+	}
+	const suffix = "..."
+	cut := max - len(suffix)
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(message[:cut]) + suffix
 }
 
 // Options configures a Gate. Zero values select the documented defaults.
