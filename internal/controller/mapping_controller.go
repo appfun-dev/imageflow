@@ -121,6 +121,7 @@ func setupMappingController(mgr ctrl.Manager, opts Options, name string) error {
 		Named(name).
 		Complete(NewMappingReconciler(
 			mgr.GetClient(),
+			mgr.GetAPIReader(),
 			mgr.GetEventRecorderFor(recorderNameMapping),
 			opts.Clock,
 			opts.Config,
@@ -155,27 +156,41 @@ func logSkippedRegistration(controllerName string, missingKinds []string) {
 
 // MappingReconciler reconciles ImageStreamMapping task objects.
 type MappingReconciler struct {
-	client   client.Client
-	recorder record.EventRecorder
-	clock    clock.Clock
-	config   config.Config
-	metrics  *mappingMetrics
+	client    client.Client
+	apiReader client.Reader // uncached: guards against cache lag on terminal re-checks
+	recorder  record.EventRecorder
+	clock     clock.Clock
+	config    config.Config
+	metrics   *mappingMetrics
 }
 
-// NewMappingReconciler builds the reconciler. A nil metrics set is replaced
-// with an unregistered one (tests); production passes the shared collectors
-// registered against controller-runtime's global metrics registry.
+// NewMappingReconciler builds the reconciler. apiReader may be nil or the same
+// client as cl (tests); in the manager it is mgr.GetAPIReader() so the
+// terminal-state re-check reads directly from the API server. A nil metrics set
+// is replaced with an unregistered one (tests); production passes the shared
+// collectors registered against controller-runtime's global metrics registry.
 func NewMappingReconciler(
 	cl client.Client,
+	apiReader client.Reader,
 	recorder record.EventRecorder,
 	clk clock.Clock,
 	cfg config.Config,
 	metrics *mappingMetrics,
 ) *MappingReconciler {
+	if apiReader == nil {
+		apiReader = cl
+	}
 	if metrics == nil {
 		metrics = newMappingMetrics()
 	}
-	return &MappingReconciler{client: cl, recorder: recorder, clock: clk, config: cfg, metrics: metrics}
+	return &MappingReconciler{
+		client:    cl,
+		apiReader: apiReader,
+		recorder:  recorder,
+		clock:     clk,
+		config:    cfg,
+		metrics:   metrics,
+	}
 }
 
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreammappings,verbs=get;list;watch;delete
@@ -202,6 +217,26 @@ func (r *MappingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if taskIsTerminal(&mapping.Status.TaskObjectStatus) {
 		return ctrl.Result{}, nil
 	}
+
+	// Cache-lag guard (same pattern as ImportReconciler): the workqueue re-runs
+	// Reconcile for the watch event caused by this task's own startedAt status
+	// write, and the manager cache can still show a stale non-terminal object
+	// while the stream read is already fresh. Without this re-check the flow
+	// runs twice and completeTask emits a SECOND terminal Event with a
+	// different message ("No-op success: ..." vs "Registered ..."), which
+	// client-go event aggregation cannot collapse. Reading through the uncached
+	// API reader makes "a finished task has zero effects" actually true.
+	var fresh imageflowv1alpha1.ImageStreamMapping
+	if err := r.apiReader.Get(ctx, req.NamespacedName, &fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("re-read mapping without cache: %w", err)
+	}
+	if taskIsTerminal(&fresh.Status.TaskObjectStatus) {
+		return ctrl.Result{}, nil
+	}
+	mapping = fresh
 
 	if err := r.ensureStartedAt(ctx, req.NamespacedName); err != nil {
 		if apierrors.IsNotFound(err) {

@@ -105,7 +105,7 @@ func newT4TestEnv(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object)
 		},
 		metrics: newMappingMetrics(),
 	}
-	env.mapping = NewMappingReconciler(env.client, env.recorder, env.clock, env.cfg, env.metrics)
+	env.mapping = NewMappingReconciler(env.client, nil, env.recorder, env.clock, env.cfg, env.metrics)
 	return env
 }
 
@@ -549,7 +549,7 @@ func TestMappingReconcileEnforcesBoundedHistoryAndOverflowEvents(t *testing.T) {
 		stream := newTestStream(1)
 		env := newT4TestEnv(t, nil, stream)
 		env.cfg.StreamTagHistoryLimit = limit
-		env.mapping = NewMappingReconciler(env.client, env.recorder, env.clock, env.cfg, env.metrics)
+		env.mapping = NewMappingReconciler(env.client, nil, env.recorder, env.clock, env.cfg, env.metrics)
 		for i, ref := range refs {
 			env.clock.Advance(time.Minute)
 			task := newTestMapping("task-"+string(rune('a'+i)), ref)

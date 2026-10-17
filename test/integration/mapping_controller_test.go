@@ -556,7 +556,7 @@ var _ = Describe("T4 Mapping push path", Label("t4"), Ordered, func() {
 				return cl.SubResource(sub).Update(ctx, obj, opts...)
 			},
 		})
-		crashReconciler := controller.NewMappingReconciler(crashing, crashRecorder,
+		crashReconciler := controller.NewMappingReconciler(crashing, nil, crashRecorder,
 			recoveryClk, t4Config(), nil)
 		_, err := crashReconciler.Reconcile(ctx, req)
 		Expect(err).To(HaveOccurred(), "the simulated crash must surface as reconcile error")
@@ -578,7 +578,7 @@ var _ = Describe("T4 Mapping push path", Label("t4"), Ordered, func() {
 
 		By("restart: a fresh reconciler (zero shared memory) converges from persisted state")
 		restartRecorder := record.NewFakeRecorder(64)
-		restarted := controller.NewMappingReconciler(k8s, restartRecorder,
+		restarted := controller.NewMappingReconciler(k8s, nil, restartRecorder,
 			recoveryClk, t4Config(), nil)
 		res, err := restarted.Reconcile(ctx, req)
 		Expect(err).NotTo(HaveOccurred())
