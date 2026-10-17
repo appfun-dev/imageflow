@@ -97,7 +97,16 @@ var _ = Describe("T4 Task TTL GC with short flags", Label("t4"), Ordered, func()
 			Expect(nsErr.Error()).To(ContainSubstring("AlreadyExists"), "create ns: %v", nsErr)
 		}
 
-		By("granting the manager pod the minimal catalog RBAC it needs")
+		By("granting the manager pod the full generated RBAC (single source of truth)")
+		// The e2e manager pod runs controller.Setup, which registers EVERY
+		// Registrar (mapping, task GC, mirror, webhook gate, ...). A hand-written
+		// minimal ClusterRole here breaks whenever a new controller lands (the
+		// T5 mirror controller's informers need imagestreamtags/imagetags/
+		// imagesubscriptions list/watch). Bind the generated manager-role from
+		// config/rbac/role.yaml instead so this container tracks the marker
+		// union automatically.
+		roleOut, roleErr := utils.Run(exec.Command("kubectl", "apply", "-f", "config/rbac/role.yaml"))
+		Expect(roleErr).NotTo(HaveOccurred(), "apply generated role.yaml: %s", roleOut)
 		applyManifest("t4-rbac", fmt.Sprintf(`
 apiVersion: v1
 kind: ServiceAccount
@@ -106,40 +115,13 @@ metadata:
   namespace: %[2]s
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: %[3]s
-rules:
-- apiGroups: ["imageflow.appfun.dev"]
-  resources: ["imagestreammappings", "imagestreamimports"]
-  verbs: ["get", "list", "watch", "delete"]
-- apiGroups: ["imageflow.appfun.dev"]
-  resources: ["imagestreammappings/status", "imagestreamimports/status"]
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["imageflow.appfun.dev"]
-  resources: ["imagestreams"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["imageflow.appfun.dev"]
-  resources: ["imagestreams/status"]
-  verbs: ["get", "update", "patch"]
-- apiGroups: ["imageflow.appfun.dev"]
-  resources: ["imageartifacts"]
-  verbs: ["get", "list", "watch", "create"]
-- apiGroups: [""]
-  resources: ["events"]
-  verbs: ["create", "patch"]
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: %[3]s
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: %[3]s
+  name: manager-role
 subjects:
 - kind: ServiceAccount
   name: %[1]s
@@ -206,9 +188,7 @@ spec:
 			"-n", t4Namespace, "--ignore-not-found", "--wait=false"))
 		By("removing the test namespace")
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "ns", t4Namespace, "--ignore-not-found"))
-		By("removing the test-scoped RBAC")
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrole", t4ClusterRole,
-			"--ignore-not-found"))
+		By("removing the test-scoped RBAC binding (the generated manager-role belongs to the deployment)")
 		_, _ = utils.Run(exec.Command("kubectl", "delete", "clusterrolebinding", t4ClusterRole,
 			"--ignore-not-found"))
 	})
