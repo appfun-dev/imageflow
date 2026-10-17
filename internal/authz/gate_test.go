@@ -191,10 +191,14 @@ func TestCacheIsBounded(t *testing.T) {
 	gate, sarLog, clk := newGateFixture(t, Options{CacheMaxEntries: 2})
 	ctx := context.Background()
 
+	// The clock advances between inserts so oldest-entry eviction is
+	// deterministic (equal timestamps would make the evicted entry depend on
+	// map iteration order).
 	for _, name := range []string{"app-one", "app-two", "app-three"} {
 		if v := gate.CheckTarget(ctx, userSubject(), deploymentTarget(name)); v.Verdict != VerdictAllowed {
 			t.Fatalf("%s verdict = %+v, want Allowed", name, v)
 		}
+		clk.Advance(time.Second)
 	}
 	if got := gate.cache.len(); got > 2 {
 		t.Fatalf("cache size = %d, want <= 2 (bounded)", got)
@@ -203,13 +207,19 @@ func TestCacheIsBounded(t *testing.T) {
 		t.Fatalf("SAR calls = %d, want 3 distinct targets", sarLog.calls)
 	}
 
-	// The oldest entry was evicted and is re-fetched.
-	clk.Advance(time.Minute)
+	// The oldest entry (app-one) was evicted and must be re-fetched, while a
+	// retained entry (app-three) is still served from cache.
 	if v := gate.CheckTarget(ctx, userSubject(), deploymentTarget("app-one")); v.Verdict != VerdictAllowed {
 		t.Fatalf("evicted-entry verdict = %+v, want Allowed", v)
 	}
 	if sarLog.calls != 4 {
 		t.Errorf("SAR calls = %d, want 4 (evicted entry must not be served stale)", sarLog.calls)
+	}
+	if v := gate.CheckTarget(ctx, userSubject(), deploymentTarget("app-three")); v.Verdict != VerdictAllowed {
+		t.Fatalf("retained-entry verdict = %+v, want Allowed", v)
+	}
+	if sarLog.calls != 4 {
+		t.Errorf("SAR calls = %d, want 4 (the retained entry must stay a cache hit)", sarLog.calls)
 	}
 }
 
