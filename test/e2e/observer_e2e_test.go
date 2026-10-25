@@ -66,6 +66,12 @@ const (
 	// t11ePreImage is a REAL pullable image so workloads start from a
 	// Ready state the native controllers can roll FROM.
 	t11ePreImage = "registry.k8s.io/pause:3.9"
+	// t11eAuditNoOldImage is the honest old-image audit value of a FIRST
+	// delivery through a subscription: the recorded old image comes from
+	// the previous desired image in the status entry, which does not exist
+	// yet (the workload's pre-image rides on the engine's ImageApplied
+	// events instead).
+	t11eAuditNoOldImage = "none recorded"
 	// t11ePauseDigest is the real registry.k8s.io/pause:3.9 multi-arch
 	// index digest (resolved from the registry, Docker-Content-Digest).
 	// Delivering it makes the native rollout GENUINELY succeed: pods pull
@@ -461,12 +467,24 @@ spec:
 		Eventually(func(g Gomega) {
 			subMsgs := t11eEventMessages(t11eNamespace, t11eCoSub, "RolloutSucceeded")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-side event")
-			t11eAuditFragments(g, subMsgs[0], t11eCoStream, t11ePreImage, t11ePauseRef,
+			t11eAuditFragments(g, subMsgs[0], t11eCoStream, t11eAuditNoOldImage, t11ePauseRef,
 				t11eCoDeploy, "Succeeded")
 			wlMsgs := t11eEventMessages(t11eWorkloadNS, t11eCoDeploy, "RolloutSucceeded")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "target-side event in the workload namespace")
-			t11eAuditFragments(g, wlMsgs[0], t11eCoStream, t11ePreImage, t11ePauseRef,
+			t11eAuditFragments(g, wlMsgs[0], t11eCoStream, t11eAuditNoOldImage, t11ePauseRef,
 				t11eCoDeploy, "Succeeded")
+		}, "2m", "5s").Should(Succeed())
+
+		By("the pre-image half of the audit trail rides on the engine's ImageApplied events")
+		// First delivery through this subscription ⇒ the recorded old image
+		// is honestly "none recorded" (no previous DESIRED image exists in
+		// the entry); the workload's actual previous field value
+		// (registry.k8s.io/pause:3.9) is audited by the T9 ImageApplied
+		// events on both objects.
+		Eventually(func(g Gomega) {
+			wlApplied := t11eEventMessages(t11eWorkloadNS, t11eCoDeploy, "ImageApplied")
+			g.Expect(wlApplied).NotTo(BeEmpty(), "target-side ImageApplied event")
+			g.Expect(wlApplied[0]).To(ContainSubstring("previous field value: " + t11ePreImage))
 		}, "2m", "5s").Should(Succeed())
 
 		By("the delivery summary floats up to BOTH mirror kinds, bounded (AC7)")
@@ -540,7 +558,7 @@ spec:
 		Eventually(func(g Gomega) {
 			subMsgs := t11eEventMessages(t11eNamespace, t11eFailSub, "RolloutFailed")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-side event")
-			t11eAuditFragments(g, subMsgs[0], t11eFailStream, t11ePreImage, t11eFictional,
+			t11eAuditFragments(g, subMsgs[0], t11eFailStream, t11eAuditNoOldImage, t11eFictional,
 				t11eFailDeploy, "Failed")
 			wlMsgs := t11eEventMessages(t11eNamespace, t11eFailDeploy, "RolloutFailed")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "target-side event")
