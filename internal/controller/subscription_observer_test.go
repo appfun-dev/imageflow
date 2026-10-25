@@ -240,6 +240,10 @@ func t11uAuthorizedConditions() []metav1.Condition {
 
 // t11uSeededEntry renders the entry shape the T9 engine leaves behind after
 // a value-changing apply: fields written, rollout Progressing, health Unknown.
+// t11uEngineSteadyMessage is the delivery engine's steady-state per-target
+// Message (R3: the observer never rewrites entry Reason/Message).
+const t11uEngineSteadyMessage = "all declared image fields hold the digest"
+
 func t11uSeededEntry(ref imageflowv1alpha1.TargetReference, desired string) imageflowv1alpha1.TargetDeliveryStatus {
 	return imageflowv1alpha1.TargetDeliveryStatus{
 		TargetRef:          ref,
@@ -249,7 +253,7 @@ func t11uSeededEntry(ref imageflowv1alpha1.TargetReference, desired string) imag
 		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
 		HealthStatus:       imageflowv1alpha1.HealthUnknown,
 		Reason:             TargetReasonApplied,
-		Message:            "all declared image fields hold the digest",
+		Message:            t11uEngineSteadyMessage,
 		ObservedGeneration: 1,
 		LastTransitionTime: ptr.To(metav1.NewTime(t11uStart.Add(-time.Minute))),
 	}
@@ -950,7 +954,7 @@ func TestObserverHonestUnknownForThirdPartyTarget(t *testing.T) {
 	if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
 		t.Fatalf("rolloutStatus = %q, want honest Unknown", entry.RolloutStatus)
 	}
-	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+	if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
 		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if entry.ImageApplied != true || entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
@@ -1050,7 +1054,7 @@ func TestObserverReconcileDeploymentSucceededDualNamespaceEvents(t *testing.T) {
 	if entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
 		t.Fatalf("healthStatus = %q, want honest Unknown (rollout success never implies health)", entry.HealthStatus)
 	}
-	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+	if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
 		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if !entry.LastTransitionTime.Time.Equal(t11uStart) {
@@ -1155,7 +1159,7 @@ func TestObserverReconcileDeploymentFailedKeepsImageAppliedTrue(t *testing.T) {
 	if !entry.ImageApplied || entry.RolloutStatus != imageflowv1alpha1.RolloutFailed {
 		t.Fatalf("entry = %+v, want imageApplied=true + rollout Failed", entry)
 	}
-	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+	if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
 		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
@@ -1337,7 +1341,7 @@ func TestObserverStaleRolloutResetWhenFieldNoLongerApplied(t *testing.T) {
 		t.Fatalf("rolloutStatus = %q, want honest Unknown for the stale success", got.Status.Targets[0].RolloutStatus)
 	}
 	if got.Status.Targets[0].Reason != TargetReasonApplied ||
-		got.Status.Targets[0].Message != "all declared image fields hold the digest" {
+		got.Status.Targets[0].Message != t11uEngineSteadyMessage {
 		t.Fatalf("entry Reason/Message must stay engine-owned: %+v", got.Status.Targets[0])
 	}
 	resetEvents := t11uEventsWith(f.drainEvents(), EventReasonRolloutUnknown)
