@@ -610,9 +610,6 @@ func TestObserverDetermineDeploymentRolloutStates(t *testing.T) {
 			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
 				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
 			}
-			if det.status != imageflowv1alpha1.RolloutProgressing && det.reason == "" {
-				t.Fatal("determination must carry an observer reason")
-			}
 		})
 	}
 }
@@ -953,11 +950,8 @@ func TestObserverHonestUnknownForThirdPartyTarget(t *testing.T) {
 	if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
 		t.Fatalf("rolloutStatus = %q, want honest Unknown", entry.RolloutStatus)
 	}
-	if entry.Reason != TargetReasonRolloutUnknown {
-		t.Fatalf("reason = %q, want %q", entry.Reason, TargetReasonRolloutUnknown)
-	}
-	if !strings.Contains(entry.Message, "never fabricated") || !strings.Contains(entry.Message, "ADR-005") {
-		t.Fatalf("message must explain the honest-Unknown contract: %q", entry.Message)
+	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if entry.ImageApplied != true || entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
 		t.Fatalf("imageApplied/health must stay independent: %+v", entry)
@@ -982,6 +976,11 @@ func TestObserverHonestUnknownForThirdPartyTarget(t *testing.T) {
 	unknownEvents := t11uEventsWith(events, EventReasonRolloutUnknown)
 	if len(unknownEvents) != 1 {
 		t.Fatalf("events = %v, want exactly one subscription-side RolloutUnknown", events)
+	}
+	for _, want := range []string{"never fabricated", "ADR-005", "Determination: "} {
+		if !strings.Contains(unknownEvents[0], want) {
+			t.Fatalf("event %q must carry the honest-Unknown determination (%q)", unknownEvents[0], want)
+		}
 	}
 	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindOther, observerResultUnknown)); v != 1 {
 		t.Fatalf("rollout outcome metric = %v, want 1", v)
@@ -1051,8 +1050,8 @@ func TestObserverReconcileDeploymentSucceededDualNamespaceEvents(t *testing.T) {
 	if entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
 		t.Fatalf("healthStatus = %q, want honest Unknown (rollout success never implies health)", entry.HealthStatus)
 	}
-	if entry.Reason != TargetReasonRolloutSucceeded || !strings.Contains(entry.Message, "succeeded per native") {
-		t.Fatalf("reason/message = %q/%q, want observer explanation", entry.Reason, entry.Message)
+	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if !entry.LastTransitionTime.Time.Equal(t11uStart) {
 		t.Fatalf("LastTransitionTime = %v, want the injected clock", entry.LastTransitionTime)
@@ -1086,6 +1085,7 @@ func TestObserverReconcileDeploymentSucceededDualNamespaceEvents(t *testing.T) {
 			"imageApplied: true",
 			"rollout: Succeeded",
 			"health: Unknown",
+			"succeeded per native deployment status",
 			"ADR-005",
 		} {
 			if !strings.Contains(ev, want) {
@@ -1155,11 +1155,8 @@ func TestObserverReconcileDeploymentFailedKeepsImageAppliedTrue(t *testing.T) {
 	if !entry.ImageApplied || entry.RolloutStatus != imageflowv1alpha1.RolloutFailed {
 		t.Fatalf("entry = %+v, want imageApplied=true + rollout Failed", entry)
 	}
-	if entry.Reason != TargetReasonRolloutFailed ||
-		!strings.Contains(entry.Message, t11uPodName) ||
-		!strings.Contains(entry.Message, t11uWaitingPullBackOff) ||
-		!strings.Contains(entry.Message, "registry unreachable") {
-		t.Fatalf("reason/message = %q/%q, want the pod-level WHY", entry.Reason, entry.Message)
+	if entry.Reason != TargetReasonApplied || entry.Message != "all declared image fields hold the digest" {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
 	}
 	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
 		t.Fatalf("aggregate = %q, want Failed", got.Status.RolloutStatus)
@@ -1175,6 +1172,11 @@ func TestObserverReconcileDeploymentFailedKeepsImageAppliedTrue(t *testing.T) {
 	}
 	if !strings.HasPrefix(failed[0], "Warning "+EventReasonRolloutFailed) {
 		t.Fatalf("rollout failure must be a Warning event: %q", failed[0])
+	}
+	for _, want := range []string{t11uPodName, t11uWaitingPullBackOff, "registry unreachable"} {
+		if !strings.Contains(failed[0], want) {
+			t.Fatalf("failure event %q must carry the pod-level WHY (%q)", failed[0], want)
+		}
 	}
 	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindDeployment, observerResultFailed)); v != 1 {
 		t.Fatalf("rollout failure metric = %v, want 1", v)
@@ -1318,7 +1320,6 @@ func TestObserverStaleRolloutResetWhenFieldNoLongerApplied(t *testing.T) {
 	entry.ObservedImage = t11uRefA
 	entry.ImageApplied = false
 	entry.RolloutStatus = imageflowv1alpha1.RolloutSucceeded
-	entry.Reason = TargetReasonRolloutSucceeded
 	target := t11uContainerTarget(t11uSTSRef())
 	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
 		Conditions:         t11uAuthorizedConditions(),
@@ -1335,18 +1336,26 @@ func TestObserverStaleRolloutResetWhenFieldNoLongerApplied(t *testing.T) {
 	if got.Status.Targets[0].RolloutStatus != imageflowv1alpha1.RolloutUnknown {
 		t.Fatalf("rolloutStatus = %q, want honest Unknown for the stale success", got.Status.Targets[0].RolloutStatus)
 	}
-	if !strings.Contains(got.Status.Targets[0].Message, "currently references") {
-		t.Fatalf("message %q must explain the spec/observed mismatch", got.Status.Targets[0].Message)
+	if got.Status.Targets[0].Reason != TargetReasonApplied ||
+		got.Status.Targets[0].Message != "all declared image fields hold the digest" {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %+v", got.Status.Targets[0])
+	}
+	resetEvents := t11uEventsWith(f.drainEvents(), EventReasonRolloutUnknown)
+	if len(resetEvents) != 2 || !strings.Contains(resetEvents[0], "currently references") {
+		t.Fatalf("stale-reset event must explain the spec/observed mismatch: %v", resetEvents)
 	}
 }
 
-func TestObserverReasonFixReplacesEngineAppliedOnceForUnknown(t *testing.T) {
+func TestObserverNeverWritesPerTargetReasonMessage(t *testing.T) {
+	// R3 contract (issue #12): the per-target Reason/Message fields are the
+	// delivery engine's ImageApplied-stage surface (frozen T9 vocabulary,
+	// pinned by T9/T10 tests). The observer writes rolloutStatus,
+	// LastTransitionTime, the StatusPolicyEvaluated Condition and healed
+	// records — never Reason/Message. The honest-Unknown WHY travels on the
+	// Condition and on transition Events.
 	target := t11uContainerTarget(t11uEdgeRef())
-	target.TargetRef = t11uEdgeRef()
-	target.ImageFields = nil
 	entry := t11uSeededEntry(t11uEdgeRef(), t11uRefA)
 	entry.RolloutStatus = imageflowv1alpha1.RolloutUnknown
-	entry.Reason = TargetReasonApplied
 	entry.Message = "engine steady state"
 	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
 		Conditions:         t11uAuthorizedConditions(),
@@ -1360,17 +1369,20 @@ func TestObserverReasonFixReplacesEngineAppliedOnceForUnknown(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := f.getSub()
-	if got.Status.Targets[0].Reason != TargetReasonRolloutUnknown {
-		t.Fatalf("reason = %q, want the honest observer explanation", got.Status.Targets[0].Reason)
+	if got.Status.Targets[0].Reason != TargetReasonApplied ||
+		got.Status.Targets[0].Message != "engine steady state" {
+		t.Fatalf("observer must not touch entry Reason/Message: %+v", got.Status.Targets[0])
 	}
 	if !got.Status.Targets[0].LastTransitionTime.Time.Equal(t11uStart.Add(-time.Minute)) {
-		t.Fatalf("reason-only fix must not move LastTransitionTime: %v", got.Status.Targets[0].LastTransitionTime)
+		t.Fatalf("no rollout state change ⇒ LastTransitionTime must not move: %v", got.Status.Targets[0].LastTransitionTime)
 	}
-	// Reason-only fixes plan no events (nothing happened to the rollout).
+	cond := meta.FindStatusCondition(got.Status.Conditions, ConditionTypeStatusPolicyEvaluated)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonStatusPolicyNotConfigured {
+		t.Fatalf("honest-Unknown WHY must live on the Condition: %+v", cond)
+	}
 	if events := f.drainEvents(); len(events) != 0 {
-		t.Fatalf("reason fix must be silent: %v", events)
+		t.Fatalf("steady Unknown must be silent: %v", events)
 	}
-	// Second pass: steady state, no write.
 	before := got.Status.DeepCopy()
 	if _, err := f.reconcileSub(); err != nil {
 		t.Fatalf("second reconcile: %v", err)
@@ -1392,7 +1404,6 @@ func TestObserverHealsOnlyInFlightRecordsOfTheObservedImage(t *testing.T) {
 	deployEntry.RolloutStatus = imageflowv1alpha1.RolloutSucceeded
 	stsEntry := t11uSeededEntry(stsRef, t11uRefB)
 	stsEntry.RolloutStatus = imageflowv1alpha1.RolloutUnknown
-	stsEntry.Reason = TargetReasonRolloutUnknown
 
 	inFlight := t11uSeededRecord(deployRef, t11uRefB, t11uRefA, t11uStart)
 	superseded := t11uSeededRecord(deployRef, t11uRefC, t11uRefA, t11uStart.Add(-time.Minute))
@@ -1509,10 +1520,12 @@ func TestSupersededEventPlannedOnLatestWins(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// E1/E2 (unit): the engine preserves observer-owned reasons
+// Engine steady state preserves the observer's rollout verdict (T9 mergeEntry
+// contract — rolloutSet == nil keeps the persisted value; R3: reasons stay
+// engine-owned on both sides)
 // ---------------------------------------------------------------------------
 
-func TestEnginePreservesObserverReasonsAcrossSteadyStatePasses(t *testing.T) {
+func TestEngineSteadyStatePreservesObserverRolloutVerdict(t *testing.T) {
 	f := newT11uFixture(t, config.Config{})
 	eng := NewSubscriptionDeliveryReconciler(f.client, nil, f.recorder, f.clock, f.cfg, newDeliveryMetrics())
 	deployRef := t11uDeployRef()
@@ -1522,16 +1535,14 @@ func TestEnginePreservesObserverReasonsAcrossSteadyStatePasses(t *testing.T) {
 		created: ptr.To(metav1.NewTime(t11uStart.Add(-90 * time.Second))),
 	}
 	base := t11uSeededEntry(deployRef, t11uRefA)
-	base.RolloutStatus = imageflowv1alpha1.RolloutSucceeded
-	base.Reason = TargetReasonRolloutSucceeded
-	base.Message = "rollout succeeded per native Deployment status"
+	base.RolloutStatus = imageflowv1alpha1.RolloutSucceeded // observer-written verdict
 	base.LastTransitionTime = ptr.To(metav1.NewTime(t11uStart.Add(-time.Hour)))
 
-	t.Run("steady-state converged pass keeps the observer WHY and plans nothing", func(t *testing.T) {
+	t.Run("steady-state converged pass keeps the observer verdict and plans nothing", func(t *testing.T) {
 		out := eng.convergedOutcome(deliveryOutcome{ref: deployRef, converged: true, locator: t11uLocator}, source)
 		merged, plan := mergeEntry(2, base, &out, source, t11uStart)
-		if merged.Reason != TargetReasonRolloutSucceeded || merged.Message != base.Message {
-			t.Fatalf("merged reason/message = %q/%q, want the observer explanation preserved", merged.Reason, merged.Message)
+		if merged.Reason != TargetReasonApplied || !strings.Contains(merged.Message, "SSA field manager") {
+			t.Fatalf("merged reason/message = %q/%q, want the engine Applied surface", merged.Reason, merged.Message)
 		}
 		if merged.RolloutStatus != imageflowv1alpha1.RolloutSucceeded {
 			t.Fatalf("merged rollout = %q, want preserved Succeeded", merged.RolloutStatus)
@@ -1547,7 +1558,7 @@ func TestEnginePreservesObserverReasonsAcrossSteadyStatePasses(t *testing.T) {
 		}
 	})
 
-	t.Run("a value-changing delivery overwrites the observer WHY and seeds Progressing", func(t *testing.T) {
+	t.Run("a value-changing delivery seeds Progressing and keeps the engine WHY", func(t *testing.T) {
 		out := eng.convergedOutcome(deliveryOutcome{ref: deployRef, converged: true, delivered: true, locator: t11uLocator}, source)
 		merged, plan := mergeEntry(2, base, &out, source, t11uStart)
 		if merged.Reason != TargetReasonApplied || merged.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
@@ -1564,7 +1575,7 @@ func TestEnginePreservesObserverReasonsAcrossSteadyStatePasses(t *testing.T) {
 		}
 	})
 
-	t.Run("a delivery failure overwrites the observer WHY", func(t *testing.T) {
+	t.Run("a delivery failure writes its own WHY", func(t *testing.T) {
 		out := deliveryOutcome{ref: deployRef, reason: TargetReasonApplyFailed, message: "apply exploded", retryDelta: 1}
 		merged, plan := mergeEntry(2, base, &out, source, t11uStart)
 		if merged.Reason != TargetReasonApplyFailed || merged.Message != "apply exploded" {
@@ -1578,32 +1589,6 @@ func TestEnginePreservesObserverReasonsAcrossSteadyStatePasses(t *testing.T) {
 		}
 	})
 
-	t.Run("preserveObserverReason truth table", func(t *testing.T) {
-		progressing := imageflowv1alpha1.RolloutProgressing
-		cases := []struct {
-			name string
-			base imageflowv1alpha1.TargetDeliveryStatus
-			out  deliveryOutcome
-			want bool
-		}{
-			{"observer reason on a converged Applied pass is preserved", base, deliveryOutcome{reason: TargetReasonApplied}, true},
-			{"engine reason is rewritten freely", func() imageflowv1alpha1.TargetDeliveryStatus {
-				b := base
-				b.Reason = TargetReasonApplied
-				return b
-			}(), deliveryOutcome{reason: TargetReasonApplied}, false},
-			{"delivery failure is never preserved", base, deliveryOutcome{reason: TargetReasonApplyFailed}, false},
-			{"rollout seed is never preserved", base, deliveryOutcome{reason: TargetReasonApplied, rolloutSet: &progressing}, false},
-		}
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				out := tc.out
-				if got := preserveObserverReason(tc.base, &out); got != tc.want {
-					t.Fatalf("preserveObserverReason = %v, want %v", got, tc.want)
-				}
-			})
-		}
-	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1855,8 +1840,5 @@ func TestObserverLabelMappings(t *testing.T) {
 	}
 	if got := observerEventReason(imageflowv1alpha1.RolloutSuperseded); got != EventReasonRolloutUnknown {
 		t.Fatalf("unmapped statuses must fall back to the unknown event reason: %q", got)
-	}
-	if !isObserverOwnedReason(TargetReasonRolloutSucceeded) || isObserverOwnedReason(TargetReasonApplied) {
-		t.Fatal("observer reason vocabulary is wrong")
 	}
 }

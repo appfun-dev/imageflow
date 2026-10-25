@@ -722,8 +722,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		sub = t11iGetSub(subName)
 		entry = t11iEntry(sub, deployName)
 		Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
-		Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutSucceeded))
-		Expect(entry.Message).To(ContainSubstring("succeeded per native deployment status"))
+		Expect(entry.Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(entry.ImageApplied).To(BeTrue(), "AC1: imageApplied is independent of rolloutStatus")
 		Expect(entry.HealthStatus).To(Equal(imageflowv1alpha1.HealthUnknown),
 			"AC1/AC3: health is never derived from rollout success (ADR-005 §3)")
@@ -749,6 +749,7 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 			Expect(e).To(ContainSubstring(t11iObserverStageApplied))
 			Expect(e).To(ContainSubstring("rollout: Succeeded"))
 			Expect(e).To(ContainSubstring(t11iObserverStageHealth))
+			Expect(e).To(ContainSubstring("succeeded per native deployment status"))
 			Expect(e).To(ContainSubstring("ADR-005"))
 		}
 
@@ -792,8 +793,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		sub := t11iGetSub(failSub)
 		entry := t11iEntry(sub, failDeploy)
 		Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutFailed))
-		Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutFailed))
-		Expect(entry.Message).To(ContainSubstring(t11iReasonDeadline))
+		Expect(entry.Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(entry.ImageApplied).To(BeTrue(),
 			"AC1: the field WAS written — imageApplied=true must never mask a failed rollout")
 		Expect(entry.HealthStatus).To(Equal(imageflowv1alpha1.HealthUnknown))
@@ -804,6 +805,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(t11iCountContaining(events, "Warning RolloutFailed")).To(Equal(2),
 			"a failed rollout is a Warning on both sides")
 		Expect(t11iCountContaining(events, "rollout: Failed")).To(Equal(2))
+		Expect(t11iCountContaining(events, t11iReasonDeadline)).To(Equal(2),
+			"the deadline determination detail rides on the transition Events")
 
 		By("a workload whose native controller never reported stays honestly Unknown")
 		t11iCreateDeployment(ns, uninitDeploy, t11iDigestA, 2)
@@ -820,10 +823,13 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		sub = t11iGetSub(uninitSub)
 		entry = t11iEntry(sub, uninitDeploy)
 		Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown))
-		Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutUnknown))
-		Expect(entry.Message).To(ContainSubstring("has not reported any status"))
+		Expect(entry.Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(sub.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown))
-		Expect(t11iCountContaining(t11iDrainEvents(rec), "RolloutUnknown")).To(Equal(2))
+		uninitEvents := t11iDrainEvents(rec)
+		Expect(t11iCountContaining(uninitEvents, "RolloutUnknown")).To(Equal(2))
+		Expect(t11iCountContaining(uninitEvents, "has not reported any status")).To(Equal(2),
+			"the uninitialized determination detail rides on the transition Events")
 	})
 
 	It("t11i-envtest-statefulset-daemonset-independent-targets-worst-state-aggregate", func() {
@@ -862,8 +868,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(res.RequeueAfter).To(Equal(t11iWaiting), "the DaemonSet is still in flight")
 		sub := t11iGetSub(subName)
 		Expect(t11iEntry(sub, stsName).RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
-		Expect(t11iEntry(sub, stsName).Reason).To(Equal(controller.TargetReasonRolloutSucceeded))
-		Expect(t11iEntry(sub, stsName).Message).To(ContainSubstring("updateRevision"))
+		Expect(t11iEntry(sub, stsName).Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(t11iEntry(sub, dsName).RolloutStatus).To(Equal(imageflowv1alpha1.RolloutProgressing))
 		Expect(t11iEntry(sub, dsName).Reason).To(Equal(controller.TargetReasonApplied),
 			"no DaemonSet transition yet ⇒ the engine reason survives")
@@ -887,11 +893,16 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(res.RequeueAfter).To(BeZero())
 		sub = t11iGetSub(subName)
 		Expect(t11iEntry(sub, dsName).RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
-		Expect(t11iEntry(sub, dsName).Message).To(ContainSubstring("misscheduled"))
+		Expect(t11iEntry(sub, dsName).Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(sub.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
 		events := t11iDrainEvents(rec)
 		Expect(t11iCountContaining(events, "RolloutSucceeded")).To(Equal(4),
 			"two transitions × two namespaces (the STS pass drained nothing yet)")
+		Expect(t11iCountContaining(events, "updateRevision")).To(Equal(2),
+			"the STS determination detail rides on the transition Events")
+		Expect(t11iCountContaining(events, "misscheduled")).To(Equal(2),
+			"the DS determination detail rides on the transition Events")
 	})
 
 	It("t11i-envtest-no-status-policy-and-policy-ref-targets-never-fabricate-success", func() {
@@ -943,9 +954,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		By("the third-party imageFields target stays honestly Unknown — success is never fabricated")
 		edge := t11iEntry(sub, edgeName)
 		Expect(edge.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown))
-		Expect(edge.Reason).To(Equal(controller.TargetReasonRolloutUnknown))
-		Expect(edge.Message).To(ContainSubstring(t11iMsgNeverFabricated))
-		Expect(edge.Message).To(ContainSubstring("ADR-005"))
+		Expect(edge.Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(edge.HealthStatus).To(Equal(imageflowv1alpha1.HealthUnknown))
 		Expect(sub.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown),
 			"AC4: worst-state — one honest Unknown outweighs a Succeeded target")
@@ -960,6 +970,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(t11iCountContaining(events, "rollout: Unknown")).To(Equal(1),
 			"the third-party transition has no target-side object in the cluster — sub-side only")
 		Expect(t11iCountContaining(events, "rollout: Succeeded")).To(Equal(2))
+		Expect(t11iCountContaining(events, "cannot be attributed to arbitrary fields")).To(Equal(1),
+			"the honest-Unknown WHY rides on the transition Event")
 
 		By("no statusPolicyRef anywhere ⇒ the Condition says NotConfigured, still honest Unknown")
 		plainEdgeTarget := edgeTarget
@@ -972,7 +984,9 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		sub = t11iGetSub(plainSub)
 		Expect(t11iEntry(sub, plainEdge).RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown))
-		Expect(t11iEntry(sub, plainEdge).Message).To(ContainSubstring(t11iMsgNeverFabricated))
+		Expect(t11iEntry(sub, plainEdge).Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
+		Expect(t11iCountContaining(t11iDrainEvents(rec), "cannot be attributed to arbitrary fields")).To(Equal(1))
 		cond = meta.FindStatusCondition(sub.Status.Conditions, controller.ConditionTypeStatusPolicyEvaluated)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
@@ -1059,7 +1073,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		sub = t11iGetSub(subName)
 		entry := t11iEntry(sub, deployName)
 		Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
-		Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutSucceeded))
+		Expect(entry.Reason).To(Equal(controller.TargetReasonApplied),
+			"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 		Expect(sub.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
 		Expect(sub.Status.RecentDeliveries).To(HaveLen(2))
 		Expect(sub.Status.RecentDeliveries[0].NewImage).To(Equal(t11iDigestC))
@@ -1230,7 +1245,8 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 				entry := t11iEntry(t11iGetSub(subName), deployName)
 				g.Expect(entry).NotTo(BeNil())
 				g.Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutUnknown))
-				g.Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutUnknown))
+				g.Expect(entry.Reason).To(Equal(controller.TargetReasonApplied),
+					"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 			}, 20*time.Second, 100*time.Millisecond).Should(Succeed())
 			Eventually(func(g Gomega) {
 				g.Expect(t11iRealEventReasons(ns, subName)).To(ContainElement("RolloutUnknown"))
@@ -1245,7 +1261,7 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 				entry := t11iEntry(sub, deployName)
 				g.Expect(entry).NotTo(BeNil())
 				g.Expect(entry.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))
-				g.Expect(entry.Reason).To(Equal(controller.TargetReasonRolloutSucceeded))
+				g.Expect(entry.Reason).To(Equal(controller.TargetReasonApplied))
 				g.Expect(entry.ImageApplied).To(BeTrue())
 				g.Expect(entry.HealthStatus).To(Equal(imageflowv1alpha1.HealthUnknown))
 				g.Expect(sub.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutSucceeded))

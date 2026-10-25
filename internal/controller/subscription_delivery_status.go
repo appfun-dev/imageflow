@@ -13,10 +13,7 @@ package controller
 //   - for every other entry this engine owns desiredImage, observedImage,
 //     imageApplied, rolloutStatus, healthStatus, retryCount, nextRetryTime,
 //     observedGeneration and lastTransitionTime; Reason/Message of entries it
-//     owns are written freely, EXCEPT the T11 observer-owned rollout
-//     explanations (Reason Rollout*): a steady-state Applied opinion with no
-//     delivery consequence preserves them (preserveObserverReason) so the
-//     per-target "why" of the persisted rollout state survives;
+//     owns are written freely;
 //   - persisted rollout/health values are PRESERVED unless this pass has a
 //     delivery consequence (Progressing seed on a value-changing apply,
 //     terminal Conflict) or the field is empty (initialization to Unknown —
@@ -235,16 +232,8 @@ func mergeEntry(
 	}
 
 	reasonChanged := base.Reason != out.reason
-	// T11 preservation (see file header): when this pass has no delivery
-	// consequence and its opinion is the steady-state Applied one, an
-	// observer-owned rollout explanation stays the per-target Reason/Message
-	// until the next delivery, failure or observer transition rewrites it.
-	if preserveObserverReason(base, out) {
-		reasonChanged = false
-	} else {
-		merged.Reason = out.reason
-		merged.Message = out.message
-	}
+	merged.Reason = out.reason
+	merged.Message = out.message
 	merged.ObservedGeneration = generation
 
 	switch {
@@ -261,17 +250,6 @@ func mergeEntry(
 	return merged, plan
 }
 
-// preserveObserverReason reports whether the persisted entry carries a T11
-// observer-owned rollout explanation (RolloutProgressing/RolloutSucceeded/
-// RolloutFailed/RolloutUnknown) that must survive this pass: the pass forced
-// no rollout value itself (out.rolloutSet == nil) and its opinion is the
-// steady-state Applied one. Delivery consequences (Progressing seed,
-// Conflict, any failure reason) still overwrite it — the engine's WHY wins
-// while a delivery is failing or landing.
-func preserveObserverReason(base imageflowv1alpha1.TargetDeliveryStatus, out *deliveryOutcome) bool {
-	return out.rolloutSet == nil && out.reason == TargetReasonApplied && isObserverOwnedReason(base.Reason)
-}
-
 // planEffects gates delivery records, Events and latency observations on the
 // persisted base state (fresh-read dedup, file header).
 func planEffects(
@@ -282,13 +260,9 @@ func planEffects(
 	now time.Time,
 	reasonChanged bool,
 ) {
-	// An observer-owned rollout explanation (T11) counts as converged too:
-	// desired+applied match and the reason surface simply carries the
-	// observer's WHY — emitting a confirmation record here would spam the
-	// bounded window on every steady-state pass.
 	freshConverged := base.DesiredImage == source.ref &&
 		base.ImageApplied &&
-		(base.Reason == TargetReasonApplied || isObserverOwnedReason(base.Reason))
+		base.Reason == TargetReasonApplied
 
 	switch {
 	case out.delivered:

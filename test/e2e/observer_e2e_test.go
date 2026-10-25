@@ -314,6 +314,16 @@ subjects:
   namespace: %[2]s
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: %[5]s
+  namespace: %[8]s
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: %[7]s
@@ -434,7 +444,8 @@ spec:
 			g.Expect(t11eJSONPath(t11eWorkloadNS, "deployment", t11eCoDeploy,
 				`{.status.readyReplicas}`)).To(Equal("1"), "the real rollout must finish")
 			g.Expect(t11eEntryRollout(t11eCoSub, t11eCoDeploy)).To(Equal("Succeeded"))
-			g.Expect(t11eEntryReason(t11eCoSub, t11eCoDeploy)).To(Equal("RolloutSucceeded"))
+			g.Expect(t11eEntryReason(t11eCoSub, t11eCoDeploy)).To(Equal("Applied"),
+				"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eCoSub,
 				fmt.Sprintf(t11eHealthPthFmt, t11eCoDeploy))).To(Equal("Unknown"))
 			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eCoSub,
@@ -515,7 +526,8 @@ spec:
 		// succeeded (the whole point of T11).
 		Eventually(func(g Gomega) {
 			g.Expect(t11eEntryRollout(t11eFailSub, t11eFailDeploy)).To(Equal("Failed"))
-			g.Expect(t11eEntryReason(t11eFailSub, t11eFailDeploy)).To(Equal("RolloutFailed"))
+			g.Expect(t11eEntryReason(t11eFailSub, t11eFailDeploy)).To(Equal("Applied"),
+				"R3: per-target Reason/Message remain the engine's delivery-stage surface")
 			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eFailSub,
 				fmt.Sprintf(t11eAppliedPthFmt, t11eFailDeploy))).To(Equal("true"),
 				"imageApplied stays true — field written is NOT release succeeded")

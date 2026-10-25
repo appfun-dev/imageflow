@@ -62,10 +62,10 @@ var observerPodImageFailureReasons = map[string]struct{}{
 const progressDeadlineExceededReason = "ProgressDeadlineExceeded"
 
 // rolloutDetermination is the observer's honest Rollout-stage verdict for one
-// target entry, plus the observer-owned reason/message explaining it.
+// target entry, plus the message explaining it (rendered onto the transition
+// Event — per-target entry Reason/Message remain engine-owned).
 type rolloutDetermination struct {
 	status  imageflowv1alpha1.RolloutStatus
-	reason  string
 	message string
 }
 
@@ -334,35 +334,30 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 	if len(missing) > 0 {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
-			reason:  TargetReasonRolloutUnknown,
 			message: fmt.Sprintf("declared container(s) %v are not present in the pod template of %s: the delivery engine owns this failure surface (ContainerNotFound) and the rollout of %s cannot be observed (ADR-006)", missing, name, entry.DesiredImage),
 		}
 	}
 	if !holds {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
-			reason:  TargetReasonRolloutUnknown,
 			message: fmt.Sprintf("%s currently references %s, not the desired image %s: native status would describe a different image, so the rollout stage stays honestly Unknown until the delivery engine re-applies (ADR-005 §3: imageApplied and rolloutStatus are independent stages)", name, current, entry.DesiredImage),
 		}
 	}
 	if facts.uninitialized {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
-			reason:  TargetReasonRolloutUnknown,
 			message: fmt.Sprintf("the native %s controller has not reported any status for %s yet (observedGeneration 0, empty status): the rollout of %s is honestly Unknown until native status appears", facts.kind, name, entry.DesiredImage),
 		}
 	}
 	if facts.progressDeadlineFailed {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutFailed,
-			reason:  TargetReasonRolloutFailed,
 			message: fmt.Sprintf("the native Kubernetes rollout controller declared the rollout of %s failed: Progressing condition False with reason %s at generation %d (observedGeneration %d) — progressDeadlineSeconds exceeded", name, progressDeadlineExceededReason, facts.generation, facts.observedGeneration),
 		}
 	}
 	if facts.rolloutSucceeded() {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutSucceeded,
-			reason:  TargetReasonRolloutSucceeded,
 			message: fmt.Sprintf("rollout of %s succeeded per native %s status: %s; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)", entry.DesiredImage, facts.kind, facts.successSummary()),
 		}
 	}
@@ -377,13 +372,11 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 		}
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutFailed,
-			reason:  TargetReasonRolloutFailed,
 			message: fmt.Sprintf("rollout of %s failed: pod %s container %q cannot start image %s: %s (%s)", entry.DesiredImage, podName, containerName, entry.DesiredImage, waitingReason, authz.TruncateMessage(detail, 512)),
 		}
 	}
 	return rolloutDetermination{
 		status:  imageflowv1alpha1.RolloutProgressing,
-		reason:  TargetReasonRolloutProgressing,
 		message: fmt.Sprintf("rollout of %s is in progress per native %s status: %s", entry.DesiredImage, facts.kind, facts.progressSummary()),
 	}
 }

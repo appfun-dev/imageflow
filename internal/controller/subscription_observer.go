@@ -16,7 +16,12 @@ package controller
 // recentDeliveries records to their terminal rollout result WITHOUT touching
 // the engine's Superseded logic, floats delivery summaries up to the
 // ImageStreamTag/ImageTag mirror status (bounded events[] + consumers), and
-// writes the honest dual-namespace rollout-outcome Events.
+// writes the honest dual-namespace rollout-outcome Events. Per-target entry
+// Reason/Message are NEVER written here — they remain the delivery engine's
+// ImageApplied-stage surface (frozen T9 TargetReason* vocabulary, pinned by
+// the T9/T10 lanes); the observer's WHY travels in the rolloutStatus field
+// itself, the StatusPolicyEvaluated Condition, healed record reasons and the
+// transition Events (which carry the full determination detail).
 //
 // # Honesty rules (never fabricate success)
 //
@@ -84,10 +89,12 @@ const (
 	recorderNameSubscriptionObserver = "imageflow-subscription-observer"
 )
 
-// Observer-owned per-target reasons (T11 extends the frozen T9 TargetReason*
-// vocabulary — engine reasons are never redefined). They explain the ROLLOUT
-// stage; the delivery engine preserves them across steady-state passes (see
-// the observer-reason preservation in subscription_delivery_status.go).
+// Observer-owned reasons (T11 extends the frozen T9 TargetReason* vocabulary —
+// engine reasons are never redefined). They explain the ROLLOUT stage and are
+// written ONLY onto recentDeliveries records the observer heals; per-target
+// entry Reason/Message remain the delivery engine's ImageApplied-stage
+// surface (the observer's WHY travels in Events + the StatusPolicyEvaluated
+// Condition + the rolloutStatus field itself).
 const (
 	TargetReasonRolloutProgressing = "RolloutProgressing"
 	TargetReasonRolloutSucceeded   = "RolloutSucceeded"
@@ -119,20 +126,10 @@ const (
 // (distinct from the engine/mapping lanes' phrasing on purpose).
 const auditImageNoneRecorded = "none recorded"
 
-// isObserverOwnedReason reports whether a per-target reason was written by
-// this observer. The delivery engine preserves these across its steady-state
-// Applied passes so the observer's rollout explanation survives as the
-// per-target WHY until the next delivery or failure rewrites it.
-func isObserverOwnedReason(reason string) bool {
-	switch reason {
-	case TargetReasonRolloutProgressing, TargetReasonRolloutSucceeded,
-		TargetReasonRolloutFailed, TargetReasonRolloutUnknown:
-		return true
-	}
-	return false
-}
-
 // observerReasonFor maps a rollout status to its observer-owned reason.
+// Since the T11 contract fix (issue #12 CI lane conflicts), these reasons
+// are written ONLY onto recentDeliveries records the observer heals — the
+// per-target entry Reason/Message remain the delivery engine's surface.
 func observerReasonFor(status imageflowv1alpha1.RolloutStatus) string {
 	switch status {
 	case imageflowv1alpha1.RolloutProgressing:
@@ -344,19 +341,19 @@ type observerOutcome struct {
 	// move; it is applied only when the fresh state still matches `from`
 	// (stale plans are dropped and re-planned on the next trigger).
 	transition *rolloutTransition
-	// reasonFix is non-nil when the rollout status stays as persisted but the
-	// entry still carries the engine's steady-state Applied reason while the
-	// rollout stage is Unknown: the observer then writes its honest
-	// explanation once (reason/message only — no state change, no timestamp).
-	reasonFix *rolloutTransition
-	errs      []error
+	// detMessage is the determination detail (native status summary or the
+	// honest-Unknown contract text) carried on the planned Event. The
+	// per-target Reason/Message stay owned by the delivery engine (they
+	// explain the ImageApplied stage — T9/T10 contract); the observer's WHY
+	// travels in the dual-namespace Events, the StatusPolicyEvaluated
+	// Condition, and the rolloutStatus field itself.
+	detMessage string
+	errs       []error
 }
 
 type rolloutTransition struct {
-	from    imageflowv1alpha1.RolloutStatus
-	to      imageflowv1alpha1.RolloutStatus
-	reason  string
-	message string
+	from imageflowv1alpha1.RolloutStatus
+	to   imageflowv1alpha1.RolloutStatus
 }
 
 func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *imageflowv1alpha1.ImageSubscription) observerPass {
@@ -418,28 +415,20 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 	if !observable {
 		// Honest Unknown (ADR-005 §5, ADR-006): v1 has no evaluator and no
 		// native signal for this class. Any persisted non-terminal rollout
-		// state is flipped ONCE with the contract explanation; Unknown stays.
+		// state is flipped ONCE; the contract explanation rides on the Event
+		// (Reason/Message remain the engine's delivery-stage surface).
 		switch entry.RolloutStatus {
 		case imageflowv1alpha1.RolloutProgressing,
 			imageflowv1alpha1.RolloutSucceeded,
 			imageflowv1alpha1.RolloutFailed:
 			out.transition = &rolloutTransition{
-				from:    entry.RolloutStatus,
-				to:      imageflowv1alpha1.RolloutUnknown,
-				reason:  TargetReasonRolloutUnknown,
-				message: honestUnknownMessage(gvk, target),
+				from: entry.RolloutStatus,
+				to:   imageflowv1alpha1.RolloutUnknown,
 			}
+			out.detMessage = honestUnknownMessage(gvk, target)
 			out.rollout = imageflowv1alpha1.RolloutUnknown
 		case imageflowv1alpha1.RolloutUnknown, "":
 			// "" is initialized by the engine; Unknown is already honest.
-		}
-		if entry.RolloutStatus == imageflowv1alpha1.RolloutUnknown && entry.Reason == TargetReasonApplied {
-			out.reasonFix = &rolloutTransition{
-				from:    imageflowv1alpha1.RolloutUnknown,
-				to:      imageflowv1alpha1.RolloutUnknown,
-				reason:  TargetReasonRolloutUnknown,
-				message: honestUnknownMessage(gvk, target),
-			}
 		}
 		return out
 	}
@@ -460,27 +449,18 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 	out.rollout = det.status
 	switch {
 	case det.status == entry.RolloutStatus:
-		if det.status == imageflowv1alpha1.RolloutUnknown && entry.Reason == TargetReasonApplied {
-			// Rollout stays Unknown but the entry still carries the engine's
-			// steady-state Applied reason: write the honest per-target
-			// explanation once (reason/message only, no state transition).
-			out.reasonFix = &rolloutTransition{
-				from:    det.status,
-				to:      det.status,
-				reason:  det.reason,
-				message: det.message,
-			}
-		}
+		// No verdict change: steady state. Reason/Message stay the engine's
+		// delivery-stage surface; the standing honest-Unknown explanation is
+		// the StatusPolicyEvaluated Condition (ADR-005 §4/§5).
 	case entry.RolloutStatus == "" && det.status == imageflowv1alpha1.RolloutUnknown:
 		// The engine initializes empty rolloutStatus to Unknown on its next
 		// pass with its own reason surface; the observer does not race it.
 	default:
 		out.transition = &rolloutTransition{
-			from:    entry.RolloutStatus,
-			to:      det.status,
-			reason:  det.reason,
-			message: det.message,
+			from: entry.RolloutStatus,
+			to:   det.status,
 		}
+		out.detMessage = det.message
 	}
 	return out
 }
@@ -543,14 +523,16 @@ func (r *SubscriptionObserverReconciler) syncObserverStatus(ctx context.Context,
 	return transition, nil
 }
 
-// applyObserverOutcomes writes the planned transitions (and reason-only
-// fixes) into the computed status, verifying each plan against the fresh
-// state, and collects the Events/metrics samples. Events and metrics are
-// emitted by the caller ONLY after the write landed.
+// applyObserverOutcomes writes the planned transitions into the computed
+// status, verifying each plan against the fresh state, and collects the
+// Events/metrics samples. Events and metrics are emitted by the caller ONLY
+// after the write landed. The per-target Reason/Message fields are NEVER
+// touched here: they remain the delivery engine's ImageApplied-stage surface
+// (T9/T10 contract); the observer's WHY travels in the Events below.
 func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv1alpha1.ImageSubscription, computed *imageflowv1alpha1.ImageSubscriptionStatus, outcomes []observerOutcome, now time.Time, transition *observerTransition) {
 	for i := range outcomes {
 		out := &outcomes[i]
-		if out.transition == nil && out.reasonFix == nil {
+		if out.transition == nil {
 			continue
 		}
 		idx := findTargetEntry(computed.Targets, out.ref)
@@ -558,35 +540,20 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 			continue
 		}
 		entry := &computed.Targets[idx]
-		if out.transition != nil {
-			if entry.RolloutStatus != out.transition.from {
-				// Stale plan: a concurrent write (e.g. the engine seeding a
-				// Progressing re-target) moved the entry. Drop it — that
-				// write re-triggers this controller and the next pass
-				// re-determines from fresh state.
-				continue
-			}
-			entry.RolloutStatus = out.transition.to
-			entry.LastTransitionTime = ptrTime(now)
-			entry.Reason = out.transition.reason
-			entry.Message = authz.TruncateMessage(out.transition.message, 1024)
-		} else {
-			fix := out.reasonFix
-			if entry.RolloutStatus != fix.from || entry.Reason != TargetReasonApplied {
-				continue // stale plan
-			}
-			// Reason/message only: no state change ⇒ LastTransitionTime and
-			// health stay untouched. No Event either — nothing happened to
-			// the rollout; this is the standing explanation surface.
-			entry.Reason = fix.reason
-			entry.Message = authz.TruncateMessage(fix.message, 1024)
+		if entry.RolloutStatus != out.transition.from {
+			// Stale plan: a concurrent write (e.g. the engine seeding a
+			// Progressing re-target) moved the entry. Drop it — that
+			// write re-triggers this controller and the next pass
+			// re-determines from fresh state.
 			continue
 		}
+		entry.RolloutStatus = out.transition.to
+		entry.LastTransitionTime = ptrTime(now)
 		rec := attributedRecord(computed.RecentDeliveries, *entry)
 		transition.events = append(transition.events, observerPlannedEvent{
 			eventType: observerEventType(out.transition.to),
 			reason:    observerEventReason(out.transition.to),
-			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to), 1024),
+			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to, out.detMessage), 1024),
 			ref:       out.ref,
 		})
 		transition.rolloutSamples = append(transition.rolloutSamples, observerMetricSample{
@@ -709,9 +676,11 @@ func (r *SubscriptionObserverReconciler) freshTargetObject(ctx context.Context, 
 
 // observerAuditMessage renders the full per-delivery audit required on
 // rollout-outcome Events (ticket AC6): source, old/new image, target and all
-// four stage results — with the standing note that health is never derived
-// from rollout success (ADR-005 §3).
-func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus) string {
+// four stage results, plus the determination detail explaining WHY the
+// rollout stage reached its verdict — with the standing note that health is
+// never derived from rollout success (ADR-005 §3). The Event is the
+// observer's WHY surface: per-target Reason/Message remain engine-owned.
+func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus, detail string) string {
 	oldImage := auditImageNoneRecorded
 	newImage := entry.DesiredImage
 	if rec != nil {
@@ -729,10 +698,11 @@ func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imagef
 		health = imageflowv1alpha1.HealthUnknown
 	}
 	return fmt.Sprintf(
-		"Rollout observation for %s: source %s %s/%s; old image %s; new image %s; stages — imageResolved: %s, imageApplied: %t, rollout: %s, health: %s (v1 has no status policy evaluator, ADR-005 §4: health is never fabricated and never derived from rollout success).",
+		"Rollout observation for %s: source %s %s/%s; old image %s; new image %s; stages — imageResolved: %s, imageApplied: %t, rollout: %s, health: %s. Determination: %s (v1 has no status policy evaluator, ADR-005 §4: health is never fabricated and never derived from rollout success).",
 		authz.FormatTarget(entry.TargetRef),
 		sub.Spec.Source.Kind, sub.Spec.Source.Namespace, sub.Spec.Source.Name,
-		oldImage, newImage, resolved, entry.ImageApplied, to, health)
+		oldImage, newImage, resolved, entry.ImageApplied, to, health,
+		authz.TruncateMessage(detail, 320))
 }
 
 // attributedRecord finds the recentDeliveries record describing the image
