@@ -297,14 +297,14 @@ func (f *t9cFixture) getSub(t *testing.T) *imageflowv1alpha1.ImageSubscription {
 	return sub
 }
 
-func (f *t9cFixture) getDeploy(t *testing.T, name string) *unstructured.Unstructured {
+func (f *t9cFixture) getDeploy(t *testing.T) *unstructured.Unstructured {
 	t.Helper()
 	u := &unstructured.Unstructured{}
 	u.SetAPIVersion(t9cAPIApps)
 	u.SetKind(t9cKindDeploy)
-	key := types.NamespacedName{Namespace: t9cNamespace, Name: name}
+	key := types.NamespacedName{Namespace: t9cNamespace, Name: t9cDeployName}
 	if err := f.client.Get(context.Background(), key, u); err != nil {
-		t.Fatalf("get deployment %s: %v", name, err)
+		t.Fatalf("get deployment %s: %v", t9cDeployName, err)
 	}
 	return u
 }
@@ -660,7 +660,7 @@ func TestSubscriptionDeliveryGateForbiddenConditionBlocksAllWrites(t *testing.T)
 	if events := drainT9cEvents(f.recorder); len(events) != 0 {
 		t.Fatalf("Forbidden=True must emit no events, got %v", events)
 	}
-	if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cInitialImage {
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
 		t.Fatalf("workload image changed despite Forbidden: %s", image)
 	}
 }
@@ -718,7 +718,7 @@ func TestSubscriptionDeliveryGatePreservesT8ForbiddenEntries(t *testing.T) {
 	if preserved == nil || !equality.Semantic.DeepEqual(*preserved, forbidden) {
 		t.Fatalf("T8 entry must be preserved untouched:\n got %+v\nwant %+v", preserved, forbidden)
 	}
-	if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cInitialImage {
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
 		t.Fatalf("entry-gated target must see zero writes, image is %s", image)
 	}
 	served := t9cEntry(got, buddyName)
@@ -741,6 +741,84 @@ func TestSubscriptionDeliveryGatePreservesT8ForbiddenEntries(t *testing.T) {
 
 // --- happy path: digest-only write, idempotence, latency --------------------
 
+// assertT9cStoredDelivery pins the workload side of a delivered Image Change:
+// digest value in the container, self-owned image field (SSA registry), audit
+// annotation.
+func assertT9cStoredDelivery(t *testing.T, f *t9cFixture) *unstructured.Unstructured {
+	t.Helper()
+	stored := f.getDeploy(t)
+	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
+		t.Fatalf("container image must be the digest reference, got %s", image)
+	}
+	if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
+		t.Fatalf("field manager %s must own the image field: %v", t9cSelfManager, stored.GetManagedFields())
+	}
+	if stored.GetAnnotations()[delivery.ManagedByAnnotation] != delivery.ManagedByAnnotationValue {
+		t.Fatalf("audit annotation missing: %v", stored.GetAnnotations())
+	}
+	return stored
+}
+
+// assertT9cDeliveredEntry pins the per-target entry shape of a delivered
+// target (spec decision 8: digest present, applied, rollout observation
+// started, retry surface reset).
+func assertT9cDeliveredEntry(t *testing.T, entry *imageflowv1alpha1.TargetDeliveryStatus) {
+	t.Helper()
+	if entry == nil || entry.Reason != TargetReasonApplied || !entry.ImageApplied ||
+		entry.DesiredImage != t9cDigestA || entry.ObservedImage != t9cDigestA ||
+		entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing ||
+		entry.HealthStatus != imageflowv1alpha1.HealthUnknown ||
+		entry.ObservedGeneration != 3 || entry.RetryCount != 0 || entry.NextRetryTime != nil ||
+		!entry.LastTransitionTime.Time.Equal(t9cStart) {
+		t.Fatalf("delivered entry shape mismatch: %+v", entry)
+	}
+}
+
+// assertT9cAppliedRecord pins the §12.9 recentDeliveries record shape of a
+// value-changing delivery.
+func assertT9cAppliedRecord(t *testing.T, rec imageflowv1alpha1.DeliveryResult,
+	source imageflowv1alpha1.SubscriptionSourceRef) {
+	t.Helper()
+	if !reflect.DeepEqual(rec.Source, source) || rec.OldImage != "" ||
+		rec.NewImage != t9cDigestA || !rec.ImageApplied ||
+		rec.RolloutResult != imageflowv1alpha1.RolloutProgressing ||
+		rec.HealthResult != imageflowv1alpha1.HealthUnknown ||
+		rec.Reason != TargetReasonApplied || !rec.ObservedAt.Time.Equal(t9cStart) {
+		t.Fatalf("delivery record shape mismatch (ADR-008 §12.9): %+v", rec)
+	}
+}
+
+// assertT9cCleanConditions pins the honest False state of the two conditions
+// T9 owns while Forbidden stays T8's surface.
+func assertT9cCleanConditions(t *testing.T, got *imageflowv1alpha1.ImageSubscription) {
+	t.Helper()
+	conflict := t9cCondition(got, imageflowv1alpha1.ConditionTypeConflict)
+	if conflict == nil || conflict.Status != metav1.ConditionFalse || conflict.Reason != ReasonNoConflicts {
+		t.Fatalf("Conflict condition mismatch: %+v", conflict)
+	}
+	unsupported := t9cCondition(got, imageflowv1alpha1.ConditionTypeUnsupported)
+	if unsupported == nil || unsupported.Status != metav1.ConditionFalse ||
+		unsupported.Reason != ReasonAllTargetsSupported {
+		t.Fatalf("Unsupported condition mismatch: %+v", unsupported)
+	}
+}
+
+// assertT9cDeliveredEvents pins the dual-namespace value-changed ImageApplied
+// events (subscription side + workload side).
+func assertT9cDeliveredEvents(t *testing.T, events []string) {
+	t.Helper()
+	applied := t9cEventsWith(events, EventReasonImageApplied)
+	if len(events) != 2 || len(applied) != 2 {
+		t.Fatalf("expected dual-namespace ImageApplied events, got %v", events)
+	}
+	for _, e := range applied {
+		if !strings.HasPrefix(e, "Normal") || !strings.Contains(e, "Image change delivered") ||
+			!strings.Contains(e, t9cDigestA) || !strings.Contains(e, t9cInitialImage) {
+			t.Fatalf("event shape mismatch: %s", e)
+		}
+	}
+}
+
 func TestSubscriptionDeliveryAppliesDigestOnceAndIsIdempotent(t *testing.T) {
 	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
 	created := t9cStart.Add(-10 * time.Minute)
@@ -755,62 +833,19 @@ func TestSubscriptionDeliveryAppliesDigestOnceAndIsIdempotent(t *testing.T) {
 		t.Fatalf("one apply + one status write expected, got %+v", f.audit)
 	}
 
-	stored := f.getDeploy(t, t9cDeployName)
-	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
-		t.Fatalf("container image must be the digest reference, got %s", image)
-	}
-	if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
-		t.Fatalf("field manager %s must own the image field: %v", t9cSelfManager, stored.GetManagedFields())
-	}
-	if stored.GetAnnotations()[delivery.ManagedByAnnotation] != delivery.ManagedByAnnotationValue {
-		t.Fatalf("audit annotation missing: %v", stored.GetAnnotations())
-	}
+	assertT9cStoredDelivery(t, f)
 
 	got := f.getSub(t)
-	entry := t9cEntry(got, t9cDeployName)
-	if entry == nil || entry.Reason != TargetReasonApplied || !entry.ImageApplied ||
-		entry.DesiredImage != t9cDigestA || entry.ObservedImage != t9cDigestA ||
-		entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing ||
-		entry.HealthStatus != imageflowv1alpha1.HealthUnknown ||
-		entry.ObservedGeneration != 3 || entry.RetryCount != 0 || entry.NextRetryTime != nil ||
-		!entry.LastTransitionTime.Time.Equal(t9cStart) {
-		t.Fatalf("delivered entry shape mismatch: %+v", entry)
-	}
+	assertT9cDeliveredEntry(t, t9cEntry(got, t9cDeployName))
 	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing || got.Status.ObservedGeneration != 3 {
 		t.Fatalf("subscription-level status mismatch: %+v", got.Status)
 	}
 	if len(got.Status.RecentDeliveries) != 1 {
 		t.Fatalf("expected one delivery record, got %+v", got.Status.RecentDeliveries)
 	}
-	record := got.Status.RecentDeliveries[0]
-	if !reflect.DeepEqual(record.Source, sub.Spec.Source) || record.OldImage != "" ||
-		record.NewImage != t9cDigestA || !record.ImageApplied ||
-		record.RolloutResult != imageflowv1alpha1.RolloutProgressing ||
-		record.HealthResult != imageflowv1alpha1.HealthUnknown ||
-		record.Reason != TargetReasonApplied || !record.ObservedAt.Time.Equal(t9cStart) {
-		t.Fatalf("delivery record shape mismatch (ADR-008 §12.9): %+v", record)
-	}
-	conflict := t9cCondition(got, imageflowv1alpha1.ConditionTypeConflict)
-	if conflict == nil || conflict.Status != metav1.ConditionFalse || conflict.Reason != ReasonNoConflicts {
-		t.Fatalf("Conflict condition mismatch: %+v", conflict)
-	}
-	unsupported := t9cCondition(got, imageflowv1alpha1.ConditionTypeUnsupported)
-	if unsupported == nil || unsupported.Status != metav1.ConditionFalse ||
-		unsupported.Reason != ReasonAllTargetsSupported {
-		t.Fatalf("Unsupported condition mismatch: %+v", unsupported)
-	}
-
-	events := drainT9cEvents(f.recorder)
-	applied := t9cEventsWith(events, EventReasonImageApplied)
-	if len(events) != 2 || len(applied) != 2 {
-		t.Fatalf("expected dual-namespace ImageApplied events, got %v", events)
-	}
-	for _, e := range applied {
-		if !strings.HasPrefix(e, "Normal") || !strings.Contains(e, "Image change delivered") ||
-			!strings.Contains(e, t9cDigestA) || !strings.Contains(e, t9cInitialImage) {
-			t.Fatalf("event shape mismatch: %s", e)
-		}
-	}
+	assertT9cAppliedRecord(t, got.Status.RecentDeliveries[0], sub.Spec.Source)
+	assertT9cCleanConditions(t, got)
+	assertT9cDeliveredEvents(t, drainT9cEvents(f.recorder))
 
 	if v := t9cCounterVal(t, f.metrics.applies, applyResultSuccess); v != 1 {
 		t.Fatalf("applies{success} = %v, want 1", v)
@@ -846,25 +881,10 @@ func TestSubscriptionDeliveryAppliesDigestOnceAndIsIdempotent(t *testing.T) {
 
 // --- SSA exclusivity: terminal Conflict, race re-classification, takeover ---
 
-func TestSubscriptionDeliveryTerminalConflictFirstWinsZeroWrites(t *testing.T) {
-	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
-	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
-	t9cSeedOwnership(deploy, t9cRivalManager, t9cContainer)
-	rival := t9cRivalSub(t9cContainer)
-	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy, rival)
-
-	result, err := f.reconcile(t)
-	if err != nil || result.RequeueAfter != 0 {
-		t.Fatalf("terminal Conflict must settle silently: (%+v, %v)", result, err)
-	}
-	if f.audit.applies != 0 {
-		t.Fatalf("first-wins Conflict must perform ZERO apply attempts, got %+v", f.audit)
-	}
-	if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cInitialImage {
-		t.Fatalf("contested image must be untouched, got %s", image)
-	}
-
-	got := f.getSub(t)
+// assertT9cConflictStatus pins the terminal Conflict surface: per-target
+// entry, worst-state aggregate, Conflict condition and the §12.9 record.
+func assertT9cConflictStatus(t *testing.T, got *imageflowv1alpha1.ImageSubscription) {
+	t.Helper()
 	entry := t9cEntry(got, t9cDeployName)
 	if entry == nil || entry.Reason != TargetReasonConflict ||
 		entry.RolloutStatus != imageflowv1alpha1.RolloutConflict || entry.ImageApplied ||
@@ -884,12 +904,34 @@ func TestSubscriptionDeliveryTerminalConflictFirstWinsZeroWrites(t *testing.T) {
 	if len(got.Status.RecentDeliveries) != 1 {
 		t.Fatalf("expected one conflict record, got %+v", got.Status.RecentDeliveries)
 	}
-	record := got.Status.RecentDeliveries[0]
-	if record.Reason != TargetReasonConflict ||
-		record.RolloutResult != imageflowv1alpha1.RolloutConflict ||
-		record.ImageApplied || record.NewImage != t9cDigestA {
-		t.Fatalf("conflict record mismatch: %+v", record)
+	rec := got.Status.RecentDeliveries[0]
+	if rec.Reason != TargetReasonConflict ||
+		rec.RolloutResult != imageflowv1alpha1.RolloutConflict ||
+		rec.ImageApplied || rec.NewImage != t9cDigestA {
+		t.Fatalf("conflict record mismatch: %+v", rec)
 	}
+}
+
+func TestSubscriptionDeliveryTerminalConflictFirstWinsZeroWrites(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	t9cSeedOwnership(deploy, t9cRivalManager, t9cContainer)
+	rival := t9cRivalSub(t9cContainer)
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy, rival)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("terminal Conflict must settle silently: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 0 {
+		t.Fatalf("first-wins Conflict must perform ZERO apply attempts, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("contested image must be untouched, got %s", image)
+	}
+
+	assertT9cConflictStatus(t, f.getSub(t))
+
 	events := drainT9cEvents(f.recorder)
 	if len(events) != 1 || !strings.HasPrefix(events[0], "Warning") ||
 		!strings.Contains(events[0], EventReasonDeliveryConflict) {
@@ -937,7 +979,7 @@ func TestSubscriptionDeliveryConflictRaceReclassifiedWithoutForcedWrite(t *testi
 	if v := t9cCounterVal(t, f.metrics.applies, applyResultSuccess); v != 0 {
 		t.Fatalf("race must not end in a forced success: %v", v)
 	}
-	stored := f.getDeploy(t, t9cDeployName)
+	stored := f.getDeploy(t)
 	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cInitialImage {
 		t.Fatalf("409 re-classification must not write, image is %s", image)
 	}
@@ -968,7 +1010,7 @@ func TestSubscriptionDeliveryOrphanOwnershipTakeoverForcesApply(t *testing.T) {
 	if f.audit.applies != 1 {
 		t.Fatalf("orphan takeover must replay exactly one forced apply, got %+v", f.audit)
 	}
-	stored := f.getDeploy(t, t9cDeployName)
+	stored := f.getDeploy(t)
 	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
 		t.Fatalf("takeover must keep the digest value, got %s", image)
 	}
@@ -1022,7 +1064,7 @@ func TestSubscriptionDeliveryDifferentContainersCoexist(t *testing.T) {
 	if f.audit.applies != 1 {
 		t.Fatalf("exactly one apply expected, got %+v", f.audit)
 	}
-	stored := f.getDeploy(t, t9cDeployName)
+	stored := f.getDeploy(t)
 	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
 		t.Fatalf("own container must receive the digest, got %s", image)
 	}
@@ -1103,7 +1145,7 @@ func TestSubscriptionDeliveryRecentDeliveriesBoundedAndSuperseded(t *testing.T) 
 	if f.audit.applies != 1 || f.audit.statusWrites != 1 {
 		t.Fatalf("per-delivery write budget mismatch: %+v", f.audit)
 	}
-	if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cDigestC {
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cDigestC {
 		t.Fatalf("workload must hold the newest digest, got %s", image)
 	}
 }
@@ -1111,142 +1153,150 @@ func TestSubscriptionDeliveryRecentDeliveriesBoundedAndSuperseded(t *testing.T) 
 // --- failure surfaces: missing target, missing container, RBAC denial -------
 
 func TestSubscriptionDeliveryFailureSurfaces(t *testing.T) {
-	t.Run("target-missing-waits-without-writes", func(t *testing.T) {
-		sub := t9cAuthorizedSub(t9cContainerTarget("checkout-ghost", t9cContainer))
-		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)))
+	t.Run("target-missing-waits-without-writes", t9cScenarioTargetMissing)
+	t.Run("container-absent-reported", t9cScenarioContainerAbsent)
+	t.Run("rbac-denial-retries-with-backoff", t9cScenarioRBACBackoff)
+	t.Run("non-digest-source-rejected", t9cScenarioNonDigestSource)
+}
 
-		result, err := f.reconcile(t)
-		if err != nil {
-			t.Fatalf("waiting state must not error: %v", err)
-		}
-		if result.RequeueAfter != waitingStateRequeue {
-			t.Fatalf("waiting requeue must be %v, got %v", waitingStateRequeue, result.RequeueAfter)
-		}
-		if f.audit.applies != 0 || f.audit.statusWrites != 1 {
-			t.Fatalf("missing target must not touch any workload: %+v", f.audit)
-		}
-		entry := t9cEntry(f.getSub(t), "checkout-ghost")
-		if entry == nil || entry.Reason != TargetReasonTargetNotFound ||
-			entry.DesiredImage != t9cDigestA || entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown ||
-			entry.RetryCount != 0 {
-			t.Fatalf("target-not-found entry mismatch: %+v", entry)
-		}
-		events := drainT9cEvents(f.recorder)
-		if len(t9cEventsWith(events, TargetReasonTargetNotFound)) != 1 {
-			t.Fatalf("expected Warning %s event, got %v", TargetReasonTargetNotFound, events)
-		}
-		if v := t9cCounterVal(t, f.metrics.failures, failureLabelTargetNotFound); v != 1 {
-			t.Fatalf("failures{target_not_found} = %v, want 1", v)
-		}
-	})
+// Each failure surface is one named scenario: an explicit per-target reason,
+// a Warning event on the transition, bounded retry semantics — always zero
+// writes to the workload.
+func t9cScenarioTargetMissing(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget("checkout-ghost", t9cContainer))
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)))
 
-	t.Run("container-absent-reported", func(t *testing.T) {
-		sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
-		deploy := t9cDeployment(t9cDeployName, [2]string{"web", t9cInitialImage})
-		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+	result, err := f.reconcile(t)
+	if err != nil {
+		t.Fatalf("waiting state must not error: %v", err)
+	}
+	if result.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("waiting requeue must be %v, got %v", waitingStateRequeue, result.RequeueAfter)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 1 {
+		t.Fatalf("missing target must not touch any workload: %+v", f.audit)
+	}
+	entry := t9cEntry(f.getSub(t), "checkout-ghost")
+	if entry == nil || entry.Reason != TargetReasonTargetNotFound ||
+		entry.DesiredImage != t9cDigestA || entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown ||
+		entry.RetryCount != 0 {
+		t.Fatalf("target-not-found entry mismatch: %+v", entry)
+	}
+	events := drainT9cEvents(f.recorder)
+	if len(t9cEventsWith(events, TargetReasonTargetNotFound)) != 1 {
+		t.Fatalf("expected Warning %s event, got %v", TargetReasonTargetNotFound, events)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelTargetNotFound); v != 1 {
+		t.Fatalf("failures{target_not_found} = %v, want 1", v)
+	}
+}
 
-		result, err := f.reconcile(t)
-		if err != nil || result.RequeueAfter != waitingStateRequeue {
-			t.Fatalf("container-missing must wait: (%+v, %v)", result, err)
-		}
-		if f.audit.applies != 0 {
-			t.Fatalf("container-missing must not write: %+v", f.audit)
-		}
-		entry := t9cEntry(f.getSub(t), t9cDeployName)
-		if entry == nil || entry.Reason != TargetReasonContainerNotFound || !strings.Contains(entry.Message, "web") {
-			t.Fatalf("container-not-found entry must name the present containers: %+v", entry)
-		}
-		if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, TargetReasonContainerNotFound)) != 1 {
-			t.Fatalf("expected Warning %s event, got %v", TargetReasonContainerNotFound, events)
-		}
-		if v := t9cCounterVal(t, f.metrics.failures, failureLabelContainerNotFound); v != 1 {
-			t.Fatalf("failures{container_not_found} = %v, want 1", v)
-		}
-	})
+func t9cScenarioContainerAbsent(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{"web", t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
 
-	t.Run("rbac-denial-retries-with-backoff", func(t *testing.T) {
-		sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
-		deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
-		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
-		f.audit.blockApply = apierrors.NewForbidden(t9cAppsGR, t9cDeployName, errors.New("rbac denied"))
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("container-missing must wait: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 0 {
+		t.Fatalf("container-missing must not write: %+v", f.audit)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonContainerNotFound || !strings.Contains(entry.Message, "web") {
+		t.Fatalf("container-not-found entry must name the present containers: %+v", entry)
+	}
+	if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, TargetReasonContainerNotFound)) != 1 {
+		t.Fatalf("expected Warning %s event, got %v", TargetReasonContainerNotFound, events)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelContainerNotFound); v != 1 {
+		t.Fatalf("failures{container_not_found} = %v, want 1", v)
+	}
+}
 
-		if _, err := f.reconcile(t); err == nil {
-			t.Fatalf("RBAC denial must surface as a reconcile error for workqueue backoff")
-		}
-		entry := t9cEntry(f.getSub(t), t9cDeployName)
-		if entry == nil || entry.Reason != TargetReasonApplyForbidden ||
-			entry.RetryCount != 1 || !entry.NextRetryTime.Time.Equal(t9cStart.Add(5*time.Second)) {
-			t.Fatalf("first denial entry mismatch (retryCount/nextRetryTime): %+v", entry)
-		}
-		if v := t9cCounterVal(t, f.metrics.applies, applyResultError); v != 1 {
-			t.Fatalf("applies{error} = %v, want 1", v)
-		}
-		if v := t9cCounterVal(t, f.metrics.failures, failureLabelApplyForbidden); v != 1 {
-			t.Fatalf("failures{apply_forbidden} = %v, want 1", v)
-		}
-		if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, TargetReasonApplyForbidden)) != 1 {
-			t.Fatalf("expected Warning %s event on transition, got %v", TargetReasonApplyForbidden, events)
-		}
+func t9cScenarioRBACBackoff(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+	f.audit.blockApply = apierrors.NewForbidden(t9cAppsGR, t9cDeployName, errors.New("rbac denied"))
 
-		f.clock.Advance(time.Minute)
-		f.audit.reset()
-		if _, err := f.reconcile(t); err == nil {
-			t.Fatalf("second denial must error again")
-		}
-		entry = t9cEntry(f.getSub(t), t9cDeployName)
-		if entry.RetryCount != 2 ||
-			!entry.NextRetryTime.Time.Equal(t9cStart.Add(time.Minute+10*time.Second)) {
-			t.Fatalf("backoff must double: %+v", entry)
-		}
-		if v := t9cCounterVal(t, f.metrics.failures, failureLabelApplyForbidden); v != 1 {
-			t.Fatalf("failure counter must count transitions only: %v", v)
-		}
-		if events := drainT9cEvents(f.recorder); len(events) != 0 {
-			t.Fatalf("unchanged failure reason must not re-emit events, got %v", events)
-		}
-		if f.audit.applies != 1 || f.audit.statusWrites != 1 {
-			t.Fatalf("retry pass write budget mismatch: %+v", f.audit)
-		}
+	if _, err := f.reconcile(t); err == nil {
+		t.Fatalf("RBAC denial must surface as a reconcile error for workqueue backoff")
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonApplyForbidden ||
+		entry.RetryCount != 1 || !entry.NextRetryTime.Time.Equal(t9cStart.Add(5*time.Second)) {
+		t.Fatalf("first denial entry mismatch (retryCount/nextRetryTime): %+v", entry)
+	}
+	if v := t9cCounterVal(t, f.metrics.applies, applyResultError); v != 1 {
+		t.Fatalf("applies{error} = %v, want 1", v)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelApplyForbidden); v != 1 {
+		t.Fatalf("failures{apply_forbidden} = %v, want 1", v)
+	}
+	if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, TargetReasonApplyForbidden)) != 1 {
+		t.Fatalf("expected Warning %s event on transition, got %v", TargetReasonApplyForbidden, events)
+	}
 
-		f.audit.blockApply = nil
-		f.clock.Advance(time.Minute)
-		f.audit.reset()
-		if _, err := f.reconcile(t); err != nil {
-			t.Fatalf("unblocked delivery failed: %v", err)
-		}
-		entry = t9cEntry(f.getSub(t), t9cDeployName)
-		if entry.Reason != TargetReasonApplied || entry.RetryCount != 0 || entry.NextRetryTime != nil ||
-			!entry.ImageApplied {
-			t.Fatalf("recovery must reset the retry surface: %+v", entry)
-		}
-		if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cDigestA {
-			t.Fatalf("recovered delivery must land the digest, got %s", image)
-		}
-	})
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err == nil {
+		t.Fatalf("second denial must error again")
+	}
+	entry = t9cEntry(f.getSub(t), t9cDeployName)
+	if entry.RetryCount != 2 ||
+		!entry.NextRetryTime.Time.Equal(t9cStart.Add(time.Minute+10*time.Second)) {
+		t.Fatalf("backoff must double: %+v", entry)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelApplyForbidden); v != 1 {
+		t.Fatalf("failure counter must count transitions only: %v", v)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("unchanged failure reason must not re-emit events, got %v", events)
+	}
+	if f.audit.applies != 1 || f.audit.statusWrites != 1 {
+		t.Fatalf("retry pass write budget mismatch: %+v", f.audit)
+	}
 
-	t.Run("non-digest-source-rejected", func(t *testing.T) {
-		sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
-		deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
-		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cInitialImage, t9cStart.Add(-time.Minute)), deploy)
+	f.audit.blockApply = nil
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("unblocked delivery failed: %v", err)
+	}
+	entry = t9cEntry(f.getSub(t), t9cDeployName)
+	if entry.Reason != TargetReasonApplied || entry.RetryCount != 0 || entry.NextRetryTime != nil ||
+		!entry.ImageApplied {
+		t.Fatalf("recovery must reset the retry surface: %+v", entry)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cDigestA {
+		t.Fatalf("recovered delivery must land the digest, got %s", image)
+	}
+}
 
-		result, err := f.reconcile(t)
-		if err != nil || result.RequeueAfter != 0 {
-			t.Fatalf("tag-ref source must fail closed without requeue churn: (%+v, %v)", result, err)
-		}
-		if f.audit.applies != 0 {
-			t.Fatalf("tag reference must never be written: %+v", f.audit)
-		}
-		entry := t9cEntry(f.getSub(t), t9cDeployName)
-		if entry == nil || entry.Reason != TargetReasonInvalidImageReference || entry.DesiredImage != "" {
-			t.Fatalf("digest-only guard entry mismatch: %+v", entry)
-		}
-		if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cInitialImage {
-			t.Fatalf("workload must be untouched, got %s", image)
-		}
-		if v := t9cCounterVal(t, f.metrics.failures, failureLabelInvalidImageReference); v != 1 {
-			t.Fatalf("failures{invalid_image_reference} = %v, want 1", v)
-		}
-	})
+func t9cScenarioNonDigestSource(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cInitialImage, t9cStart.Add(-time.Minute)), deploy)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("tag-ref source must fail closed without requeue churn: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 0 {
+		t.Fatalf("tag reference must never be written: %+v", f.audit)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonInvalidImageReference || entry.DesiredImage != "" {
+		t.Fatalf("digest-only guard entry mismatch: %+v", entry)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("workload must be untouched, got %s", image)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelInvalidImageReference); v != 1 {
+		t.Fatalf("failures{invalid_image_reference} = %v, want 1", v)
+	}
 }
 
 // --- honest Unsupported for non-first-batch kinds ---------------------------
@@ -1322,7 +1372,7 @@ func TestSubscriptionDeliveryRestartRecoveryConvergesWithoutRewrite(t *testing.T
 	if len(crashed.Status.Targets) != 0 || len(crashed.Status.RecentDeliveries) != 0 {
 		t.Fatalf("crashed pass must leave the status empty, got %+v", crashed.Status)
 	}
-	if image := t9cContainerImage(t, f.getDeploy(t, t9cDeployName), t9cContainer); image != t9cDigestA {
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cDigestA {
 		t.Fatalf("restart fixture precondition broken, image %s", image)
 	}
 

@@ -604,74 +604,12 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		return out
 	}
 
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, obj); err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			out = out.failed(TargetReasonTargetNotFound, fmt.Sprintf(
-				"target %s does not exist (yet); delivery replays when it is created "+
-					"(独占回收/目标后建, ADR-008)", authz.FormatTarget(ref)))
-			out.requeue = waitingStateRequeue
-			return out
-		case meta.IsNoMatchError(err):
-			out = out.failed(TargetReasonKindNotInstalled, fmt.Sprintf(
-				"kind %s is not served by this cluster (CRD absent?); delivery is impossible "+
-					"until the kind exists", authz.FormatTarget(ref)))
-			out.requeue = waitingStateRequeue
-			return out
-		default:
-			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
-				"read target %s: %v", authz.FormatTarget(ref), err))
-			return out
-		}
+	plan, obj, failure := r.planDelivery(ctx, out, target, source, gvk,
+		kindAdapter, pathAdapter, hasPaths)
+	if failure != nil {
+		return *failure
 	}
 	out.targetObject = obj
-
-	var plan *delivery.Plan
-	var planErr error
-	if hasPaths {
-		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, source.ref)
-	} else {
-		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, source.ref)
-	}
-	if planErr != nil {
-		var missing *delivery.ContainersNotFoundError
-		var pathViolation *delivery.PathViolationError
-		switch {
-		case errors.As(planErr, &missing):
-			out = out.failed(TargetReasonContainerNotFound, fmt.Sprintf(
-				"%v; the locator is exact (no default guessing, spec decision 6)", missing))
-			out.requeue = waitingStateRequeue
-			return out
-		case errors.As(planErr, &pathViolation):
-			out = out.failed(TargetReasonInvalidImageField, pathViolation.Error())
-			return out
-		default:
-			out = out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
-				"cannot plan the image fields of target %s: %v", authz.FormatTarget(ref), planErr))
-			return out
-		}
-	}
-	for _, f := range plan.Fields {
-		if !f.Found {
-			// The write contract verifies the live object before writing and
-			// never guesses (spec decision 3): an absent or non-string leaf
-			// is an honest failure, not a default.
-			out = out.failed(TargetReasonInvalidImageField, fmt.Sprintf(
-				"image field %s of target %s is absent or not a string in the live object; "+
-					"zero writes (ADR-005 §1)", f.Path, authz.FormatTarget(ref)))
-			return out
-		}
-	}
-
-	// ADR-005 §2 last-mile guard: the engine never writes a non-digest value,
-	// whatever upstream produced.
-	if !digestRefPatternRegexp.MatchString(source.ref) {
-		return out.failed(TargetReasonInvalidImageReference, fmt.Sprintf(
-			"resolved reference %q is not a digest reference <repo>@sha256:<64hex>; "+
-				"tag references are never written (ADR-005)", source.ref))
-	}
 
 	observed, uniform := observedSummary(plan.Fields)
 	allEqual := uniform && observed == source.ref
@@ -683,7 +621,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	ownership := delivery.InspectOwnership(obj.GetManagedFields(), plan.Fields, fieldManager)
 	conflicted := conflictingPaths(ownership)
 	if len(conflicted) > 0 {
-		if claimant, live := r.findLiveClaimant(ctx, sub, ref, plan, conflicted); live {
+		if claimant, live := r.findLiveClaimant(ctx, sub, ref, conflicted); live {
 			// First-wins: a LIVE subscription owns and still claims the
 			// field. Terminal Conflict, ZERO writes (the later subscriber).
 			out = out.failed(TargetReasonConflict, fmt.Sprintf(
@@ -717,7 +655,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	}
 
 	force := len(conflicted) > 0 // orphaned ImageFlow ownership detected above
-	_, applyErr := r.applyOnce(ctx, plan, fieldManager, force)
+	applyErr := r.applyOnce(ctx, plan, fieldManager, force)
 	if applyErr != nil && apierrors.IsConflict(applyErr) && !force {
 		// Server-side race: someone claimed ownership between the fresh read
 		// and the apply. Re-classify on a NEW fresh read: a live subscription
@@ -737,7 +675,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		}
 		reowned := delivery.InspectOwnership(fresh.GetManagedFields(), plan.Fields, fieldManager)
 		reconflicted := conflictingPaths(reowned)
-		if _, live := r.findLiveClaimant(ctx, sub, ref, plan, reconflicted); live {
+		if _, live := r.findLiveClaimant(ctx, sub, ref, reconflicted); live {
 			out = out.failed(TargetReasonConflict, fmt.Sprintf(
 				"image field(s) %s of target %s were claimed by another subscription while this "+
 					"apply was in flight (field manager %s): first-wins exclusivity (ADR-008), "+
@@ -755,7 +693,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			return out
 		}
 		out.targetObject = fresh
-		_, applyErr = r.applyOnce(ctx, plan, fieldManager, true)
+		applyErr = r.applyOnce(ctx, plan, fieldManager, true)
 	}
 	if applyErr != nil {
 		r.metrics.applies.WithLabelValues(applyResultError).Inc()
@@ -789,6 +727,95 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	out.previousValue = observed
 	out.locator = locatorSummary(target)
 	return r.convergedOutcome(out, source)
+}
+
+// planDelivery performs the pre-write half of the write contract for one
+// target (ADR-005 §1): a fresh uncached read of the live object, adapter
+// field planning, and honest validation of every declared leaf before any
+// write is attempted. It returns the plan and the live object, or — when the
+// target cannot be read, planned or validated — a failure outcome and nil
+// plan (zero writes).
+func (r *SubscriptionDeliveryReconciler) planDelivery(
+	ctx context.Context,
+	out deliveryOutcome,
+	target *imageflowv1alpha1.SubscriptionTarget,
+	source sourceState,
+	gvk schema.GroupVersionKind,
+	kindAdapter delivery.KindAdapter,
+	pathAdapter delivery.PathAdapter,
+	hasPaths bool,
+) (*delivery.Plan, *unstructured.Unstructured, *deliveryOutcome) {
+	ref := target.TargetRef
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, obj); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			out = out.failed(TargetReasonTargetNotFound, fmt.Sprintf(
+				"target %s does not exist (yet); delivery replays when it is created "+
+					"(独占回收/目标后建, ADR-008)", authz.FormatTarget(ref)))
+			out.requeue = waitingStateRequeue
+			return nil, nil, &out
+		case meta.IsNoMatchError(err):
+			out = out.failed(TargetReasonKindNotInstalled, fmt.Sprintf(
+				"kind %s is not served by this cluster (CRD absent?); delivery is impossible "+
+					"until the kind exists", authz.FormatTarget(ref)))
+			out.requeue = waitingStateRequeue
+			return nil, nil, &out
+		default:
+			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+				"read target %s: %v", authz.FormatTarget(ref), err))
+			return nil, nil, &out
+		}
+	}
+	out.targetObject = obj
+
+	var plan *delivery.Plan
+	var planErr error
+	if hasPaths {
+		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, source.ref)
+	} else {
+		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, source.ref)
+	}
+	if planErr != nil {
+		var missing *delivery.ContainersNotFoundError
+		var pathViolation *delivery.PathViolationError
+		switch {
+		case errors.As(planErr, &missing):
+			out = out.failed(TargetReasonContainerNotFound, fmt.Sprintf(
+				"%v; the locator is exact (no default guessing, spec decision 6)", missing))
+			out.requeue = waitingStateRequeue
+			return nil, obj, &out
+		case errors.As(planErr, &pathViolation):
+			out = out.failed(TargetReasonInvalidImageField, pathViolation.Error())
+			return nil, obj, &out
+		default:
+			out = out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
+				"cannot plan the image fields of target %s: %v", authz.FormatTarget(ref), planErr))
+			return nil, obj, &out
+		}
+	}
+	for _, f := range plan.Fields {
+		if !f.Found {
+			// The write contract verifies the live object before writing and
+			// never guesses (spec decision 3): an absent or non-string leaf
+			// is an honest failure, not a default.
+			out = out.failed(TargetReasonInvalidImageField, fmt.Sprintf(
+				"image field %s of target %s is absent or not a string in the live object; "+
+					"zero writes (ADR-005 §1)", f.Path, authz.FormatTarget(ref)))
+			return nil, obj, &out
+		}
+	}
+
+	// ADR-005 §2 last-mile guard: the engine never writes a non-digest value,
+	// whatever upstream produced.
+	if !digestRefPatternRegexp.MatchString(source.ref) {
+		out = out.failed(TargetReasonInvalidImageReference, fmt.Sprintf(
+			"resolved reference %q is not a digest reference <repo>@sha256:<64hex>; "+
+				"tag references are never written (ADR-005)", source.ref))
+		return nil, obj, &out
+	}
+	return plan, obj, nil
 }
 
 // convergedOutcome fills the per-target entry fields of a converged target
@@ -906,16 +933,13 @@ func (r *SubscriptionDeliveryReconciler) applyOnce(
 	plan *delivery.Plan,
 	fieldManager string,
 	force bool,
-) (*unstructured.Unstructured, error) {
+) error {
 	patchOpts := []client.PatchOption{client.FieldOwner(fieldManager)}
 	if force {
 		patchOpts = append(patchOpts, client.ForceOwnership)
 	}
 	applied := plan.Apply.DeepCopy()
-	if err := r.client.Patch(ctx, applied, client.Apply, patchOpts...); err != nil {
-		return nil, err
-	}
-	return applied, nil
+	return r.client.Patch(ctx, applied, client.Apply, patchOpts...)
 }
 
 // observedSummary reduces the declared fields' observed values to one
@@ -986,7 +1010,6 @@ func (r *SubscriptionDeliveryReconciler) findLiveClaimant(
 	ctx context.Context,
 	self *imageflowv1alpha1.ImageSubscription,
 	ref imageflowv1alpha1.TargetReference,
-	plan *delivery.Plan,
 	contested []string,
 ) (claimant string, live bool) {
 	if len(contested) == 0 {

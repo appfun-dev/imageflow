@@ -564,11 +564,14 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 			}
 		})
 
-		It("t9i-envtest-statefulset-container-image-becomes-the-digest-reference", func() {
-			const stream, stsName, subName = "t9i-ac1b-stream", "t9i-ac1b-sts", "t9i-ac1b-sub"
-			t9iCreateStream(stream, t9iDigestB)
-			t9iCreateStatefulSet(stsName, [2]string{t9iContainer, t9iPreImage})
-			sub := t9iNewSub(subName, stream, "", t9iContainerTarget(t9iKindSts, stsName, t9iContainer))
+		// arrangeFirstBatch runs the shared AC1 arrange+act for any first-batch
+		// kind (stream + workload + subscription, gate release, one reconcile);
+		// the kind-specific specs below differ in their verification tails.
+		arrangeFirstBatch := func(kind, stream, objName, subName, digest string,
+			create func(name string, containers ...[2]string)) {
+			t9iCreateStream(stream, digest)
+			create(objName, [2]string{t9iContainer, t9iPreImage})
+			sub := t9iNewSub(subName, stream, "", t9iContainerTarget(kind, objName, t9iContainer))
 			Expect(k8s.Create(ctx, sub)).To(Succeed())
 			t9iAuthorize(subName)
 
@@ -577,10 +580,17 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 			_, err := reconciler.Reconcile(ctx, t9iRequest(subName))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(t9iAudit.applies).To(Equal(t9iTakeoverApplies))
+		}
+
+		It("t9i-envtest-statefulset-container-image-becomes-the-digest-reference", func() {
+			const stream, stsName, subName = "t9i-ac1b-stream", "t9i-ac1b-sts", "t9i-ac1b-sub"
+			arrangeFirstBatch(t9iKindSts, stream, stsName, subName, t9iDigestB, t9iCreateStatefulSet)
 
 			sts := &appsv1.StatefulSet{}
 			Expect(k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: stsName}, sts)).To(Succeed())
 			Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal(t9iDigestB))
+			Expect(sts.Spec.ServiceName).To(Equal(stsName+"-svc"),
+				"the delivery write must not disturb unrelated spec fields")
 			Expect(t9iManagerNames(sts)).To(ContainElement(delivery.FieldManagerFor(ns, subName)))
 			entry := t9iEntry(t9iGetSub(subName), stsName)
 			Expect(entry).NotTo(BeNil())
@@ -590,26 +600,19 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 
 		It("t9i-envtest-daemonset-container-image-becomes-the-digest-reference", func() {
 			const stream, dsName, subName = "t9i-ac1c-stream", "t9i-ac1c-ds", "t9i-ac1c-sub"
-			t9iCreateStream(stream, t9iDigestC)
-			t9iCreateDaemonSet(dsName, [2]string{t9iContainer, t9iPreImage})
-			sub := t9iNewSub(subName, stream, "", t9iContainerTarget(t9iKindDs, dsName, t9iContainer))
-			Expect(k8s.Create(ctx, sub)).To(Succeed())
-			t9iAuthorize(subName)
-
-			t9iResetAudit()
-			reconciler, _ := t9iHandBuilt(config.Config{})
-			_, err := reconciler.Reconcile(ctx, t9iRequest(subName))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(t9iAudit.applies).To(Equal(t9iTakeoverApplies))
+			arrangeFirstBatch(t9iKindDs, stream, dsName, subName, t9iDigestC, t9iCreateDaemonSet)
 
 			ds := &appsv1.DaemonSet{}
 			Expect(k8s.Get(ctx, types.NamespacedName{Namespace: ns, Name: dsName}, ds)).To(Succeed())
 			Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(t9iDigestC))
+			Expect(ds.Spec.Selector.MatchLabels[t9iLabelApp]).To(Equal(dsName),
+				"the delivery write must not disturb the selector")
 			Expect(t9iManagerNames(ds)).To(ContainElement(delivery.FieldManagerFor(ns, subName)))
-			entry := t9iEntry(t9iGetSub(subName), dsName)
+			got := t9iGetSub(subName)
+			entry := t9iEntry(got, dsName)
 			Expect(entry).NotTo(BeNil())
 			Expect(entry.Reason).To(Equal(controller.TargetReasonApplied))
-			Expect(entry.ImageApplied).To(BeTrue())
+			Expect(entry.ObservedGeneration).To(Equal(got.Generation))
 		})
 
 		It("t9i-envtest-equal-value-reconcile-produces-no-patch", func() {
