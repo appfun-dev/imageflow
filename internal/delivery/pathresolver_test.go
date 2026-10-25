@@ -283,14 +283,14 @@ func TestPathResolverMergesNestedFilterPaths(t *testing.T) {
 		},
 	}
 	obj := t10uObject(body)
-	plan, err := NewPathResolver().Plan(obj, []string{
+	_, err := NewPathResolver().Plan(obj, []string{
 		".spec.groups[name=g].pods[name=p].image",
 		".spec.groups[name=g].size",
 	}, t10uDigest)
 	if err == nil {
 		t.Fatal("size is absent under the matched element: Plan must fail")
 	}
-	plan, err = NewPathResolver().Plan(obj, []string{
+	plan, err := NewPathResolver().Plan(obj, []string{
 		".spec.groups[name=g].pods[name=p].image",
 	}, t10uDigest)
 	if err != nil {
