@@ -51,6 +51,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -114,14 +115,14 @@ const (
 	ReasonStatusPolicyEvaluatorDeferred = "EvaluatorDeferred"
 )
 
-// isObserverOwnedReason reports whether a per-target reason was written by
-// this observer. The delivery engine preserves these across its steady-state
-// Applied passes so the observer's rollout explanation survives as the
-// per-target WHY until the next delivery or failure rewrites it.
 // auditImageNoneRecorded renders "no previous image" in audit surfaces
 // (distinct from the engine/mapping lanes' phrasing on purpose).
 const auditImageNoneRecorded = "none recorded"
 
+// isObserverOwnedReason reports whether a per-target reason was written by
+// this observer. The delivery engine preserves these across its steady-state
+// Applied passes so the observer's rollout explanation survives as the
+// per-target WHY until the next delivery or failure rewrites it.
 func isObserverOwnedReason(reason string) bool {
 	switch reason {
 	case TargetReasonRolloutProgressing, TargetReasonRolloutSucceeded,
@@ -162,9 +163,9 @@ func observerEventReason(status imageflowv1alpha1.RolloutStatus) string {
 
 func observerEventType(status imageflowv1alpha1.RolloutStatus) string {
 	if status == imageflowv1alpha1.RolloutFailed {
-		return "Warning"
+		return corev1.EventTypeWarning
 	}
-	return "Normal"
+	return corev1.EventTypeNormal
 }
 
 func observerResultLabel(status imageflowv1alpha1.RolloutStatus) string {
