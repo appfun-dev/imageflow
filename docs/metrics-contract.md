@@ -174,6 +174,42 @@ Cardinality is bounded by construction: 2 results + 4 verdicts = at most 6 serie
 
 Registration: the shared collector set is registered once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`) on first gate construction; duplicate registration attempts are tolerated so test managers can coexist.
 
+## T9 delivery metrics
+
+The delivery write engine (ADR-005/ADR-008, the `subscription-delivery` controller in `internal/controller` with the engine in `internal/delivery`) exposes the end-to-end delivery latency required by the T9 ticket plus the apply-result, failure and bounded-history surfaces. One latency sample is recorded per delivered Image Change (from the registration's `created` timestamp on the source tag event to the moment the value-changing SSA apply landed); one apply result per SSA apply round; one failure per target-entry TRANSITION into a failure reason (steady-state retries do not inflate the counter); one truncation per `recentDeliveries` record that leaves the bounded window.
+
+- `imageflow_delivery_latency_seconds` – Histogram. End-to-end delivery latency: Image Change (source tag event `created`) → the value-changing apply landed on the target. Only deliveries that changed a field value are observed — an equal-value reconcile performs no write and records no sample. Buckets span the sub-second fresh-registration path up to requeue-bounded recovery windows: `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900` seconds.
+
+  ```promql
+  histogram_quantile(0.95,
+    sum by (le) (rate(imageflow_delivery_latency_seconds_bucket[15m])))
+  ```
+
+- `imageflow_delivery_applies_total{result}` – Counter. SSA apply rounds performed by the engine. `conflict` counts a 409 from the API server (the exclusivity arbiter), which triggers the ADR-008 re-classification: a live rival claimant makes the Conflict terminal, a vanished one leads to a forced takeover that is then counted as `success`. Equal-value reconciles with self-ownership issue NO apply and are deliberately absent from this counter, so its rate is also the write-amplification surface:
+
+  ```promql
+  sum(rate(imageflow_delivery_applies_total{result!="success"}[5m]))
+    /
+  sum(rate(imageflow_delivery_applies_total[5m]))
+  ```
+
+- `imageflow_delivery_target_failures_total{reason}` – Counter. Target entries that transitioned into a failure reason. The per-failure breakdown is alertable directly from the `reason` label:
+
+  ```promql
+  sum by (reason) (rate(imageflow_delivery_target_failures_total[15m]))
+  ```
+
+- `imageflow_deliveries_truncated_total` – Counter. `recentDeliveries` records dropped from the bounded window (`--subscription-delivery-limit`, CRD cap 5, ADR-008 retention). The full history lives in kube Events and the cluster audit log; each truncation batch is additionally audited with a `DeliveryHistoryTruncated` Event on the subscription.
+
+Label vocabularies (bounded; documented exception to the reconcile-oriented `result` values in the label convention above):
+
+- `result` – one of `success` (an uncontested or forced apply landed), `conflict` (the API server answered 409: another manager claims a declared field), `error` (any other apply failure — RBAC, vanished target, API server errors).
+- `reason` – the snake_case rendering of the frozen per-target reason vocabulary surfaced in `status.targets[].reason`: `target_not_found`, `container_not_found`, `apply_forbidden`, `apply_error`, `unsupported`, `source_unresolved`, `invalid_image_reference`, `invalid_target`, `invalid_image_field`, `kind_not_installed`, `conflict`.
+
+Cardinality is bounded by construction: 3 results + 11 reasons + 1 bare counter = at most 15 series (plus the histogram buckets). There are deliberately **no workload, namespace or subscription labels** — target and subscription names are unbounded user input; per-delivery attribution belongs to `status.targets[]`, `status.recentDeliveries[]`, kube Events (`ImageApplied` on both the subscription and the workload, `DeliveryConflict`, `UnsupportedTarget`, `DeliveryHistoryTruncated`) and structured logs. Reconcile-level health of the engine is read from the unchanged controller-runtime metrics (`controller_runtime_reconcile_total{controller="subscription-delivery"}`, `workqueue_*{name="subscription-delivery"}`).
+
+Registration: the shared T9 collector set is registered once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`) on first reconciler construction; duplicate registration attempts are tolerated so test managers can coexist.
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.
