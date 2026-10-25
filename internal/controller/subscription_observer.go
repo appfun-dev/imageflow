@@ -118,6 +118,10 @@ const (
 // this observer. The delivery engine preserves these across its steady-state
 // Applied passes so the observer's rollout explanation survives as the
 // per-target WHY until the next delivery or failure rewrites it.
+// auditImageNoneRecorded renders "no previous image" in audit surfaces
+// (distinct from the engine/mapping lanes' phrasing on purpose).
+const auditImageNoneRecorded = "none recorded"
+
 func isObserverOwnedReason(reason string) bool {
 	switch reason {
 	case TargetReasonRolloutProgressing, TargetReasonRolloutSucceeded,
@@ -616,7 +620,7 @@ func healInFlightRecords(computed *imageflowv1alpha1.ImageSubscriptionStatus, ou
 		// Attribution: the record describes the image actually on the object
 		// (ObservedImage), or — while the engine's status write is still
 		// converging — the desired image of an applied entry.
-		if rec.NewImage != entry.ObservedImage && !(entry.ImageApplied && rec.NewImage == entry.DesiredImage) {
+		if rec.NewImage != entry.ObservedImage && (!entry.ImageApplied || rec.NewImage != entry.DesiredImage) {
 			continue
 		}
 		out := findOutcome(outcomes, rec.TargetRef)
@@ -707,7 +711,7 @@ func (r *SubscriptionObserverReconciler) freshTargetObject(ctx context.Context, 
 // four stage results — with the standing note that health is never derived
 // from rollout success (ADR-005 §3).
 func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus) string {
-	oldImage := "none"
+	oldImage := auditImageNoneRecorded
 	newImage := entry.DesiredImage
 	if rec != nil {
 		if rec.OldImage != "" {

@@ -158,7 +158,7 @@ func renderFloatEvent(sub *imageflowv1alpha1.ImageSubscription, rec *imageflowv1
 // recorded — with the standing honesty note (imageApplied never implies
 // rollout success, ADR-005 §3).
 func floatSummaryMessage(sub *imageflowv1alpha1.ImageSubscription, rec *imageflowv1alpha1.DeliveryResult) string {
-	oldImage := "none"
+	oldImage := auditImageNoneRecorded
 	if rec.OldImage != "" {
 		oldImage = rec.OldImage
 	}

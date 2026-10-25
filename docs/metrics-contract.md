@@ -210,6 +210,42 @@ Cardinality is bounded by construction: 3 results + 11 reasons + 1 bare counter 
 
 Registration: the shared T9 collector set is registered once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`) on first reconciler construction; duplicate registration attempts are tolerated so test managers can coexist.
 
+## T11 observer metrics
+
+The workload observer (ADR-005 §3/ADR-006, the `subscription-observer` controller in `internal/controller/subscription_observer*.go`) exposes the per-stage outcome counters that complete the T1 per-stage failure-rate surface: the ImageResolved/ImageApplied stages are covered by the T9 delivery metrics above, the Rollout stage by `imageflow_observer_rollout_outcomes_total`, and the Health stage by `imageflow_observer_health_outcomes_total`. One rollout sample is recorded per per-target `rolloutStatus` TRANSITION the observer writes (steady-state passes record nothing — the same write gate that suppresses duplicate status writes and Events); one health sample accompanies each such transition, reporting the health result recorded at that moment.
+
+- `imageflow_observer_rollout_outcomes_total{kind,result}` – Counter. Per-target rollout transitions determined from native workload status (built-in first-batch kinds, ADR-006) or flipped to the honest Unknown (every non-observable class, ADR-005 §5). Rollout-stage failure rate:
+
+  ```promql
+  sum(rate(imageflow_observer_rollout_outcomes_total{result="failed"}[15m]))
+    /
+  sum(rate(imageflow_observer_rollout_outcomes_total[15m]))
+  ```
+
+  Per-kind breakdown (which built-in adapter's rollouts fail):
+
+  ```promql
+  sum by (kind) (rate(imageflow_observer_rollout_outcomes_total{result="failed"}[15m]))
+  ```
+
+- `imageflow_observer_health_outcomes_total{result}` – Counter. Health-stage results recorded at rollout transitions. In v1 only `unknown` is ever incremented: the CUE status policy evaluator is deferred to v1.1 (ADR-005 §4/D-016), health is never fabricated and never derived from rollout success. A nonzero rate on `healthy`/`unhealthy` in v1 is therefore a contract-violation alert by construction:
+
+  ```promql
+  sum(rate(imageflow_observer_health_outcomes_total{result!="unknown"}[15m]))
+  ```
+
+Label vocabularies (bounded; same documented exception style as §T9):
+
+- `kind` – one of `deployment`, `statefulset`, `daemonset` (the ADR-006 first batch, judged from native status) or `other` (every non-observable class: third-party CRDs, imageFields-located targets, excluded kinds — all end in the honest Unknown).
+- `result` (rollout) – one of `progressing`, `succeeded`, `failed`, `unknown`: the lower-case rendering of the `rolloutStatus` value the transition wrote (`Superseded`/`Conflict` are engine-owned terminal states and never observer transitions, hence absent).
+- `result` (health) – one of `healthy`, `unhealthy`, `unknown` (the `healthStatus` vocabulary; v1 emits `unknown` only).
+
+Cardinality is bounded by construction: 4 kinds × 4 rollout results + 3 health results = at most 19 series. There are deliberately **no workload, namespace or subscription labels** — per-delivery attribution belongs to `status.targets[]`, `status.recentDeliveries[]`, the dual-namespace kube Events (`RolloutSucceeded`, `RolloutFailed`, `RolloutUnknown`, `DeliverySuperseded` alongside T9's `ImageApplied`) and structured logs. Reconcile-level health of the observer is read from the unchanged controller-runtime metrics (`controller_runtime_reconcile_total{controller="subscription-observer"}`, `workqueue_*{name="subscription-observer"}`).
+
+The mirror float-up (delivery summaries surfaced onto `ImageStreamTag`/`ImageTag` `status.events[]`) reuses the §T5 collector `imageflow_mirror_events_truncated_total{kind}` and the `EventSummaryTruncated` Event when summaries leave the bounded window (`--mirror-event-limit`, CRD cap 5, ADR-008 §4): it is the same fact on the same window, so no separate T11 collector exists for it.
+
+Registration: the shared T11 collector set is registered once per process against controller-runtime's global metrics registry (`sigs.k8s.io/controller-runtime/pkg/metrics.Registry`) on first observer reconciler construction; duplicate registration attempts are tolerated so test managers can coexist (same pattern as §T9).
+
 ## Stability
 
 - Metric names and label keys are part of the operator contract.
