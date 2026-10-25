@@ -32,13 +32,21 @@ func init() {
 	Registrars = append(Registrars, pathAdapterRegistrar{})
 }
 
+// RegisterGenericPathAdapter installs the generic image field resolver
+// into the single delivery PathAdapter slot. Exported for lanes that boot
+// individual controllers instead of the full Registrar set (the T10
+// integration lane); production goes through Register below.
+func RegisterGenericPathAdapter() {
+	delivery.RegisterPathAdapter(delivery.NewPathResolver())
+}
+
 // Register installs the generic resolver into the delivery PathAdapter
 // slot. It ignores mgr on purpose: the resolver is a pure function of the
 // live object handed to it by the delivery engine, and the registration
 // contract smoke test (setup_test.go) calls every Registrar with a fake
 // manager that panics on any method call.
 func (pathAdapterRegistrar) Register(_ ctrl.Manager, _ Options) error {
-	delivery.RegisterPathAdapter(delivery.NewPathResolver())
+	RegisterGenericPathAdapter()
 	ctrl.Log.WithName("setup").Info("registered the generic image field resolver (T10)",
 		"slot", pathAdapterRegistrarName, "pathAdapter", "delivery.PathResolver")
 	return nil
