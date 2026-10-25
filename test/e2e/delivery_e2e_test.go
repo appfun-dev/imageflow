@@ -62,9 +62,15 @@ const (
 	t9eTag            = "current"
 	t9eContainer      = "app"
 	t9eSidecar        = "log-shipper"
-	t9ePreImage       = "quay.io/example/checkout:pre-e2e"
-	t9eRepo           = "quay.io/example/checkout@sha256:"
-	t9eAppLabel       = "t9e-app"
+	// t9ePreImage must be a REAL pullable image: the StatefulSet controller
+	// health-gates rolling updates (it never rolls a pod that is not
+	// Running&Ready), so a fictional pre-image would wedge the STS spec's
+	// native-rollout assertion forever. pause becomes Ready instantly; the
+	// post-delivery pod (fictional digest) is expected to ErrImagePull — the
+	// assertion reads pod SPEC images, which is the rollout-started evidence.
+	t9ePreImage = "registry.k8s.io/pause:3.9"
+	t9eRepo     = "quay.io/example/checkout@sha256:"
+	t9eAppLabel = "t9e-app"
 
 	t9eDeployStream  = "t9e-checkout-stream"
 	t9eDeploy        = "t9e-checkout-api"
@@ -401,6 +407,15 @@ spec:
 	It("t9-e2e-statefulset-digest-registration-delivers-and-starts-the-native-rollout", func() {
 		t9eRegister(t9eStsMapping, t9eStsStream, t9eTag, t9eDigestB)
 
+		// podManagementPolicy: Parallel + blanket tolerations are deliberate e2e plumbing:
+		// the digests here are fictional (quay.io/example), so pods reach ImagePullBackOff and
+		// never become Ready. Under the default OrderedReady policy the StatefulSet controller's
+		// monotonic gate (processReplica returns early on !isRunningAndReady) blocks the rolling
+		// update of a never-Ready ordinal-0 pod forever; Parallel removes the gate so the native
+		// controller demonstrably recreates the pod from the delivered digest template. The
+		// tolerations let the pod schedule onto the tainted single kind node, so the kubelet
+		// pull attempt is honest rollout-start evidence (the T9 contract ends at the field write
+		// plus the native rollout beginning; observation of rollout outcome is the T11 lane).
 		t9eYAML("t9e-sts", fmt.Sprintf(`
 apiVersion: apps/v1
 kind: StatefulSet
@@ -410,6 +425,7 @@ metadata:
 spec:
   replicas: 1
   serviceName: %[1]s-svc
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       %[3]s: %[1]s
@@ -419,6 +435,8 @@ spec:
         %[3]s: %[1]s
     spec:
       terminationGracePeriodSeconds: 0
+      tolerations:
+      - operator: Exists
       containers:
       - name: %[4]s
         image: %[5]s
