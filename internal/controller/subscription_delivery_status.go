@@ -94,7 +94,7 @@ func (r *SubscriptionDeliveryReconciler) syncDeliveryStatus(
 		mergedTargets, records := r.mergeTargetEntries(&fresh, pass.outcomes, source, now, &transition)
 		computed.Targets = mergedTargets
 		computed.RecentDeliveries = mergeRecentDeliveries(
-			fresh.Status.RecentDeliveries, records, deliveryLimit(r.config), &transition)
+			fresh.Status.RecentDeliveries, records, deliveryLimit(r.config), pass.outcomes, &transition)
 		setDeliveryConditions(&computed, fresh.Generation, pass.outcomes, now)
 		computed.RolloutStatus = AggregateRolloutStatus(computed.Targets)
 		computed.ObservedGeneration = fresh.Generation
@@ -261,7 +261,8 @@ func planEffects(
 	reasonChanged bool,
 ) {
 	freshConverged := base.DesiredImage == source.ref &&
-		base.ImageApplied && base.Reason == TargetReasonApplied
+		base.ImageApplied &&
+		base.Reason == TargetReasonApplied
 
 	switch {
 	case out.delivered:
@@ -367,6 +368,7 @@ func mergeRecentDeliveries(
 	existing []imageflowv1alpha1.DeliveryResult,
 	records []imageflowv1alpha1.DeliveryResult,
 	limit int,
+	outcomes []deliveryOutcome,
 	transition *deliveryTransition,
 ) []imageflowv1alpha1.DeliveryResult {
 	if len(records) == 0 {
@@ -381,7 +383,16 @@ func mergeRecentDeliveries(
 				(entry.RolloutResult == "" || entry.RolloutResult == imageflowv1alpha1.RolloutProgressing) {
 				// The in-flight delivery of this target is superseded by the
 				// new digest: terminal, never retried, never rolled back.
+				inFlight := entry.RolloutResult
+				if inFlight == "" {
+					inFlight = imageflowv1alpha1.RolloutProgressing
+				}
 				entry.RolloutResult = imageflowv1alpha1.RolloutSuperseded
+				// T11 (AC5/AC6): the supersede itself is audited with a
+				// dual-namespace Event carrying source, old/new image,
+				// target and the per-stage results at supersede time.
+				transition.events = append(transition.events,
+					supersededEvent(*entry, inFlight, record, outcomes))
 			}
 		}
 		merged = append([]imageflowv1alpha1.DeliveryResult{record}, merged...)
@@ -391,6 +402,45 @@ func mergeRecentDeliveries(
 		merged = merged[:limit]
 	}
 	return merged
+}
+
+// supersededEvent renders the DeliverySuperseded audit Event planned by
+// mergeRecentDeliveries. The target-side copy rides the fresh workload
+// object held by this pass's outcome (uncached read before the apply); when
+// the outcome carries none (e.g. the engine pass did not re-read the
+// target), emitPlannedEffects writes the subscription-side copy only.
+func supersededEvent(
+	entry imageflowv1alpha1.DeliveryResult,
+	inFlight imageflowv1alpha1.RolloutStatus,
+	record imageflowv1alpha1.DeliveryResult,
+	outcomes []deliveryOutcome,
+) plannedEvent {
+	message := fmt.Sprintf(
+		"Delivery superseded (latest-wins, ADR-008): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished; recorded Superseded — terminal, no retry, no cross-target rollback; the native rollout controller converges the workload on its own. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+		entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+		authz.FormatTarget(entry.TargetRef), record.NewImage,
+		entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+	ev := plannedEvent{
+		eventType: corev1.EventTypeNormal,
+		reason:    EventReasonDeliverySuperseded,
+		message:   authz.TruncateMessage(message, 1024),
+	}
+	for i := range outcomes {
+		if outcomes[i].ref == entry.TargetRef && outcomes[i].targetObject != nil {
+			ev.targetSide = true
+			ev.targetObject = outcomes[i].targetObject
+			break
+		}
+	}
+	return ev
+}
+
+// healthOrUnknown renders an unset health result honestly as Unknown.
+func healthOrUnknown(health imageflowv1alpha1.HealthStatus) string {
+	if health == "" {
+		return string(imageflowv1alpha1.HealthUnknown)
+	}
+	return string(health)
 }
 
 // setDeliveryConditions maintains the two T9-owned subscription conditions

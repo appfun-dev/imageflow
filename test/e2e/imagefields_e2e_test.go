@@ -224,9 +224,11 @@ spec:
 	}
 
 	// t10eDelivered waits for the write surface: digest in the declared
-	// path(s) + the frozen per-target status. RolloutProgressing is the
-	// engine's kind-agnostic seed on a value-changing write; the
-	// third-party OBSERVATION semantics are the T11 lane.
+	// path(s) + the frozen per-target status. The engine seeds
+	// RolloutProgressing on a value-changing write; the T11 observer then
+	// settles third-party targets (no usable Status Policy) to honest
+	// Unknown per ADR-005 §5 — success is never fabricated, so the
+	// aggregate below is Unknown once observation lands (ticket #12 AC3).
 	t10eDelivered := func(sub, edge, digest string, paths ...string) {
 		Eventually(func(g Gomega) {
 			for _, p := range paths {
@@ -240,7 +242,7 @@ spec:
 			g.Expect(t10eEntryReason(sub, edge)).To(Equal("Applied"))
 			g.Expect(t10eJSONPath("imagesubscription", sub,
 				fmt.Sprintf(t10eAppliedPthFmt, edge))).To(Equal("true"))
-			g.Expect(t10eRollout(sub)).To(Equal("Progressing"))
+			g.Expect(t10eRollout(sub)).To(Equal("Unknown"))
 		}, "2m", "2s").Should(Succeed())
 	}
 
