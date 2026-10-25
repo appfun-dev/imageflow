@@ -656,7 +656,7 @@ func (r *mirrorReconciler) recordTruncation(ctx context.Context, obj client.Obje
 		return
 	}
 	mirrorEventsTruncated.WithLabelValues(kind).Add(float64(dropped))
-	r.recorder.Eventf(obj, corev1.EventTypeNormal, "EventSummaryTruncated",
+	r.recorder.Eventf(obj, corev1.EventTypeNormal, mirrorEventReasonSummaryTruncated,
 		"mirror event summary is bounded to %d entries; %d older entries left the window "+
 			"(full history lives in kube Events and the cluster audit log, ADR-008)",
 		r.eventLimit, dropped)

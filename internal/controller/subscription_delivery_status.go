@@ -13,7 +13,10 @@ package controller
 //   - for every other entry this engine owns desiredImage, observedImage,
 //     imageApplied, rolloutStatus, healthStatus, retryCount, nextRetryTime,
 //     observedGeneration and lastTransitionTime; Reason/Message of entries it
-//     owns are written freely;
+//     owns are written freely, EXCEPT the T11 observer-owned rollout
+//     explanations (Reason Rollout*): a steady-state Applied opinion with no
+//     delivery consequence preserves them (preserveObserverReason) so the
+//     per-target "why" of the persisted rollout state survives;
 //   - persisted rollout/health values are PRESERVED unless this pass has a
 //     delivery consequence (Progressing seed on a value-changing apply,
 //     terminal Conflict) or the field is empty (initialization to Unknown —
@@ -94,7 +97,7 @@ func (r *SubscriptionDeliveryReconciler) syncDeliveryStatus(
 		mergedTargets, records := r.mergeTargetEntries(&fresh, pass.outcomes, source, now, &transition)
 		computed.Targets = mergedTargets
 		computed.RecentDeliveries = mergeRecentDeliveries(
-			fresh.Status.RecentDeliveries, records, deliveryLimit(r.config), &transition)
+			fresh.Status.RecentDeliveries, records, deliveryLimit(r.config), pass.outcomes, &transition)
 		setDeliveryConditions(&computed, fresh.Generation, pass.outcomes, now)
 		computed.RolloutStatus = AggregateRolloutStatus(computed.Targets)
 		computed.ObservedGeneration = fresh.Generation
@@ -232,8 +235,16 @@ func mergeEntry(
 	}
 
 	reasonChanged := base.Reason != out.reason
-	merged.Reason = out.reason
-	merged.Message = out.message
+	// T11 preservation (see file header): when this pass has no delivery
+	// consequence and its opinion is the steady-state Applied one, an
+	// observer-owned rollout explanation stays the per-target Reason/Message
+	// until the next delivery, failure or observer transition rewrites it.
+	if preserveObserverReason(base, out) {
+		reasonChanged = false
+	} else {
+		merged.Reason = out.reason
+		merged.Message = out.message
+	}
 	merged.ObservedGeneration = generation
 
 	switch {
@@ -250,6 +261,17 @@ func mergeEntry(
 	return merged, plan
 }
 
+// preserveObserverReason reports whether the persisted entry carries a T11
+// observer-owned rollout explanation (RolloutProgressing/RolloutSucceeded/
+// RolloutFailed/RolloutUnknown) that must survive this pass: the pass forced
+// no rollout value itself (out.rolloutSet == nil) and its opinion is the
+// steady-state Applied one. Delivery consequences (Progressing seed,
+// Conflict, any failure reason) still overwrite it — the engine's WHY wins
+// while a delivery is failing or landing.
+func preserveObserverReason(base imageflowv1alpha1.TargetDeliveryStatus, out *deliveryOutcome) bool {
+	return out.rolloutSet == nil && out.reason == TargetReasonApplied && isObserverOwnedReason(base.Reason)
+}
+
 // planEffects gates delivery records, Events and latency observations on the
 // persisted base state (fresh-read dedup, file header).
 func planEffects(
@@ -260,8 +282,13 @@ func planEffects(
 	now time.Time,
 	reasonChanged bool,
 ) {
+	// An observer-owned rollout explanation (T11) counts as converged too:
+	// desired+applied match and the reason surface simply carries the
+	// observer's WHY — emitting a confirmation record here would spam the
+	// bounded window on every steady-state pass.
 	freshConverged := base.DesiredImage == source.ref &&
-		base.ImageApplied && base.Reason == TargetReasonApplied
+		base.ImageApplied &&
+		(base.Reason == TargetReasonApplied || isObserverOwnedReason(base.Reason))
 
 	switch {
 	case out.delivered:
@@ -367,6 +394,7 @@ func mergeRecentDeliveries(
 	existing []imageflowv1alpha1.DeliveryResult,
 	records []imageflowv1alpha1.DeliveryResult,
 	limit int,
+	outcomes []deliveryOutcome,
 	transition *deliveryTransition,
 ) []imageflowv1alpha1.DeliveryResult {
 	if len(records) == 0 {
@@ -381,7 +409,16 @@ func mergeRecentDeliveries(
 				(entry.RolloutResult == "" || entry.RolloutResult == imageflowv1alpha1.RolloutProgressing) {
 				// The in-flight delivery of this target is superseded by the
 				// new digest: terminal, never retried, never rolled back.
+				inFlight := entry.RolloutResult
+				if inFlight == "" {
+					inFlight = imageflowv1alpha1.RolloutProgressing
+				}
 				entry.RolloutResult = imageflowv1alpha1.RolloutSuperseded
+				// T11 (AC5/AC6): the supersede itself is audited with a
+				// dual-namespace Event carrying source, old/new image,
+				// target and the per-stage results at supersede time.
+				transition.events = append(transition.events,
+					supersededEvent(*entry, inFlight, record, outcomes))
 			}
 		}
 		merged = append([]imageflowv1alpha1.DeliveryResult{record}, merged...)
@@ -391,6 +428,45 @@ func mergeRecentDeliveries(
 		merged = merged[:limit]
 	}
 	return merged
+}
+
+// supersededEvent renders the DeliverySuperseded audit Event planned by
+// mergeRecentDeliveries. The target-side copy rides the fresh workload
+// object held by this pass's outcome (uncached read before the apply); when
+// the outcome carries none (e.g. the engine pass did not re-read the
+// target), emitPlannedEffects writes the subscription-side copy only.
+func supersededEvent(
+	entry imageflowv1alpha1.DeliveryResult,
+	inFlight imageflowv1alpha1.RolloutStatus,
+	record imageflowv1alpha1.DeliveryResult,
+	outcomes []deliveryOutcome,
+) plannedEvent {
+	message := fmt.Sprintf(
+		"Delivery superseded (latest-wins, ADR-008): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished; recorded Superseded — terminal, no retry, no cross-target rollback; the native rollout controller converges the workload on its own. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+		entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+		authz.FormatTarget(entry.TargetRef), record.NewImage,
+		entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+	ev := plannedEvent{
+		eventType: corev1.EventTypeNormal,
+		reason:    EventReasonDeliverySuperseded,
+		message:   authz.TruncateMessage(message, 1024),
+	}
+	for i := range outcomes {
+		if outcomes[i].ref == entry.TargetRef && outcomes[i].targetObject != nil {
+			ev.targetSide = true
+			ev.targetObject = outcomes[i].targetObject
+			break
+		}
+	}
+	return ev
+}
+
+// healthOrUnknown renders an unset health result honestly as Unknown.
+func healthOrUnknown(health imageflowv1alpha1.HealthStatus) string {
+	if health == "" {
+		return string(imageflowv1alpha1.HealthUnknown)
+	}
+	return string(health)
 }
 
 // setDeliveryConditions maintains the two T9-owned subscription conditions
