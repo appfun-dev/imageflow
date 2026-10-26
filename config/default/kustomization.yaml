@@ -22,8 +22,9 @@ resources:
 - ../webhook
 # [CERTMANAGER] Enabled by ticket T3: the single webhook service (ADR-001) is
 # fail-closed, so its serving certificate chain must be part of the default
-# deployment. Metrics certificates deliberately stay disabled — the metrics
-# exposure posture is a T12 deployment-hardening decision.
+# deployment. Metrics certificates deliberately stay disabled — ADR-010 rules
+# v1 metrics exposure = plaintext HTTP :8080, in-cluster only (the exact
+# secure-metrics upgrade path lives in docs/ops.md §Metrics).
 - ../certmanager
 # [PROMETHEUS] To enable prometheus monitor, uncomment all sections with [PROMETHEUS].
 #- ../prometheus
@@ -46,8 +47,8 @@ patches:
 
 # [CERTMANAGER] Webhook replacements enabled by ticket T3. The metrics
 # certificate blocks (controller-manager-metrics-service -> metrics-certs,
-# Prometheus ServiceMonitor TLS) stay commented out: secure metrics is a T12
-# decision (see the posture note in test/e2e/e2e_test.go).
+# Prometheus ServiceMonitor TLS) stay commented out per ADR-010 (plaintext
+# :8080 for v1; upgrade path in docs/ops.md §Metrics).
 replacements:
 # - source: # Uncomment the following block to enable certificates for metrics
 #     kind: Service
