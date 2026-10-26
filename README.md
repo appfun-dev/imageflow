@@ -21,7 +21,7 @@ adding a new controller never touches existing controller code.
 4. `manager.Run` calls `controller.Setup`, which registers every entry in `Registrars`.
 
 `internal/controller/setup_test.go` smoke-tests this contract;
-`internal/controller/noop_controller.go` is the reference example.
+`internal/controller/import_controller.go` is the reference example.
 
 Metrics naming and label dimensions are frozen in
 [`docs/metrics-contract.md`](docs/metrics-contract.md) (stable across versions).

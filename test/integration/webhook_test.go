@@ -50,7 +50,7 @@ import (
 // internal/controller/webhook.go). No controllers are registered here on
 // purpose: controller-runtime validates controller names against a
 // process-global registry and the Manager suite in this package already runs
-// manager.Run with the noop controller.
+// manager.Run with the full production controller set.
 //
 // The webhook server is served with the envtest-generated serving certificate
 // (WebhookInstallOptions.LocalServingCertDir) because the API server must trust

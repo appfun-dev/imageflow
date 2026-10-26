@@ -34,7 +34,8 @@ func TestIntegration(t *testing.T) {
 // Manager runs the full manager exactly once for the whole ordered container.
 // Starting it per spec fails in CI: controller-runtime validates controller names
 // against its process-global metrics registry, so a second manager.Run in the same
-// process aborts with "controller with name noop already exists".
+// process aborts with "controller with name <name> already exists" for the first
+// registrar that registers twice.
 var _ = Describe("Manager", Ordered, func() {
 	var (
 		env    *envtest.Environment
