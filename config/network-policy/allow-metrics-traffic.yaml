@@ -1,6 +1,18 @@
 # This NetworkPolicy allows ingress traffic
 # with Pods running on namespaces labeled with 'metrics: enabled'. Only Pods on those
 # namespaces are able to gather data from the metrics endpoint.
+#
+# OPT-IN overlay (ADR-010): not part of config/default — enabling it by
+# default could silently block scrapes on clusters whose monitoring namespace
+# lacks the label. Activate with:
+#   1. uncomment `- ../network-policy` in config/default/kustomization.yaml
+#      (or `kubectl apply -k config/network-policy` alongside the install), and
+#   2. label every namespace that runs a scraper:
+#        kubectl label ns <monitoring-ns> metrics=enabled
+#
+# The port matches the v1 plaintext metrics posture (:8080, ADR-010). If you
+# flip the manager to secure metrics (--metrics-secure=true on :8443 — see
+# docs/ops.md §Metrics), change the port below to 8443 accordingly.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -23,5 +35,5 @@ spec:
           matchLabels:
             metrics: enabled  # Only from namespaces with this label
       ports:
-        - port: 8443
+        - port: 8080
           protocol: TCP

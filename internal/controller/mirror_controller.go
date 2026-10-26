@@ -118,11 +118,10 @@ func (mirrorRegistrar) Register(mgr ctrl.Manager, opts Options) error {
 
 // RBAC of the whole manager, regenerated into config/rbac/role.yaml by
 // `make manifests`. The imagestreams rule is read-only: stream status belongs
-// to the mapping/import paths (T4/T9), never to this controller. The pods and
-// configmaps rules preserve the T1 scaffold role.yaml entries (the noop
-// example controller watches ConfigMaps; dropping them would break the
-// deployed manager); per-controller marker ownership is consolidated by the
-// P5/T12 RBAC pass.
+// to the mapping/import paths (T4/T9), never to this controller. The core
+// pods rule lives with its owning controller (the subscription observer scans
+// pods for rollout health); the T12 RBAC consolidation removed the scaffold
+// configmaps rule together with the example controller that needed it.
 //
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreams,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreamtags,verbs=get;list;watch;create;update;patch;delete
@@ -132,8 +131,6 @@ func (mirrorRegistrar) Register(mgr ctrl.Manager, opts Options) error {
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imageartifacts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // RegisterMirror wires the mirror synthesis controller onto mgr under the
 // given controller name. The name is a parameter because controller-runtime
