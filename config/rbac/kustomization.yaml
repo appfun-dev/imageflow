@@ -18,3 +18,11 @@ resources:
 - metrics_auth_role.yaml
 - metrics_auth_role_binding.yaml
 - metrics_reader_role.yaml
+# Hand-written catalog RBAC (T12, ADR-003 R3): org-wide read-only catalog
+# ClusterRole + namespaced app-team Role template. Both deploy UNBOUND —
+# binding them to teams/groups is an org decision documented in
+# docs/quickstart.md and docs/ops.md. The Role lands in imageflow-system as a
+# live template; apply a copy into each app-team namespace (a RoleBinding
+# cannot reference a Role in another namespace).
+- catalog_reader_clusterrole.yaml
+- app_team_role.yaml
