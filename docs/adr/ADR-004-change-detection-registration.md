@@ -1,9 +1,9 @@
 # ADR-004：变化检测与登记路径（v1 = Mapping + Import；BuildRun watcher 推迟 v1.1）
 
-- 状态：Accepted
+- 状态：Amended（2026-11-07，v1.1 grilling Wave B Q3）
 - 日期：2026-10-16
-- 决策人：项目负责人（grilling 第 3 轮 Q10=A、Q16-R6/R7/R8）
-- 关联：`docs/research/2026-10-16-upstream-fact-check.md` §2/§3；ADR-007；ADR-002（待落）
+- 决策人：项目负责人（grilling 第 3 轮 Q10=A、Q16-R6/R7/R8；v1.1 grilling Wave B Q3）
+- 关联：`docs/research/2026-10-16-upstream-fact-check.md` §2/§3；ADR-007；ADR-002（待落）；ADR-011（v1.1 注解语法与 Condition 语义）
 
 ## 背景
 
@@ -16,7 +16,7 @@ Vanilla-K8s-first（ADR-001）下没有原生 ImageStream 机制，tag→digest 
    - **ImageStreamImport**（拉）：短生命周期任务 CRD，按需或 `scheduled`，经 OCI/Docker Registry v2 API 读取外部 Registry（ADR-007）。
 2. **任务 CRD 公共机制**：完成后 TTL GC——成功 1h / 失败 24h（失败留排查，controller flag）；全程 Event 审计；**Mapping 幂等**：同 `(stream, tag, digest)` 重复登记 = no-op 成功，不产生重复 Image Change。
 3. **ImportPolicy v1 最小子集**：`spec.tags[].importPolicy = {scheduled, intervalSeconds}`（interval 默认 900s）；OpenShift 的 tagPolicy / importMode / referencePolicy 等全部推迟到兼容层。
-4. **BuildRun watcher（v1.1，设计已冻结）**：feature-gated 可选 controller；检测到 `shipwright.io/v1beta1` Build CRD 自动启用；Build/BuildRun 以注解锁定目标 stream/tag；`Succeeded` 且 `.status.output.digest` 非空 → 内部等价于一次 Mapping；**缺 digest（构建策略未提供 system results，调研 §2 已核实）→ 拒绝登记 + 明确 Condition，不静默降级**。
+4. **BuildRun watcher（v1.1，设计已冻结）**：feature-gated 可选 controller；**显式 flag `--enable-buildrun-watcher=true` 启用（默认 false）**，启用后前置检测 `shipwright.io/v1beta1` Build CRD 存在性，不存在则报错退出（~~原设计：检测到 CRD 自动启用~~ v1.1 grilling Wave B Q3 修订为显式 opt-in，理由：避免隐式行为、符合 operator 最佳实践）；Build/BuildRun 以注解锁定目标 stream/tag（注解语法见 ADR-011）；`Succeeded` 且 `.status.output.digest` 非空 → 内部等价于一次 Mapping；**缺 digest（构建策略未提供 system results，调研 §2 已核实）→ 拒绝登记 + 明确 Condition，不静默降级**（Condition 语义见 ADR-011）。
 
 ## 备选方案
 
@@ -37,4 +37,10 @@ Vanilla-K8s-first（ADR-001）下没有原生 ImageStream 机制，tag→digest 
 
 ## 未解决问题
 
-- v1.1 watcher 的注解锁定语法（annotation key/value 约定）—— v1.1 设计文档细化，不得影响 v1 API。
+- ~~v1.1 watcher 的注解锁定语法（annotation key/value 约定）~~ 已决（v1.1 grilling Wave B Q2）：见 ADR-011。
+
+## 修订记录
+
+| 日期 | 修订人 | 变更 | 理由 |
+|------|--------|------|------|
+| 2026-11-07 | v1.1 grilling Wave B Q3 | §4 feature gate 从「检测到 CRD 自动启用」改为「显式 flag 启用（默认 false）+ CRD 存在性前置检测」 | 避免隐式行为、符合 operator 最佳实践；用户明确选择覆盖原设计默认值 |
