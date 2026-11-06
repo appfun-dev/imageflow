@@ -26,3 +26,7 @@ resources:
 # cannot reference a Role in another namespace).
 - catalog_reader_clusterrole.yaml
 - app_team_role.yaml
+# BuildRun Watcher RBAC (T1, ADR-004 Amended + ADR-011): feature-gated
+# ClusterRole for Shipwright BuildRun access. Deployed unbound; bind only when
+# --enable-buildrun-watcher=true on the manager deployment.
+- buildrun_watcher_clusterrole.yaml

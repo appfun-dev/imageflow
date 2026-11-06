@@ -18,6 +18,7 @@ type Config struct {
 	SubscriptionDeliveryLimit int
 	MirrorEventLimit          int
 	RegistryAllowlist         []string
+	EnableBuildRunWatcher     bool
 }
 
 // BindFlags registers all ImageFlow controller flags on the supplied flag set.
@@ -41,6 +42,8 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 		"Maximum number of recent events kept in mirror (ImageStreamTag/ImageTag) statuses.")
 	fs.Var(&stringSliceValue{dst: &c.RegistryAllowlist}, "registry-allowlist",
 		"Comma-separated list of allowed registry hostnames (empty = allow all).")
+	fs.BoolVar(&c.EnableBuildRunWatcher, "enable-buildrun-watcher", false,
+		"Enable the Shipwright BuildRun watcher controller. Requires shipwright.io/v1beta1 Build CRD to be installed.")
 }
 
 // Validate performs lightweight cross-field checks after flags are parsed.
