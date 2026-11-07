@@ -44,6 +44,9 @@ const (
 	RegistrationSourceMapping RegistrationSource = "ImageStreamMapping"
 	// RegistrationSourceImport is the pull path (ImageStreamImport, T7).
 	RegistrationSourceImport RegistrationSource = "ImageStreamImport"
+	// RegistrationSourceBuildRun is the build-output path (Shipwright BuildRun
+	// watcher, T3 / ADR-011).
+	RegistrationSourceBuildRun RegistrationSource = "BuildRun"
 )
 
 // Event reasons emitted on the catalog side. The vocabulary is shared by both
@@ -63,6 +66,14 @@ const (
 	EventReasonMappingRegistered = "MappingRegistered"
 	// EventReasonMappingFailed is the failure audit event on the Mapping task.
 	EventReasonMappingFailed = "MappingFailed"
+	// EventReasonBuildRunRegistered is the success audit event on a watched
+	// BuildRun whose output was registered into the catalog (T3, ADR-011).
+	EventReasonBuildRunRegistered = "BuildRunRegistered"
+	// EventReasonBuildRunFailed is the failure audit event on a watched
+	// BuildRun whose output could not be registered; the message is prefixed
+	// with the failure code (MissingDigest/StreamNotFound/...), mirroring the
+	// Mapping failure taxonomy.
+	EventReasonBuildRunFailed = "BuildRunFailed"
 	// EventReasonTaskGarbageCollected announces TTL deletion of a task object.
 	EventReasonTaskGarbageCollected = "TaskGarbageCollected"
 )
