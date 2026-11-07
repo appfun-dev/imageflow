@@ -1,0 +1,10 @@
+.git/
+.xerj-data/
+.worktrees/
+go.sum
+bin/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico

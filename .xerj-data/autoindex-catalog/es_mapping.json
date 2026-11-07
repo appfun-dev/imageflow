@@ -1,0 +1,137 @@
+{
+  "properties": {
+    "doc_kind": {
+      "type": "keyword"
+    },
+    "slug": {
+      "type": "keyword"
+    },
+    "index_name": {
+      "type": "keyword"
+    },
+    "record_count": {
+      "type": "long"
+    },
+    "junk_records": {
+      "type": "long"
+    },
+    "bytes": {
+      "type": "long"
+    },
+    "file_count": {
+      "type": "long"
+    },
+    "formats": {
+      "type": "keyword"
+    },
+    "time_field": {
+      "type": "keyword"
+    },
+    "time_min": {
+      "type": "date",
+      "format": "strict_date_optional_time||epoch_millis"
+    },
+    "time_max": {
+      "type": "date",
+      "format": "strict_date_optional_time||epoch_millis"
+    },
+    "semantic_field": {
+      "type": "keyword"
+    },
+    "fields_json": {
+      "type": "text"
+    },
+    "sample_queries_json": {
+      "type": "text"
+    },
+    "notes": {
+      "type": "text"
+    },
+    "path": {
+      "type": "keyword"
+    },
+    "file_key": {
+      "type": "keyword"
+    },
+    "format": {
+      "type": "keyword"
+    },
+    "status": {
+      "type": "keyword"
+    },
+    "reason": {
+      "type": "text"
+    },
+    "duplicate_of": {
+      "type": "keyword"
+    },
+    "records": {
+      "type": "long"
+    },
+    "junk": {
+      "type": "long"
+    },
+    "run_id": {
+      "type": "keyword"
+    },
+    "corr_kind": {
+      "type": "keyword"
+    },
+    "a_dataset": {
+      "type": "keyword"
+    },
+    "b_dataset": {
+      "type": "keyword"
+    },
+    "a_index": {
+      "type": "keyword"
+    },
+    "b_index": {
+      "type": "keyword"
+    },
+    "a_field": {
+      "type": "keyword"
+    },
+    "b_field": {
+      "type": "keyword"
+    },
+    "grade": {
+      "type": "keyword"
+    },
+    "overlap": {
+      "type": "long"
+    },
+    "containment": {
+      "type": "double"
+    },
+    "range_overlap": {
+      "type": "double"
+    },
+    "pearson_r": {
+      "type": "double"
+    },
+    "activity_correlated": {
+      "type": "boolean"
+    },
+    "started": {
+      "type": "date",
+      "format": "strict_date_optional_time||epoch_millis"
+    },
+    "summary_generated_at": {
+      "type": "date",
+      "format": "strict_date_optional_time||epoch_millis"
+    },
+    "invocation_telemetry_scope": {
+      "type": "keyword"
+    },
+    "junk_records_this_run": {
+      "type": "long"
+    },
+    "prefix": {
+      "type": "keyword"
+    },
+    "corpus_scope": {
+      "type": "keyword"
+    }
+  }
+}

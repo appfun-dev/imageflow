@@ -1,0 +1,46 @@
+{
+  "properties": {
+    "apiVersion": {
+      "type": "keyword"
+    },
+    "kind": {
+      "type": "keyword"
+    },
+    "metadata_labels_app.kubernetes.io/managed-by": {
+      "type": "keyword"
+    },
+    "metadata_labels_app.kubernetes.io/name": {
+      "type": "keyword"
+    },
+    "metadata_name": {
+      "type": "keyword"
+    },
+    "metadata_namespace": {
+      "type": "keyword"
+    },
+    "rules": {
+      "type": "text"
+    },
+    "ax_path": {
+      "type": "keyword"
+    },
+    "ax_paths": {
+      "type": "keyword"
+    },
+    "ax_file": {
+      "type": "keyword"
+    },
+    "ax_locator": {
+      "type": "keyword"
+    },
+    "ax_dataset": {
+      "type": "keyword"
+    },
+    "ax_run": {
+      "type": "keyword"
+    },
+    "ax_format": {
+      "type": "keyword"
+    }
+  }
+}

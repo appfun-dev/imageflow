@@ -1,0 +1,75 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "owner",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "org_id",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "dashboard_id",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "name",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "updated_at",
+        "field_type": "date",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "date_precision": "millis",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      }
+    ],
+    "version": 5,
+    "updated_at": "2026-10-27T11:38:06.223618Z"
+  },
+  "dynamic": "dynamic"
+}

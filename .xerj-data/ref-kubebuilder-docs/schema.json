@@ -1,0 +1,447 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "body",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "dimensions": 384,
+          "similarity": "cosine",
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "embedding": {
+          "target_field": "body_vector"
+        }
+      },
+      {
+        "name": "code",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "defs",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "end_line",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "headings",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "impl",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "kind",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "language",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "line",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "name",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "path",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "section",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "start_line",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "symbol_count",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "text",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "dimensions": 384,
+          "similarity": "cosine",
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "embedding": {
+          "target_field": "text_vector"
+        }
+      },
+      {
+        "name": "title",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_path",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_paths",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_file",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_locator",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_dataset",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_run",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "ax_format",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "body_vector",
+        "field_type": "vector",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "dimensions": 384,
+          "similarity": "cosine",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "text_vector",
+        "field_type": "vector",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "dimensions": 384,
+          "similarity": "cosine",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "symbols",
+        "field_type": "object",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "fields": [
+          {
+            "name": "name",
+            "field_type": "text",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": false,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            },
+            "fields": [
+              {
+                "name": "keyword",
+                "field_type": "keyword",
+                "options": {
+                  "analyzed": true,
+                  "stored": true,
+                  "indexed": true,
+                  "doc_values": true,
+                  "term_positions": true,
+                  "ignore_above": 256,
+                  "multi_value": true,
+                  "boost": 1.0
+                }
+              }
+            ]
+          },
+          {
+            "name": "kind",
+            "field_type": "text",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": false,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            },
+            "fields": [
+              {
+                "name": "keyword",
+                "field_type": "keyword",
+                "options": {
+                  "analyzed": true,
+                  "stored": true,
+                  "indexed": true,
+                  "doc_values": true,
+                  "term_positions": true,
+                  "ignore_above": 256,
+                  "multi_value": true,
+                  "boost": 1.0
+                }
+              }
+            ]
+          },
+          {
+            "name": "line",
+            "field_type": "long",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          },
+          {
+            "name": "end_line",
+            "field_type": "long",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          }
+        ]
+      }
+    ],
+    "version": 26,
+    "updated_at": "2026-10-27T15:40:48.006725Z"
+  },
+  "dynamic": "dynamic"
+}

@@ -1,0 +1,1 @@
+{"fields":{"valid_at":"keyword","created_at":"keyword","detector":"keyword","dst":"keyword","schema_version":"keyword","edge_id":"keyword","src":"keyword","meta_version":"keyword","confidence":"keyword","expired_at":"keyword","invalid_at":"keyword","evidence":"keyword","type":"keyword","src_format":"keyword","src_file":"keyword","dst_format":"keyword","weight":"keyword"}}

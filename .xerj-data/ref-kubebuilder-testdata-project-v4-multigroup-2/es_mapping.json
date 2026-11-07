@@ -1,0 +1,58 @@
+{
+  "properties": {
+    "apiVersion": {
+      "type": "keyword"
+    },
+    "kind": {
+      "type": "keyword"
+    },
+    "metadata_annotations_controller-gen.kubebuilder.io/version": {
+      "type": "keyword"
+    },
+    "metadata_name": {
+      "type": "keyword"
+    },
+    "spec_group": {
+      "type": "keyword"
+    },
+    "spec_names_kind": {
+      "type": "keyword"
+    },
+    "spec_names_listKind": {
+      "type": "keyword"
+    },
+    "spec_names_plural": {
+      "type": "keyword"
+    },
+    "spec_names_singular": {
+      "type": "keyword"
+    },
+    "spec_scope": {
+      "type": "keyword"
+    },
+    "spec_versions": {
+      "type": "semantic_text"
+    },
+    "ax_path": {
+      "type": "keyword"
+    },
+    "ax_paths": {
+      "type": "keyword"
+    },
+    "ax_file": {
+      "type": "keyword"
+    },
+    "ax_locator": {
+      "type": "keyword"
+    },
+    "ax_dataset": {
+      "type": "keyword"
+    },
+    "ax_run": {
+      "type": "keyword"
+    },
+    "ax_format": {
+      "type": "keyword"
+    }
+  }
+}

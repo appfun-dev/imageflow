@@ -1,0 +1,472 @@
+2026-10-27T11:38:49.528847Z  INFO xerj: xerj v1.0.0-rc.99 starting
+2026-10-27T11:38:49.528922Z  WARN xerj: embedding.mode=lexical is fixed per index at ingest time. Documents keep the vectors written when they were indexed. Changing --embed-mode does not re-embed an existing index; re-index into a new index. The fast default is lexical (`xerj --embed-mode lexical`, or omit the flag).
+2026-10-27T11:38:49.529046Z  WARN xerj: could not publish the admin-key path for port 9200: Operation not permitted (os error 1)
+2026-10-27T11:38:49.536039Z  WARN xerj_engine::node_lock: reclaimed stale node.lock left by pid 71910 (process is not running) at .xerj-data/node.lock
+2026-10-27T11:38:49.536197Z  INFO xerj_engine::governor: memory: detected 64 GiB usable, using a 16 GiB cap (auto tier); change with limits.max_process_memory_mb or XERJ_MAX_PROCESS_MEMORY_MB (0 = whole machine)
+2026-10-27T11:38:49.536217Z  INFO xerj_engine::governor: resource governor initialised (parent circuit breaker) memtable_budget_mb=4096 memory_limit_mb=16384 memory_limit_source=Auto memory_watermark_mb=15564 memory_watermark_pct=95 max_query_memory_mb=512 max_concurrent_searches=64 max_concurrent_bulks=8 disk_flood_pct=95 segment_hydration_cache_mb=3276 segment_hydration_cache_source=Auto
+2026-10-27T11:38:49.542515Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_alert_rules"
+2026-10-27T11:38:49.543018Z  INFO xerj_engine::index: index opened name=".xerj_alert_rules" doc_count=0
+2026-10-27T11:38:49.543059Z  INFO xerj_engine::engine: opened existing index name=".xerj_alert_rules"
+2026-10-27T11:38:49.544160Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_connections"
+2026-10-27T11:38:49.544534Z  INFO xerj_engine::index: index opened name=".xerj_connections" doc_count=0
+2026-10-27T11:38:49.544555Z  INFO xerj_engine::engine: opened existing index name=".xerj_connections"
+2026-10-27T11:38:49.545503Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_cluster_state"
+2026-10-27T11:38:49.545813Z  INFO xerj_engine::index: index opened name=".xerj_cluster_state" doc_count=0
+2026-10-27T11:38:49.545832Z  INFO xerj_engine::engine: opened existing index name=".xerj_cluster_state"
+2026-10-27T11:38:49.546744Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_passkeys"
+2026-10-27T11:38:49.547036Z  INFO xerj_engine::index: index opened name=".xerj_passkeys" doc_count=0
+2026-10-27T11:38:49.547051Z  INFO xerj_engine::engine: opened existing index name=".xerj_passkeys"
+2026-10-27T11:38:49.547741Z  INFO xerj_storage::index_store: version map rebuilt from segments total=1 tombstones_applied=0
+2026-10-27T11:38:49.548057Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_magic_links"
+2026-10-27T11:38:49.548350Z  INFO xerj_engine::index: index opened name=".xerj_magic_links" doc_count=1
+2026-10-27T11:38:49.548368Z  INFO xerj_engine::engine: opened existing index name=".xerj_magic_links"
+2026-10-27T11:38:49.549240Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_api_tokens"
+2026-10-27T11:38:49.549530Z  INFO xerj_engine::index: index opened name=".xerj_api_tokens" doc_count=0
+2026-10-27T11:38:49.549549Z  INFO xerj_engine::engine: opened existing index name=".xerj_api_tokens"
+2026-10-27T11:38:49.550444Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_prefs"
+2026-10-27T11:38:49.550767Z  INFO xerj_engine::index: index opened name=".xerj_prefs" doc_count=0
+2026-10-27T11:38:49.550784Z  INFO xerj_engine::engine: opened existing index name=".xerj_prefs"
+2026-10-27T11:38:49.551655Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_views"
+2026-10-27T11:38:49.551951Z  INFO xerj_engine::index: index opened name=".xerj_views" doc_count=0
+2026-10-27T11:38:49.551969Z  INFO xerj_engine::engine: opened existing index name=".xerj_views"
+2026-10-27T11:38:49.552893Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_idp_config"
+2026-10-27T11:38:49.553203Z  INFO xerj_engine::index: index opened name=".xerj_idp_config" doc_count=0
+2026-10-27T11:38:49.553267Z  INFO xerj_engine::engine: opened existing index name=".xerj_idp_config"
+2026-10-27T11:38:49.554393Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_alert_fires"
+2026-10-27T11:38:49.554722Z  INFO xerj_engine::index: index opened name=".xerj_alert_fires" doc_count=0
+2026-10-27T11:38:49.554740Z  INFO xerj_engine::engine: opened existing index name=".xerj_alert_fires"
+2026-10-27T11:38:49.555869Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_users"
+2026-10-27T11:38:49.556179Z  INFO xerj_engine::index: index opened name=".xerj_users" doc_count=0
+2026-10-27T11:38:49.556200Z  INFO xerj_engine::engine: opened existing index name=".xerj_users"
+2026-10-27T11:38:49.557098Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_sessions"
+2026-10-27T11:38:49.557406Z  INFO xerj_engine::index: index opened name=".xerj_sessions" doc_count=0
+2026-10-27T11:38:49.557423Z  INFO xerj_engine::engine: opened existing index name=".xerj_sessions"
+2026-10-27T11:38:49.558296Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_audit"
+2026-10-27T11:38:49.558587Z  INFO xerj_engine::index: index opened name=".xerj_audit" doc_count=0
+2026-10-27T11:38:49.558602Z  INFO xerj_engine::engine: opened existing index name=".xerj_audit"
+2026-10-27T11:38:49.559302Z  INFO xerj_storage::index_store: version map rebuilt from segments total=17 tombstones_applied=0
+2026-10-27T11:38:49.559650Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj_dashboards"
+2026-10-27T11:38:49.559997Z  INFO xerj_engine::index: index opened name=".xerj_dashboards" doc_count=17
+2026-10-27T11:38:49.560017Z  INFO xerj_engine::engine: opened existing index name=".xerj_dashboards"
+2026-10-27T11:38:49.560075Z  INFO xerj: Cluster mode disabled — running in single-node mode
+2026-10-27T11:38:49.647509Z  INFO xerj_storage::index_store: segment flushed segment_id="2adaa04a-c00e-4055-ab4a-c812b5b202a5" doc_count=1 min_seq=18 max_seq=18
+2026-10-27T11:38:49.647584Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2adaa04a-c00e-4055-ab4a-c812b5b202a5" doc_count=1
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ XERJ CONSOLE  ·  first-launch setup                                          │
+│                                                                              │
+│ Open this link in your browser to claim the owner account by                 │
+│ enrolling a passkey.  Valid for 30 minutes.  Single use.                     │
+│                                                                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+  http://localhost:9200/_xerj-console/setup#token=voazwTVgEO7Pq17giArxK9gN9i2OhJgw5ztfc-chL_g
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│ Need a fresh link?  Restart this node: a new one is printed on boot.         │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+2026-10-27T11:38:49.657592Z  INFO xerj_engine::wal_tap: WAL tap loop started (disabled until wal_tap.enabled and a target are set)
+2026-10-27T11:38:49.659461Z  INFO xerj: startup complete in 130ms
+
+  ██╗  ██╗███████╗██████╗      ██╗
+  ╚██╗██╔╝██╔════╝██╔══██╗     ██║
+   ╚███╔╝ █████╗  ██████╔╝     ██║
+   ██╔██╗ ██╔══╝  ██╔══██╗██   ██║
+  ██╔╝ ██╗███████╗██║  ██║╚█████╔╝
+  ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚════╝   v1.0.0-rc.99
+
+ the unified search engine for AI — connect, autoindex, query
+
+ Native REST  127.0.0.1:8080 [plain]
+ ES-compat    127.0.0.1:9200 [plain]
+ gRPC         127.0.0.1:8081 [h2c — plaintext, no TLS]
+ Data dir     .xerj-data
+ Started in   130ms
+
+ Xerj Console UI    http://localhost:9200/_xerj-console/  (74 files bundled)
+
+ ┌─ Deployment posture (see PATH_TO_100_PCT_v0.6.0_to_v1.0.md) ──
+ │ ✓  Bind:   127.0.0.1 — loopback only; nothing off this host can reach the
+ │           listeners. Pass --bind 0.0.0.0 to expose the node.
+ │ ⚠  TLS:    listener is plain TCP — terminate TLS at a reverse proxy
+ │           (or enable in-process TLS: tls.enabled = true)
+ │ ✓  Auth:   single API-key (no RBAC; per-doc / per-field controls roadmap v0.9)
+ │ ✓  Audit:  hash-chained log of writes + searches + API-key ops, kept in <data_dir>/audit.jsonl
+ │           (last 4096 entries, one per request; /_audit/* requires read_audit)
+ │ ⚠  Encryption-at-rest: not engine-level — use OS FDE or S3 SSE for now
+ └────────────────────────────────────────────────────────────────
+
+2026-10-27T11:38:49.659647Z  INFO xerj_engine::engine: memory/disk sampler thread started (parent circuit breaker) period_ms=100
+2026-10-27T11:38:49.659694Z  INFO xerj: ES-compat listening on 127.0.0.1:9200
+2026-10-27T11:38:49.659696Z  INFO xerj::grpc: gRPC XerjSearch + XerjHub listening on 127.0.0.1:8081
+2026-10-27T11:38:49.659695Z  INFO xerj: native REST listening on 127.0.0.1:8080
+2026-10-27T11:38:49.764725Z  WARN xerj_engine::governor: disk flood-stage watermark crossed — engaging read_only_allow_delete write block used_pct=98 flood_pct=95 free=10.0gb
+2026-10-27T11:44:19.751175Z  INFO xerj_storage::index_store: segment flushed segment_id="68e47286-91c2-4949-931b-c0190f780eac" doc_count=1 min_seq=2 max_seq=2
+2026-10-27T11:44:19.751434Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="68e47286-91c2-4949-931b-c0190f780eac" doc_count=1
+2026-10-27T15:39:32.853086Z  INFO xerj_engine::governor: disk usage back below flood-stage watermark — releasing write block used_pct=97
+2026-10-27T15:39:46.045733Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/imageflow-docs"
+2026-10-27T15:39:46.077631Z  INFO xerj_engine::index: index created name="imageflow-docs"
+2026-10-27T15:39:46.085655Z  INFO xerj_engine::engine: index created with custom settings name="imageflow-docs"
+2026-10-27T15:39:46.115751Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/autoindex-catalog"
+2026-10-27T15:39:46.139737Z  INFO xerj_engine::index: index created name="autoindex-catalog"
+2026-10-27T15:39:46.147698Z  INFO xerj_engine::engine: index created with custom settings name="autoindex-catalog"
+2026-10-27T15:39:47.032800Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj-memory-imageflow-edges"
+2026-10-27T15:39:47.060774Z  INFO xerj_engine::index: index created name=".xerj-memory-imageflow-edges"
+2026-10-27T15:39:47.068737Z  INFO xerj_engine::engine: index created with custom settings name=".xerj-memory-imageflow-edges"
+2026-10-27T15:39:48.715539Z  INFO xerj_storage::index_store: segment flushed segment_id="583f0b35-168a-4323-b5f3-8d1db8d113c3" doc_count=346 min_seq=12 max_seq=2756
+2026-10-27T15:39:48.716417Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="583f0b35-168a-4323-b5f3-8d1db8d113c3" doc_count=346
+2026-10-27T15:39:48.830907Z  INFO xerj_storage::index_store: segment flushed segment_id="5823ce1a-6cce-4b8c-a7f2-ea488a5a18a9" doc_count=343 min_seq=11 max_seq=2780
+2026-10-27T15:39:48.831686Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5823ce1a-6cce-4b8c-a7f2-ea488a5a18a9" doc_count=343
+2026-10-27T15:39:48.939975Z  INFO xerj_storage::index_store: segment flushed segment_id="5a6baa3b-3a27-4580-8d79-f8c33f4230ae" doc_count=337 min_seq=2 max_seq=2775
+2026-10-27T15:39:48.940721Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5a6baa3b-3a27-4580-8d79-f8c33f4230ae" doc_count=337
+2026-10-27T15:39:49.053199Z  INFO xerj_storage::index_store: segment flushed segment_id="d4316fe8-3ee6-470c-9375-f0ed1ade61ce" doc_count=359 min_seq=10 max_seq=2773
+2026-10-27T15:39:49.053869Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d4316fe8-3ee6-470c-9375-f0ed1ade61ce" doc_count=359
+2026-10-27T15:39:49.159195Z  INFO xerj_storage::index_store: segment flushed segment_id="f75ab5c9-d74c-4ef2-ba3e-9128da75fa34" doc_count=321 min_seq=3 max_seq=2776
+2026-10-27T15:39:49.159745Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="f75ab5c9-d74c-4ef2-ba3e-9128da75fa34" doc_count=321
+2026-10-27T15:39:49.286164Z  INFO xerj_storage::index_store: segment flushed segment_id="f3601fbd-d774-4dd8-80bd-5e474545d08a" doc_count=338 min_seq=4 max_seq=2779
+2026-10-27T15:39:49.286664Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="f3601fbd-d774-4dd8-80bd-5e474545d08a" doc_count=338
+2026-10-27T15:39:49.404291Z  INFO xerj_storage::index_store: segment flushed segment_id="782ae179-231d-4d42-a712-9906363e7678" doc_count=370 min_seq=7 max_seq=2772
+2026-10-27T15:39:49.404807Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="782ae179-231d-4d42-a712-9906363e7678" doc_count=370
+2026-10-27T15:39:49.505116Z  INFO xerj_storage::index_store: segment flushed segment_id="27397754-0c8a-480d-9b65-702e6fd59254" doc_count=366 min_seq=1 max_seq=2760
+2026-10-27T15:39:49.505565Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="27397754-0c8a-480d-9b65-702e6fd59254" doc_count=366
+2026-10-27T15:39:49.599070Z  INFO xerj_storage::index_store: segment flushed segment_id="635cc24b-5a3a-466b-b438-2680d47e709d" doc_count=82 min_seq=3 max_seq=690
+2026-10-27T15:39:49.599251Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="635cc24b-5a3a-466b-b438-2680d47e709d" doc_count=82
+2026-10-27T15:39:49.661055Z  INFO xerj_storage::index_store: segment flushed segment_id="2d77b422-5722-4b87-8e97-88bdf39843fb" doc_count=79 min_seq=38 max_seq=692
+2026-10-27T15:39:49.661243Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2d77b422-5722-4b87-8e97-88bdf39843fb" doc_count=79
+2026-10-27T15:39:49.740075Z  INFO xerj_storage::index_store: segment flushed segment_id="ba6a6a89-a3b4-4440-a5ac-7ce10e7022ea" doc_count=89 min_seq=1 max_seq=703
+2026-10-27T15:39:49.740249Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ba6a6a89-a3b4-4440-a5ac-7ce10e7022ea" doc_count=89
+2026-10-27T15:39:49.801084Z  INFO xerj_storage::index_store: segment flushed segment_id="aba52e66-6f68-40cf-beac-121464b18ffc" doc_count=102 min_seq=5 max_seq=702
+2026-10-27T15:39:49.801249Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="aba52e66-6f68-40cf-beac-121464b18ffc" doc_count=102
+2026-10-27T15:39:49.862005Z  INFO xerj_storage::index_store: segment flushed segment_id="84524873-ac1d-4d28-90a5-6da6dc6f20c9" doc_count=74 min_seq=6 max_seq=684
+2026-10-27T15:39:49.862152Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="84524873-ac1d-4d28-90a5-6da6dc6f20c9" doc_count=74
+2026-10-27T15:39:49.922047Z  INFO xerj_storage::index_store: segment flushed segment_id="5afd1fe7-2b38-4f00-affe-780c3457fdc5" doc_count=77 min_seq=2 max_seq=697
+2026-10-27T15:39:49.922203Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5afd1fe7-2b38-4f00-affe-780c3457fdc5" doc_count=77
+2026-10-27T15:39:49.986003Z  INFO xerj_storage::index_store: segment flushed segment_id="420b17d2-f571-4fa7-b20d-835dfe8d08e5" doc_count=94 min_seq=9 max_seq=701
+2026-10-27T15:39:49.986161Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="420b17d2-f571-4fa7-b20d-835dfe8d08e5" doc_count=94
+2026-10-27T15:39:50.047063Z  INFO xerj_storage::index_store: segment flushed segment_id="5f9786cb-bc7e-4f5d-9946-959a75fa4718" doc_count=88 min_seq=15 max_seq=704
+2026-10-27T15:39:50.047204Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5f9786cb-bc7e-4f5d-9946-959a75fa4718" doc_count=88
+2026-10-27T15:39:50.176939Z  INFO xerj_storage::index_store: segment flushed segment_id="98a4b098-ef5f-46d9-bc7b-0d53645286f2" doc_count=32 min_seq=13 max_seq=199
+2026-10-27T15:39:50.177003Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="98a4b098-ef5f-46d9-bc7b-0d53645286f2" doc_count=32
+2026-10-27T15:39:50.285847Z  INFO xerj_storage::index_store: segment flushed segment_id="218cfb1e-3bfe-4b99-98d2-315f099f3942" doc_count=22 min_seq=8 max_seq=195
+2026-10-27T15:39:50.285919Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="218cfb1e-3bfe-4b99-98d2-315f099f3942" doc_count=22
+2026-10-27T15:39:50.383065Z  INFO xerj_storage::index_store: segment flushed segment_id="5e0e6ae4-a682-4a21-a7ab-bb81d970874f" doc_count=23 min_seq=1 max_seq=197
+2026-10-27T15:39:50.383154Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5e0e6ae4-a682-4a21-a7ab-bb81d970874f" doc_count=23
+2026-10-27T15:39:50.482840Z  INFO xerj_storage::index_store: segment flushed segment_id="3f63a710-c8a2-49af-9002-a58b1b8db6e8" doc_count=16 min_seq=10 max_seq=181
+2026-10-27T15:39:50.482922Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3f63a710-c8a2-49af-9002-a58b1b8db6e8" doc_count=16
+2026-10-27T15:39:50.579891Z  INFO xerj_storage::index_store: segment flushed segment_id="63a9dac9-b472-4bdb-a002-015ba32e5bbe" doc_count=28 min_seq=7 max_seq=191
+2026-10-27T15:39:50.579964Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="63a9dac9-b472-4bdb-a002-015ba32e5bbe" doc_count=28
+2026-10-27T15:39:50.711733Z  INFO xerj_storage::index_store: segment flushed segment_id="52c6949d-8568-4bbd-9465-945531a315db" doc_count=25 min_seq=2 max_seq=200
+2026-10-27T15:39:50.711859Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="52c6949d-8568-4bbd-9465-945531a315db" doc_count=25
+2026-10-27T15:39:50.814000Z  INFO xerj_storage::index_store: segment flushed segment_id="3c7d17db-005d-4ad8-9b32-64d8893972b9" doc_count=27 min_seq=5 max_seq=193
+2026-10-27T15:39:50.814064Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3c7d17db-005d-4ad8-9b32-64d8893972b9" doc_count=27
+2026-10-27T15:39:50.919090Z  INFO xerj_storage::index_store: segment flushed segment_id="71bf6eaa-a8ee-48d3-ae61-073a2d15f557" doc_count=27 min_seq=3 max_seq=198
+2026-10-27T15:39:50.919165Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="71bf6eaa-a8ee-48d3-ae61-073a2d15f557" doc_count=27
+2026-10-27T15:39:53.671563Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:39:54.585372Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:39:55.036827Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:39:55.101848Z  INFO xerj_engine::index: segment merge complete merged_id="71f92d88-62a4-40d1-802e-d22dd13a653f" inputs=8 live_docs=685 removed_files=640 removed_mb=0 deferred=false
+2026-10-27T15:39:55.165708Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:39:55.693566Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:39:55.874833Z  INFO xerj_engine::index: segment merge complete merged_id="32a385d9-1132-4e3b-afcf-de26b91e9829" inputs=8 live_docs=200 removed_files=2400 removed_mb=0 deferred=false
+2026-10-27T15:40:22.741149Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-controller-runtime-docs"
+2026-10-27T15:40:22.789262Z  INFO xerj_engine::index: index created name="ref-controller-runtime-docs"
+2026-10-27T15:40:22.803330Z  INFO xerj_engine::engine: index created with custom settings name="ref-controller-runtime-docs"
+2026-10-27T15:40:25.265149Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj-memory-controller-runtime-edges"
+2026-10-27T15:40:25.296035Z  INFO xerj_engine::index: index created name=".xerj-memory-controller-runtime-edges"
+2026-10-27T15:40:25.308257Z  INFO xerj_engine::engine: index created with custom settings name=".xerj-memory-controller-runtime-edges"
+2026-10-27T15:40:29.578851Z  INFO xerj_storage::index_store: segment flushed segment_id="93e81ccd-f388-42e3-b61f-54fcacdecd9a" doc_count=517 min_seq=12 max_seq=4129
+2026-10-27T15:40:29.583530Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="93e81ccd-f388-42e3-b61f-54fcacdecd9a" doc_count=517
+2026-10-27T15:40:29.782740Z  INFO xerj_storage::index_store: segment flushed segment_id="2cdfb321-a7a4-4d79-989a-35abc399167d" doc_count=537 min_seq=8 max_seq=4115
+2026-10-27T15:40:29.785993Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2cdfb321-a7a4-4d79-989a-35abc399167d" doc_count=537
+2026-10-27T15:40:30.046812Z  INFO xerj_storage::index_store: segment flushed segment_id="788c49f6-edc1-415f-811e-34dc3530ad6c" doc_count=521 min_seq=13 max_seq=4119
+2026-10-27T15:40:30.051428Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="788c49f6-edc1-415f-811e-34dc3530ad6c" doc_count=521
+2026-10-27T15:40:30.220054Z  INFO xerj_storage::index_store: segment flushed segment_id="f651d8ad-5d9a-4df1-ae38-f291a105a5b9" doc_count=528 min_seq=1 max_seq=4134
+2026-10-27T15:40:30.220961Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="f651d8ad-5d9a-4df1-ae38-f291a105a5b9" doc_count=528
+2026-10-27T15:40:30.363116Z  INFO xerj_storage::index_store: segment flushed segment_id="6dd3b1f9-4f9e-497e-b682-bcd682250e01" doc_count=550 min_seq=2 max_seq=4131
+2026-10-27T15:40:30.363934Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6dd3b1f9-4f9e-497e-b682-bcd682250e01" doc_count=550
+2026-10-27T15:40:30.522606Z  INFO xerj_storage::index_store: segment flushed segment_id="7af017f7-d537-4f57-9da2-c94aa3615e73" doc_count=518 min_seq=3 max_seq=4132
+2026-10-27T15:40:30.523360Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="7af017f7-d537-4f57-9da2-c94aa3615e73" doc_count=518
+2026-10-27T15:40:30.678234Z  INFO xerj_storage::index_store: segment flushed segment_id="3752b54b-c4a2-4659-8d28-091c83e0f214" doc_count=507 min_seq=18 max_seq=4136
+2026-10-27T15:40:30.678946Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3752b54b-c4a2-4659-8d28-091c83e0f214" doc_count=507
+2026-10-27T15:40:30.814175Z  INFO xerj_storage::index_store: segment flushed segment_id="c2878a05-f745-4fb4-9b31-b6ea6f3741e6" doc_count=458 min_seq=4 max_seq=4133
+2026-10-27T15:40:30.814844Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="c2878a05-f745-4fb4-9b31-b6ea6f3741e6" doc_count=458
+2026-10-27T15:40:30.914366Z  INFO xerj_storage::index_store: segment flushed segment_id="69796822-3e56-4772-a560-3f88ccb6a88f" doc_count=57 min_seq=3 max_seq=495
+2026-10-27T15:40:30.914507Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="69796822-3e56-4772-a560-3f88ccb6a88f" doc_count=57
+2026-10-27T15:40:30.989307Z  INFO xerj_storage::index_store: segment flushed segment_id="960b4497-e605-42fd-af8e-6209bd863618" doc_count=55 min_seq=16 max_seq=492
+2026-10-27T15:40:30.989455Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="960b4497-e605-42fd-af8e-6209bd863618" doc_count=55
+2026-10-27T15:40:31.053248Z  INFO xerj_storage::index_store: segment flushed segment_id="3cb25cae-f452-4982-a452-74afb0860e3f" doc_count=60 min_seq=1 max_seq=488
+2026-10-27T15:40:31.053376Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3cb25cae-f452-4982-a452-74afb0860e3f" doc_count=60
+2026-10-27T15:40:31.128409Z  INFO xerj_storage::index_store: segment flushed segment_id="4c8f8430-f609-478c-87f3-7c312a70adfa" doc_count=69 min_seq=4 max_seq=494
+2026-10-27T15:40:31.128813Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="4c8f8430-f609-478c-87f3-7c312a70adfa" doc_count=69
+2026-10-27T15:40:31.228350Z  INFO xerj_storage::index_store: segment flushed segment_id="0aa04cc5-61cf-4c3a-880c-86c225f9c9cb" doc_count=67 min_seq=5 max_seq=489
+2026-10-27T15:40:31.228508Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="0aa04cc5-61cf-4c3a-880c-86c225f9c9cb" doc_count=67
+2026-10-27T15:40:31.300702Z  INFO xerj_storage::index_store: segment flushed segment_id="a049989c-217d-4f7b-a65f-8a237846a492" doc_count=55 min_seq=9 max_seq=482
+2026-10-27T15:40:31.302314Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="a049989c-217d-4f7b-a65f-8a237846a492" doc_count=55
+2026-10-27T15:40:31.470633Z  INFO xerj_storage::index_store: segment flushed segment_id="3dfcf1be-19e5-4b45-acc9-20580139a5cb" doc_count=68 min_seq=2 max_seq=496
+2026-10-27T15:40:31.470958Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3dfcf1be-19e5-4b45-acc9-20580139a5cb" doc_count=68
+2026-10-27T15:40:31.614613Z  INFO xerj_storage::index_store: segment flushed segment_id="8cdac008-de8e-49f5-84bf-36461752c7e4" doc_count=56 min_seq=12 max_seq=497
+2026-10-27T15:40:31.614914Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="8cdac008-de8e-49f5-84bf-36461752c7e4" doc_count=56
+2026-10-27T15:40:31.803589Z  INFO xerj_storage::index_store: segment flushed segment_id="d073148e-937f-434f-a3d8-b25ab623dba0" doc_count=69 min_seq=205 max_seq=649
+2026-10-27T15:40:31.803693Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d073148e-937f-434f-a3d8-b25ab623dba0" doc_count=69
+2026-10-27T15:40:31.901360Z  INFO xerj_storage::index_store: segment flushed segment_id="d9521c1f-0bd4-40b4-a452-67251d7a9740" doc_count=52 min_seq=211 max_seq=651
+2026-10-27T15:40:31.901497Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d9521c1f-0bd4-40b4-a452-67251d7a9740" doc_count=52
+2026-10-27T15:40:32.000241Z  INFO xerj_storage::index_store: segment flushed segment_id="3d33376e-bdc9-4d18-8c2c-06c4a2f6ba09" doc_count=50 min_seq=225 max_seq=648
+2026-10-27T15:40:32.000378Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3d33376e-bdc9-4d18-8c2c-06c4a2f6ba09" doc_count=50
+2026-10-27T15:40:32.099231Z  INFO xerj_storage::index_store: segment flushed segment_id="44a50ed2-6ef8-4aad-8973-d523bfe85257" doc_count=60 min_seq=202 max_seq=647
+2026-10-27T15:40:32.099344Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="44a50ed2-6ef8-4aad-8973-d523bfe85257" doc_count=60
+2026-10-27T15:40:32.204336Z  INFO xerj_storage::index_store: segment flushed segment_id="00a75aa9-6fce-41c7-a153-2b3162267c76" doc_count=51 min_seq=201 max_seq=645
+2026-10-27T15:40:32.204438Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="00a75aa9-6fce-41c7-a153-2b3162267c76" doc_count=51
+2026-10-27T15:40:32.317513Z  INFO xerj_storage::index_store: segment flushed segment_id="e1807273-2a18-4c82-9592-acd66ff92791" doc_count=45 min_seq=215 max_seq=650
+2026-10-27T15:40:32.318928Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="e1807273-2a18-4c82-9592-acd66ff92791" doc_count=45
+2026-10-27T15:40:32.426239Z  INFO xerj_storage::index_store: segment flushed segment_id="01754967-7ac4-4848-af66-cebecef8ef69" doc_count=64 min_seq=203 max_seq=631
+2026-10-27T15:40:32.426360Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="01754967-7ac4-4848-af66-cebecef8ef69" doc_count=64
+2026-10-27T15:40:32.551788Z  INFO xerj_storage::index_store: segment flushed segment_id="1dc5e35e-736d-4f93-bc7d-ebe0c5b7d00f" doc_count=60 min_seq=209 max_seq=644
+2026-10-27T15:40:32.552018Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="1dc5e35e-736d-4f93-bc7d-ebe0c5b7d00f" doc_count=60
+2026-10-27T15:40:34.482258Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:40:35.899694Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:40:36.785209Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=9 num_batches=1
+2026-10-27T15:40:37.933752Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-sample-controller-docs"
+2026-10-27T15:40:37.966782Z  INFO xerj_engine::index: index created name="ref-sample-controller-docs"
+2026-10-27T15:40:37.974762Z  INFO xerj_engine::engine: index created with custom settings name="ref-sample-controller-docs"
+2026-10-27T15:40:38.268795Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj-memory-sample-controller-edges"
+2026-10-27T15:40:38.298858Z  INFO xerj_engine::index: index created name=".xerj-memory-sample-controller-edges"
+2026-10-27T15:40:38.308783Z  INFO xerj_engine::engine: index created with custom settings name=".xerj-memory-sample-controller-edges"
+2026-10-27T15:40:39.000697Z  INFO xerj_storage::index_store: segment flushed segment_id="381222b1-7911-4508-a32d-5fea5396d6de" doc_count=59 min_seq=8 max_seq=412
+2026-10-27T15:40:39.000877Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="381222b1-7911-4508-a32d-5fea5396d6de" doc_count=59
+2026-10-27T15:40:39.097803Z  INFO xerj_storage::index_store: segment flushed segment_id="aa927060-bf6c-4f44-a19b-e24eca3a3b33" doc_count=60 min_seq=9 max_seq=409
+2026-10-27T15:40:39.098194Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="aa927060-bf6c-4f44-a19b-e24eca3a3b33" doc_count=60
+2026-10-27T15:40:39.202512Z  INFO xerj_storage::index_store: segment flushed segment_id="8fa29966-240a-491e-81ea-af99696138f3" doc_count=43 min_seq=7 max_seq=410
+2026-10-27T15:40:39.203670Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="8fa29966-240a-491e-81ea-af99696138f3" doc_count=43
+2026-10-27T15:40:39.389682Z  INFO xerj_storage::index_store: segment flushed segment_id="d86a6353-bd56-4ac4-a86d-478cbd19f406" doc_count=39 min_seq=1 max_seq=393
+2026-10-27T15:40:39.389954Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d86a6353-bd56-4ac4-a86d-478cbd19f406" doc_count=39
+2026-10-27T15:40:39.584143Z  INFO xerj_storage::index_store: segment flushed segment_id="6802977a-2282-4c98-820e-8e87287256c1" doc_count=58 min_seq=23 max_seq=408
+2026-10-27T15:40:39.584566Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6802977a-2282-4c98-820e-8e87287256c1" doc_count=58
+2026-10-27T15:40:39.704236Z  INFO xerj_storage::index_store: segment flushed segment_id="c9059b00-162d-4308-a7f6-326f937753ad" doc_count=51 min_seq=17 max_seq=403
+2026-10-27T15:40:39.704395Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="c9059b00-162d-4308-a7f6-326f937753ad" doc_count=51
+2026-10-27T15:40:39.812346Z  INFO xerj_storage::index_store: segment flushed segment_id="c1801723-071f-4480-8e3e-e4761ef2076f" doc_count=46 min_seq=2 max_seq=401
+2026-10-27T15:40:39.812511Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="c1801723-071f-4480-8e3e-e4761ef2076f" doc_count=46
+2026-10-27T15:40:39.884259Z  INFO xerj_storage::index_store: segment flushed segment_id="23abef6e-a5e8-40a9-ad76-27d6bccc76f3" doc_count=56 min_seq=3 max_seq=405
+2026-10-27T15:40:39.884403Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="23abef6e-a5e8-40a9-ad76-27d6bccc76f3" doc_count=56
+2026-10-27T15:40:40.055338Z  INFO xerj_storage::index_store: segment flushed segment_id="195f519e-1601-49db-bb83-b539d7a7baaf" doc_count=20 min_seq=11 max_seq=85
+2026-10-27T15:40:40.055548Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="195f519e-1601-49db-bb83-b539d7a7baaf" doc_count=20
+2026-10-27T15:40:40.197943Z  INFO xerj_storage::index_store: segment flushed segment_id="454f1f60-80fd-4450-a5c1-4c05cb46e54f" doc_count=9 min_seq=2 max_seq=75
+2026-10-27T15:40:40.198087Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="454f1f60-80fd-4450-a5c1-4c05cb46e54f" doc_count=9
+2026-10-27T15:40:40.296046Z  INFO xerj_storage::index_store: segment flushed segment_id="e17f0a09-230c-4a47-b071-154a5e0f3283" doc_count=15 min_seq=1 max_seq=74
+2026-10-27T15:40:40.296152Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="e17f0a09-230c-4a47-b071-154a5e0f3283" doc_count=15
+2026-10-27T15:40:40.354876Z  INFO xerj_storage::index_store: segment flushed segment_id="ad7687f6-4733-4af0-983a-39b1888480bb" doc_count=9 min_seq=21 max_seq=88
+2026-10-27T15:40:40.354965Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ad7687f6-4733-4af0-983a-39b1888480bb" doc_count=9
+2026-10-27T15:40:40.417919Z  INFO xerj_storage::index_store: segment flushed segment_id="1f03d0b0-eca5-4456-adcf-a3b4dc2d5d56" doc_count=9 min_seq=6 max_seq=89
+2026-10-27T15:40:40.418045Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="1f03d0b0-eca5-4456-adcf-a3b4dc2d5d56" doc_count=9
+2026-10-27T15:40:40.484568Z  INFO xerj_storage::index_store: segment flushed segment_id="8720124b-9bee-4920-8a7e-82462eb673ae" doc_count=6 min_seq=4 max_seq=51
+2026-10-27T15:40:40.486018Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="8720124b-9bee-4920-8a7e-82462eb673ae" doc_count=6
+2026-10-27T15:40:40.571982Z  INFO xerj_storage::index_store: segment flushed segment_id="987b5cc1-2665-4679-9902-0cd5232d0281" doc_count=7 min_seq=9 max_seq=87
+2026-10-27T15:40:40.572058Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="987b5cc1-2665-4679-9902-0cd5232d0281" doc_count=7
+2026-10-27T15:40:40.637897Z  INFO xerj_storage::index_store: segment flushed segment_id="0ff25c1d-7ba8-44f8-b84f-0519fcc5e754" doc_count=11 min_seq=16 max_seq=78
+2026-10-27T15:40:40.637960Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="0ff25c1d-7ba8-44f8-b84f-0519fcc5e754" doc_count=11
+2026-10-27T15:40:40.772188Z  INFO xerj_storage::index_store: segment flushed segment_id="9f667ad1-ab4f-43b1-ba82-8c2841c7d9f9" doc_count=7 min_seq=664 max_seq=698
+2026-10-27T15:40:40.772254Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="9f667ad1-ab4f-43b1-ba82-8c2841c7d9f9" doc_count=7
+2026-10-27T15:40:40.881986Z  INFO xerj_storage::index_store: segment flushed segment_id="3ebb4a6b-c062-452d-b0d6-cbff4554754e" doc_count=6 min_seq=656 max_seq=708
+2026-10-27T15:40:40.882056Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3ebb4a6b-c062-452d-b0d6-cbff4554754e" doc_count=6
+2026-10-27T15:40:41.007957Z  INFO xerj_storage::index_store: segment flushed segment_id="bb8f5ddc-9c77-4f8e-879f-a1bdb280e88b" doc_count=7 min_seq=657 max_seq=704
+2026-10-27T15:40:41.008024Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="bb8f5ddc-9c77-4f8e-879f-a1bdb280e88b" doc_count=7
+2026-10-27T15:40:41.113991Z  INFO xerj_storage::index_store: segment flushed segment_id="2b0eacc5-0b32-4ae0-870c-9637bc7f40c2" doc_count=9 min_seq=652 max_seq=706
+2026-10-27T15:40:41.114063Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2b0eacc5-0b32-4ae0-870c-9637bc7f40c2" doc_count=9
+2026-10-27T15:40:41.217997Z  INFO xerj_storage::index_store: segment flushed segment_id="b226ce0d-0290-486d-830d-1c1154a192a6" doc_count=7 min_seq=660 max_seq=707
+2026-10-27T15:40:41.218095Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="b226ce0d-0290-486d-830d-1c1154a192a6" doc_count=7
+2026-10-27T15:40:41.328911Z  INFO xerj_storage::index_store: segment flushed segment_id="87d9186a-4545-42cd-9953-1bded3c317c2" doc_count=6 min_seq=655 max_seq=702
+2026-10-27T15:40:41.328967Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="87d9186a-4545-42cd-9953-1bded3c317c2" doc_count=6
+2026-10-27T15:40:41.432914Z  INFO xerj_storage::index_store: segment flushed segment_id="702cc29b-d5e9-4cdb-ac23-37f8908381fa" doc_count=9 min_seq=667 max_seq=695
+2026-10-27T15:40:41.432977Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="702cc29b-d5e9-4cdb-ac23-37f8908381fa" doc_count=9
+2026-10-27T15:40:41.555976Z  INFO xerj_storage::index_store: segment flushed segment_id="0485c9f4-9665-4ae9-b9cd-3cd29d904513" doc_count=6 min_seq=653 max_seq=686
+2026-10-27T15:40:41.556033Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="0485c9f4-9665-4ae9-b9cd-3cd29d904513" doc_count=6
+2026-10-27T15:40:42.331466Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-docs"
+2026-10-27T15:40:42.363474Z  INFO xerj_engine::index: index created name="ref-kubebuilder-docs"
+2026-10-27T15:40:42.371453Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-docs"
+2026-10-27T15:40:42.405546Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-docs-book-kb-concept-diagram"
+2026-10-27T15:40:42.430530Z  INFO xerj_engine::index: index created name="ref-kubebuilder-docs-book-kb-concept-diagram"
+2026-10-27T15:40:42.439615Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-docs-book-kb-concept-diagram"
+2026-10-27T15:40:42.474487Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-testdata-project-v4-multigroup"
+2026-10-27T15:40:42.499523Z  INFO xerj_engine::index: index created name="ref-kubebuilder-testdata-project-v4-multigroup"
+2026-10-27T15:40:42.507407Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-testdata-project-v4-multigroup"
+2026-10-27T15:40:42.545532Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-testdata-project-v4-multigroup-3"
+2026-10-27T15:40:42.579592Z  INFO xerj_engine::index: index created name="ref-kubebuilder-testdata-project-v4-multigroup-3"
+2026-10-27T15:40:42.590563Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-testdata-project-v4-multigroup-3"
+2026-10-27T15:40:42.631445Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-testdata-project-v4-multigroup-2"
+2026-10-27T15:40:42.670740Z  INFO xerj_engine::index: index created name="ref-kubebuilder-testdata-project-v4-multigroup-2"
+2026-10-27T15:40:42.680486Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-testdata-project-v4-multigroup-2"
+2026-10-27T15:40:42.722766Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/ref-kubebuilder-docs-book"
+2026-10-27T15:40:42.753741Z  INFO xerj_engine::index: index created name="ref-kubebuilder-docs-book"
+2026-10-27T15:40:42.763792Z  INFO xerj_engine::engine: index created with custom settings name="ref-kubebuilder-docs-book"
+2026-10-27T15:40:43.983587Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:40:45.038102Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:40:47.777744Z  INFO xerj_storage::index_store: IndexStore opened data_dir=".xerj-data/.xerj-memory-kubebuilder-edges"
+2026-10-27T15:40:47.818547Z  INFO xerj_engine::index: index created name=".xerj-memory-kubebuilder-edges"
+2026-10-27T15:40:47.831574Z  INFO xerj_engine::engine: index created with custom settings name=".xerj-memory-kubebuilder-edges"
+2026-10-27T15:40:56.698351Z  INFO xerj_storage::index_store: segment flushed segment_id="ba63d904-872c-4d2a-b21d-d3159c9fee27" doc_count=869 min_seq=3 max_seq=6843
+2026-10-27T15:40:56.700650Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ba63d904-872c-4d2a-b21d-d3159c9fee27" doc_count=869
+2026-10-27T15:40:56.915918Z  INFO xerj_storage::index_store: segment flushed segment_id="e87a8a88-f47e-413a-a9dd-9dd6374fa399" doc_count=856 min_seq=8 max_seq=6847
+2026-10-27T15:40:56.917657Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="e87a8a88-f47e-413a-a9dd-9dd6374fa399" doc_count=856
+2026-10-27T15:40:57.115015Z  INFO xerj_storage::index_store: segment flushed segment_id="fb9f3d9f-2be2-4ef5-a169-0b54690541f1" doc_count=893 min_seq=4 max_seq=6846
+2026-10-27T15:40:57.117049Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="fb9f3d9f-2be2-4ef5-a169-0b54690541f1" doc_count=893
+2026-10-27T15:40:57.330685Z  INFO xerj_storage::index_store: segment flushed segment_id="1ae8e4a8-7f78-4d54-ad97-7d23616af5ef" doc_count=851 min_seq=15 max_seq=6848
+2026-10-27T15:40:57.332140Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="1ae8e4a8-7f78-4d54-ad97-7d23616af5ef" doc_count=851
+2026-10-27T15:40:57.564089Z  INFO xerj_storage::index_store: segment flushed segment_id="cccdacc8-fa77-4436-89ed-b3b5cd0f3632" doc_count=866 min_seq=6 max_seq=6849
+2026-10-27T15:40:57.565517Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="cccdacc8-fa77-4436-89ed-b3b5cd0f3632" doc_count=866
+2026-10-27T15:40:57.790216Z  INFO xerj_storage::index_store: segment flushed segment_id="6d08d311-3ec2-4571-8e90-9dcca76db514" doc_count=843 min_seq=1 max_seq=6845
+2026-10-27T15:40:57.791394Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6d08d311-3ec2-4571-8e90-9dcca76db514" doc_count=843
+2026-10-27T15:40:58.029409Z  INFO xerj_storage::index_store: segment flushed segment_id="c19226ba-405e-4565-8043-351d321380e5" doc_count=832 min_seq=10 max_seq=6850
+2026-10-27T15:40:58.030671Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="c19226ba-405e-4565-8043-351d321380e5" doc_count=832
+2026-10-27T15:40:58.260400Z  INFO xerj_storage::index_store: segment flushed segment_id="aa4c298b-d239-4f55-ae4d-4a0c5bfbdb29" doc_count=840 min_seq=13 max_seq=6844
+2026-10-27T15:40:58.262316Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="aa4c298b-d239-4f55-ae4d-4a0c5bfbdb29" doc_count=840
+2026-10-27T15:40:58.365537Z  INFO xerj_storage::index_store: segment flushed segment_id="d9781a91-5274-424c-9e62-754bee273880" doc_count=10 min_seq=2 max_seq=81
+2026-10-27T15:40:58.365597Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d9781a91-5274-424c-9e62-754bee273880" doc_count=10
+2026-10-27T15:40:58.438525Z  INFO xerj_storage::index_store: segment flushed segment_id="cf22ad3c-e8c1-4cae-86c9-fb0a93b50f5d" doc_count=14 min_seq=5 max_seq=77
+2026-10-27T15:40:58.438608Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="cf22ad3c-e8c1-4cae-86c9-fb0a93b50f5d" doc_count=14
+2026-10-27T15:40:58.518963Z  INFO xerj_storage::index_store: segment flushed segment_id="b1ad89f0-0da4-446f-b7e7-0eb253d9c02f" doc_count=10 min_seq=6 max_seq=78
+2026-10-27T15:40:58.519274Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="b1ad89f0-0da4-446f-b7e7-0eb253d9c02f" doc_count=10
+2026-10-27T15:40:58.673934Z  INFO xerj_storage::index_store: segment flushed segment_id="dd7f5d4e-972e-4e3a-a3b8-450372ca2b4b" doc_count=12 min_seq=1 max_seq=80
+2026-10-27T15:40:58.674070Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="dd7f5d4e-972e-4e3a-a3b8-450372ca2b4b" doc_count=12
+2026-10-27T15:40:58.825607Z  INFO xerj_storage::index_store: segment flushed segment_id="33574e57-b878-4ed7-ab48-4cbbb1067975" doc_count=8 min_seq=17 max_seq=70
+2026-10-27T15:40:58.825860Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="33574e57-b878-4ed7-ab48-4cbbb1067975" doc_count=8
+2026-10-27T15:40:58.953958Z  INFO xerj_storage::index_store: segment flushed segment_id="3c7e756e-8157-4694-9537-67110a9c506e" doc_count=7 min_seq=15 max_seq=82
+2026-10-27T15:40:58.954056Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3c7e756e-8157-4694-9537-67110a9c506e" doc_count=7
+2026-10-27T15:40:59.048830Z  INFO xerj_storage::index_store: segment flushed segment_id="f58164f9-f840-4f46-8633-d291cb583ff4" doc_count=13 min_seq=9 max_seq=83
+2026-10-27T15:40:59.048957Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="f58164f9-f840-4f46-8633-d291cb583ff4" doc_count=13
+2026-10-27T15:40:59.230427Z  INFO xerj_storage::index_store: segment flushed segment_id="d5079d54-da26-48a1-b6bc-cead6502b6f8" doc_count=9 min_seq=4 max_seq=74
+2026-10-27T15:40:59.230567Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d5079d54-da26-48a1-b6bc-cead6502b6f8" doc_count=9
+2026-10-27T15:40:59.409836Z  INFO xerj_storage::index_store: segment flushed segment_id="6d727bd4-c27c-4d49-ba1d-f779d0c8358f" doc_count=24 min_seq=5 max_seq=162
+2026-10-27T15:40:59.409999Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6d727bd4-c27c-4d49-ba1d-f779d0c8358f" doc_count=24
+2026-10-27T15:40:59.544533Z  INFO xerj_storage::index_store: segment flushed segment_id="dda635be-7351-4dbb-b067-60d32ee04b06" doc_count=16 min_seq=22 max_seq=161
+2026-10-27T15:40:59.544633Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="dda635be-7351-4dbb-b067-60d32ee04b06" doc_count=16
+2026-10-27T15:40:59.664960Z  INFO xerj_storage::index_store: segment flushed segment_id="9646a3fb-95fa-4aa6-8366-728ee1ce90bc" doc_count=14 min_seq=6 max_seq=149
+2026-10-27T15:40:59.665164Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="9646a3fb-95fa-4aa6-8366-728ee1ce90bc" doc_count=14
+2026-10-27T15:40:59.820511Z  INFO xerj_storage::index_store: segment flushed segment_id="d0e35f1c-e1ed-4a8c-9ae8-75193724a908" doc_count=22 min_seq=12 max_seq=151
+2026-10-27T15:40:59.820761Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="d0e35f1c-e1ed-4a8c-9ae8-75193724a908" doc_count=22
+2026-10-27T15:40:59.963413Z  INFO xerj_storage::index_store: segment flushed segment_id="3672e0a4-3b92-41c9-966a-b6436fa14123" doc_count=15 min_seq=3 max_seq=157
+2026-10-27T15:40:59.963528Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3672e0a4-3b92-41c9-966a-b6436fa14123" doc_count=15
+2026-10-27T15:41:00.078718Z  INFO xerj_storage::index_store: segment flushed segment_id="6233c28d-4642-4a60-b910-263cc46b7b5a" doc_count=24 min_seq=2 max_seq=153
+2026-10-27T15:41:00.078912Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6233c28d-4642-4a60-b910-263cc46b7b5a" doc_count=24
+2026-10-27T15:41:00.228849Z  INFO xerj_storage::index_store: segment flushed segment_id="06ffa2f1-fbd4-40ce-b3d4-12257c635566" doc_count=22 min_seq=4 max_seq=152
+2026-10-27T15:41:00.229025Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="06ffa2f1-fbd4-40ce-b3d4-12257c635566" doc_count=22
+2026-10-27T15:41:00.370697Z  INFO xerj_storage::index_store: segment flushed segment_id="399c6d1e-5219-46d3-96e3-5409e4a3c224" doc_count=25 min_seq=1 max_seq=159
+2026-10-27T15:41:00.370891Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="399c6d1e-5219-46d3-96e3-5409e4a3c224" doc_count=25
+2026-10-27T15:41:00.559861Z  INFO xerj_storage::index_store: segment flushed segment_id="606548e8-9d3b-4127-931f-45edb25cb2f1" doc_count=6 min_seq=13 max_seq=47
+2026-10-27T15:41:00.559985Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="606548e8-9d3b-4127-931f-45edb25cb2f1" doc_count=6
+2026-10-27T15:41:00.713401Z  INFO xerj_storage::index_store: segment flushed segment_id="13195cba-cbf8-4855-89cc-b1337a7810e6" doc_count=8 min_seq=2 max_seq=44
+2026-10-27T15:41:00.713651Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="13195cba-cbf8-4855-89cc-b1337a7810e6" doc_count=8
+2026-10-27T15:41:00.845723Z  INFO xerj_storage::index_store: segment flushed segment_id="b3faa0b8-19c1-4de3-a195-44cfa18d9ffc" doc_count=7 min_seq=4 max_seq=48
+2026-10-27T15:41:00.845837Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="b3faa0b8-19c1-4de3-a195-44cfa18d9ffc" doc_count=7
+2026-10-27T15:41:01.003776Z  INFO xerj_storage::index_store: segment flushed segment_id="8b3387b3-adf8-466e-b2de-3c139e91fac9" doc_count=12 min_seq=10 max_seq=50
+2026-10-27T15:41:01.003966Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="8b3387b3-adf8-466e-b2de-3c139e91fac9" doc_count=12
+2026-10-27T15:41:01.144555Z  INFO xerj_storage::index_store: segment flushed segment_id="69038d6a-ea08-48c4-9058-2561c8ba45a5" doc_count=2 min_seq=9 max_seq=22
+2026-10-27T15:41:01.144688Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="69038d6a-ea08-48c4-9058-2561c8ba45a5" doc_count=2
+2026-10-27T15:41:01.295928Z  INFO xerj_storage::index_store: segment flushed segment_id="e1126747-b74f-40fb-a95c-41347407731d" doc_count=6 min_seq=7 max_seq=45
+2026-10-27T15:41:01.296147Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="e1126747-b74f-40fb-a95c-41347407731d" doc_count=6
+2026-10-27T15:41:01.429117Z  INFO xerj_storage::index_store: segment flushed segment_id="0b159b56-0f69-48ff-b316-613d95cd6da6" doc_count=4 min_seq=1 max_seq=32
+2026-10-27T15:41:01.429412Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="0b159b56-0f69-48ff-b316-613d95cd6da6" doc_count=4
+2026-10-27T15:41:01.553515Z  INFO xerj_storage::index_store: segment flushed segment_id="ac75a075-15ce-43f1-8b97-07705808ab62" doc_count=5 min_seq=3 max_seq=49
+2026-10-27T15:41:01.553699Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ac75a075-15ce-43f1-8b97-07705808ab62" doc_count=5
+2026-10-27T15:41:01.591956Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:41:01.674682Z  INFO xerj_storage::index_store: segment flushed segment_id="82bb46ed-f0a1-49dd-b833-cba9f7d3c55c" doc_count=7 min_seq=10 max_seq=40
+2026-10-27T15:41:01.674748Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="82bb46ed-f0a1-49dd-b833-cba9f7d3c55c" doc_count=7
+2026-10-27T15:41:01.743616Z  INFO xerj_storage::index_store: segment flushed segment_id="b82d710b-72fc-4732-9e33-f6fe7fec670b" doc_count=7 min_seq=1 max_seq=33
+2026-10-27T15:41:01.743672Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="b82d710b-72fc-4732-9e33-f6fe7fec670b" doc_count=7
+2026-10-27T15:41:01.816615Z  INFO xerj_storage::index_store: segment flushed segment_id="3c070774-2bde-4c72-bd7d-b068102b817f" doc_count=4 min_seq=11 max_seq=34
+2026-10-27T15:41:01.816813Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="3c070774-2bde-4c72-bd7d-b068102b817f" doc_count=4
+2026-10-27T15:41:01.891698Z  INFO xerj_storage::index_store: segment flushed segment_id="c417f8d0-ae37-4d1d-abbc-c401c341681e" doc_count=4 min_seq=8 max_seq=24
+2026-10-27T15:41:01.891775Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="c417f8d0-ae37-4d1d-abbc-c401c341681e" doc_count=4
+2026-10-27T15:41:01.960778Z  INFO xerj_storage::index_store: segment flushed segment_id="2c0673c4-5d02-40bc-a510-68d4046b6f91" doc_count=2 min_seq=3 max_seq=14
+2026-10-27T15:41:01.960835Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2c0673c4-5d02-40bc-a510-68d4046b6f91" doc_count=2
+2026-10-27T15:41:02.040747Z  INFO xerj_storage::index_store: segment flushed segment_id="df0f3aab-d943-4346-910c-9392bbeb2efe" doc_count=3 min_seq=4 max_seq=23
+2026-10-27T15:41:02.040816Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="df0f3aab-d943-4346-910c-9392bbeb2efe" doc_count=3
+2026-10-27T15:41:02.113749Z  INFO xerj_storage::index_store: segment flushed segment_id="5851a183-98ae-4e77-b0d5-4e9bdd879e57" doc_count=9 min_seq=5 max_seq=38
+2026-10-27T15:41:02.113821Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5851a183-98ae-4e77-b0d5-4e9bdd879e57" doc_count=9
+2026-10-27T15:41:02.193772Z  INFO xerj_storage::index_store: segment flushed segment_id="20cb2e93-0a08-4216-b08e-94ee347f72a0" doc_count=4 min_seq=16 max_seq=37
+2026-10-27T15:41:02.194056Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="20cb2e93-0a08-4216-b08e-94ee347f72a0" doc_count=4
+2026-10-27T15:41:02.390851Z  INFO xerj_storage::index_store: segment flushed segment_id="54136149-7a8e-4b72-81d1-11e1c3bbcb2d" doc_count=1 min_seq=2 max_seq=2
+2026-10-27T15:41:02.390977Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="54136149-7a8e-4b72-81d1-11e1c3bbcb2d" doc_count=1
+2026-10-27T15:41:02.545160Z  INFO xerj_storage::index_store: segment flushed segment_id="2eca1c7f-0376-4c26-8289-daa11e94c8d0" doc_count=1 min_seq=13 max_seq=13
+2026-10-27T15:41:02.545326Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="2eca1c7f-0376-4c26-8289-daa11e94c8d0" doc_count=1
+2026-10-27T15:41:02.694272Z  INFO xerj_storage::index_store: segment flushed segment_id="8f546771-c019-4bf4-a680-e682c06f05b0" doc_count=4 min_seq=10 max_seq=18
+2026-10-27T15:41:02.694433Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="8f546771-c019-4bf4-a680-e682c06f05b0" doc_count=4
+2026-10-27T15:41:02.850221Z  INFO xerj_storage::index_store: segment flushed segment_id="fe6434b1-ec9d-4366-9454-17a8049be238" doc_count=4 min_seq=1 max_seq=9
+2026-10-27T15:41:02.850336Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="fe6434b1-ec9d-4366-9454-17a8049be238" doc_count=4
+2026-10-27T15:41:02.986387Z  INFO xerj_storage::index_store: segment flushed segment_id="26216ae6-5449-489d-ab9d-ce5e05da9de0" doc_count=1 min_seq=5 max_seq=5
+2026-10-27T15:41:02.986517Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="26216ae6-5449-489d-ab9d-ce5e05da9de0" doc_count=1
+2026-10-27T15:41:03.089569Z  INFO xerj_storage::index_store: segment flushed segment_id="a64fb84e-b15c-4803-b871-81089c1c7704" doc_count=3 min_seq=4 max_seq=8
+2026-10-27T15:41:03.089631Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="a64fb84e-b15c-4803-b871-81089c1c7704" doc_count=3
+2026-10-27T15:41:03.246923Z  INFO xerj_storage::index_store: segment flushed segment_id="5193a0b3-6b7f-4e35-9a5f-a54305e287fb" doc_count=4 min_seq=11 max_seq=17
+2026-10-27T15:41:03.247392Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="5193a0b3-6b7f-4e35-9a5f-a54305e287fb" doc_count=4
+2026-10-27T15:41:03.347385Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:41:03.400876Z  INFO xerj_storage::index_store: segment flushed segment_id="80b767d3-75c5-4df4-8d40-2037d83abbc3" doc_count=377 min_seq=18 max_seq=3114
+2026-10-27T15:41:03.401660Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="80b767d3-75c5-4df4-8d40-2037d83abbc3" doc_count=377
+2026-10-27T15:41:03.495485Z  INFO xerj_storage::index_store: segment flushed segment_id="a5768ae3-ebf7-44ab-ad26-224a74e7c0a0" doc_count=387 min_seq=4 max_seq=3132
+2026-10-27T15:41:03.496149Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="a5768ae3-ebf7-44ab-ad26-224a74e7c0a0" doc_count=387
+2026-10-27T15:41:03.598390Z  INFO xerj_storage::index_store: segment flushed segment_id="60fd4172-8277-4ca8-b7eb-64e28ef370f9" doc_count=373 min_seq=1 max_seq=3127
+2026-10-27T15:41:03.599009Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="60fd4172-8277-4ca8-b7eb-64e28ef370f9" doc_count=373
+2026-10-27T15:41:03.710550Z  INFO xerj_storage::index_store: segment flushed segment_id="9d2c3770-cc40-4096-bfc0-862ea044b1ad" doc_count=359 min_seq=7 max_seq=3131
+2026-10-27T15:41:03.712027Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="9d2c3770-cc40-4096-bfc0-862ea044b1ad" doc_count=359
+2026-10-27T15:41:03.832296Z  INFO xerj_storage::index_store: segment flushed segment_id="6db8f986-228e-4edf-816a-10a26de39188" doc_count=388 min_seq=11 max_seq=3130
+2026-10-27T15:41:03.832854Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="6db8f986-228e-4edf-816a-10a26de39188" doc_count=388
+2026-10-27T15:41:03.929291Z  INFO xerj_storage::index_store: segment flushed segment_id="b4cd5092-150e-42b9-bc20-623b5c27e43c" doc_count=369 min_seq=25 max_seq=3134
+2026-10-27T15:41:03.935368Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="b4cd5092-150e-42b9-bc20-623b5c27e43c" doc_count=369
+2026-10-27T15:41:04.055649Z  INFO xerj_storage::index_store: segment flushed segment_id="ac120644-3db1-47ca-bca1-b91f12a70a88" doc_count=399 min_seq=21 max_seq=3135
+2026-10-27T15:41:04.056081Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ac120644-3db1-47ca-bca1-b91f12a70a88" doc_count=399
+2026-10-27T15:41:04.187068Z  INFO xerj_storage::index_store: segment flushed segment_id="a40aebe3-30e6-4659-8abf-05b976955bd1" doc_count=370 min_seq=3 max_seq=3136
+2026-10-27T15:41:04.188432Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="a40aebe3-30e6-4659-8abf-05b976955bd1" doc_count=370
+2026-10-27T15:41:04.394992Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:41:04.428919Z  INFO xerj_storage::index_store: segment flushed segment_id="13fd2ed1-41ff-4472-80d7-bb4371f42617" doc_count=163 min_seq=709 max_seq=1922
+2026-10-27T15:41:04.429192Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="13fd2ed1-41ff-4472-80d7-bb4371f42617" doc_count=163
+2026-10-27T15:41:04.538550Z  INFO xerj_storage::index_store: segment flushed segment_id="19bc6573-82a6-4e0e-88da-0d2ec5d9a4d2" doc_count=154 min_seq=732 max_seq=1924
+2026-10-27T15:41:04.538765Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="19bc6573-82a6-4e0e-88da-0d2ec5d9a4d2" doc_count=154
+2026-10-27T15:41:04.652617Z  INFO xerj_storage::index_store: segment flushed segment_id="4d163b3e-9c0c-457e-8f2c-cc48524e6d56" doc_count=132 min_seq=713 max_seq=1919
+2026-10-27T15:41:04.652831Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="4d163b3e-9c0c-457e-8f2c-cc48524e6d56" doc_count=132
+2026-10-27T15:41:04.768661Z  INFO xerj_storage::index_store: segment flushed segment_id="e86ce392-f19e-4ffc-bf52-a2cc88e3ed3f" doc_count=135 min_seq=715 max_seq=1903
+2026-10-27T15:41:04.768851Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="e86ce392-f19e-4ffc-bf52-a2cc88e3ed3f" doc_count=135
+2026-10-27T15:41:04.913559Z  INFO xerj_storage::index_store: segment flushed segment_id="50312f19-4317-41a5-8cbb-bc9ab9fa8dff" doc_count=147 min_seq=714 max_seq=1927
+2026-10-27T15:41:04.913767Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="50312f19-4317-41a5-8cbb-bc9ab9fa8dff" doc_count=147
+2026-10-27T15:41:05.033712Z  INFO xerj_storage::index_store: segment flushed segment_id="ac69f254-afdd-465a-924a-b3548220083d" doc_count=158 min_seq=718 max_seq=1925
+2026-10-27T15:41:05.033944Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="ac69f254-afdd-465a-924a-b3548220083d" doc_count=158
+2026-10-27T15:41:05.156690Z  INFO xerj_storage::index_store: segment flushed segment_id="4c909d15-56e9-4003-a5f6-5d163e93fe79" doc_count=173 min_seq=711 max_seq=1920
+2026-10-27T15:41:05.156858Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="4c909d15-56e9-4003-a5f6-5d163e93fe79" doc_count=173
+2026-10-27T15:41:05.294715Z  INFO xerj_storage::index_store: segment flushed segment_id="96d61e69-dc08-4447-92bb-82f3b6fa3027" doc_count=158 min_seq=712 max_seq=1928
+2026-10-27T15:41:05.294869Z  INFO xerj_engine::index: memtable flushed to segment with FTS index segment_id="96d61e69-dc08-4447-92bb-82f3b6fa3027" doc_count=158
+2026-10-27T15:41:05.543782Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:41:06.661944Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:41:07.379137Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=7 num_batches=1
+2026-10-27T15:41:08.366956Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=8 num_batches=1
+2026-10-27T15:42:05.641769Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:42:05.701960Z  INFO xerj_engine::index: segment merge complete merged_id="4fe64385-72d6-4df2-b5d6-9f9fe5a36291" inputs=8 live_docs=2780 removed_files=768 removed_mb=6 deferred=false
+2026-10-27T15:42:14.533141Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:42:14.603189Z  INFO xerj_engine::index: segment merge complete merged_id="a4609766-ef15-4cfb-b626-b172af4a05e3" inputs=8 live_docs=487 removed_files=640 removed_mb=0 deferred=false
+2026-10-27T15:42:27.491382Z  INFO xerj_storage::index_store: merge applied merged=9
+2026-10-27T15:42:27.661812Z  INFO xerj_engine::index: segment merge complete merged_id="07cba5db-c271-4b83-ab68-fc169fbd1790" inputs=9 live_docs=651 removed_files=2700 removed_mb=0 deferred=false
+2026-10-27T15:42:31.512405Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:42:31.575043Z  INFO xerj_engine::index: segment merge complete merged_id="1d011965-8be4-4e50-ba7f-349ff078decd" inputs=8 live_docs=412 removed_files=768 removed_mb=1 deferred=false
+2026-10-27T15:42:32.165077Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:42:32.212498Z  INFO xerj_engine::index: segment merge complete merged_id="db646406-4ed9-4438-986a-a182c0726c35" inputs=8 live_docs=86 removed_files=640 removed_mb=0 deferred=false
+2026-10-27T15:42:32.666357Z  INFO xerj_engine::index: run_merge_once: scheduling batches num_segments_in=17 num_batches=1
+2026-10-27T15:43:00.501271Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:00.554369Z  INFO xerj_engine::index: segment merge complete merged_id="fcac10b1-b8b2-46a4-bf55-7f7304956f84" inputs=8 live_docs=4136 removed_files=768 removed_mb=8 deferred=false
+2026-10-27T15:43:00.935928Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:00.998583Z  INFO xerj_engine::index: segment merge complete merged_id="2f0c1cf1-7130-4b9e-a9fd-463f3931a07f" inputs=8 live_docs=83 removed_files=576 removed_mb=0 deferred=false
+2026-10-27T15:43:01.313963Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:01.380634Z  INFO xerj_engine::index: segment merge complete merged_id="81267036-f9f9-4dc0-9282-74c4b242561b" inputs=8 live_docs=162 removed_files=520 removed_mb=0 deferred=false
+2026-10-27T15:43:02.095842Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:02.153453Z  INFO xerj_engine::index: segment merge complete merged_id="2ad3bef5-7fee-475a-adcc-e913a7427b18" inputs=8 live_docs=50 removed_files=552 removed_mb=0 deferred=false
+2026-10-27T15:43:02.760328Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:02.825603Z  INFO xerj_engine::index: segment merge complete merged_id="2a45e1e0-2ebc-4630-98dd-f3d1c8b61d15" inputs=8 live_docs=40 removed_files=648 removed_mb=0 deferred=false
+2026-10-27T15:43:03.320030Z  INFO xerj_storage::index_store: merge applied merged=7
+2026-10-27T15:43:03.387119Z  INFO xerj_engine::index: segment merge complete merged_id="841d38d5-14a2-47fb-9155-ed97da8978c7" inputs=7 live_docs=18 removed_files=511 removed_mb=0 deferred=false
+2026-10-27T15:43:05.476127Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:05.526625Z  INFO xerj_engine::index: segment merge complete merged_id="3b221a8d-4c50-455c-a7e9-add07dd43482" inputs=8 live_docs=3022 removed_files=640 removed_mb=1 deferred=false
+2026-10-27T15:43:28.642060Z  INFO xerj_storage::index_store: merge applied merged=16
+2026-10-27T15:43:28.928202Z  INFO xerj_engine::index: segment merge complete merged_id="09ccae96-c8c3-47c7-b6d2-376deba4fd63" inputs=16 live_docs=1277 removed_files=4832 removed_mb=0 deferred=false
+2026-10-27T15:43:47.562710Z  INFO xerj_storage::index_store: merge applied merged=8
+2026-10-27T15:43:47.629462Z  INFO xerj_engine::index: segment merge complete merged_id="6e152f10-d888-4ff7-86b3-1e8ac2aadeeb" inputs=8 live_docs=6850 removed_files=800 removed_mb=17 deferred=false
+2026-10-27T17:26:17.206261Z  INFO xerj: SIGTERM received — shutting down
+2026-10-27T17:26:17.207120Z  INFO xerj: flushing in-memory state before exit…
+2026-10-27T17:26:17.651108Z  INFO xerj: final flush complete in 444ms
+2026-10-27T17:26:17.651364Z  INFO xerj: native REST shut down cleanly
+2026-10-27T17:26:17.653056Z  INFO xerj: ES-compat shut down cleanly
+2026-10-27T17:26:17.653073Z  INFO xerj: xerj v1.0.0-rc.99 stopped. Goodbye.

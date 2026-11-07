@@ -1,0 +1,70 @@
+{
+  "properties": {
+    "body": {
+      "type": "semantic_text"
+    },
+    "code": {
+      "type": "text"
+    },
+    "defs": {
+      "type": "text"
+    },
+    "end_line": {
+      "type": "long"
+    },
+    "impl": {
+      "type": "text"
+    },
+    "kind": {
+      "type": "keyword"
+    },
+    "language": {
+      "type": "keyword"
+    },
+    "line": {
+      "type": "long"
+    },
+    "name": {
+      "type": "keyword"
+    },
+    "path": {
+      "type": "keyword"
+    },
+    "section": {
+      "type": "long"
+    },
+    "start_line": {
+      "type": "long"
+    },
+    "symbol_count": {
+      "type": "long"
+    },
+    "text": {
+      "type": "semantic_text"
+    },
+    "title": {
+      "type": "text"
+    },
+    "ax_path": {
+      "type": "keyword"
+    },
+    "ax_paths": {
+      "type": "keyword"
+    },
+    "ax_file": {
+      "type": "keyword"
+    },
+    "ax_locator": {
+      "type": "keyword"
+    },
+    "ax_dataset": {
+      "type": "keyword"
+    },
+    "ax_run": {
+      "type": "keyword"
+    },
+    "ax_format": {
+      "type": "keyword"
+    }
+  }
+}

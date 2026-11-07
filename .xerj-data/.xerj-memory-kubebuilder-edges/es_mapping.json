@@ -1,0 +1,66 @@
+{
+  "properties": {
+    "edge_id": {
+      "type": "keyword"
+    },
+    "src": {
+      "type": "keyword"
+    },
+    "dst": {
+      "type": "keyword"
+    },
+    "type": {
+      "type": "keyword"
+    },
+    "weight": {
+      "type": "float"
+    },
+    "valid_at": {
+      "type": "date",
+      "format": "epoch_millis"
+    },
+    "invalid_at": {
+      "type": "date",
+      "format": "epoch_millis"
+    },
+    "created_at": {
+      "type": "date",
+      "format": "epoch_millis"
+    },
+    "expired_at": {
+      "type": "date",
+      "format": "epoch_millis"
+    },
+    "detector": {
+      "type": "keyword"
+    },
+    "confidence": {
+      "type": "float"
+    },
+    "schema_version": {
+      "type": "integer"
+    },
+    "src_file": {
+      "type": "keyword"
+    },
+    "src_format": {
+      "type": "keyword"
+    },
+    "dst_format": {
+      "type": "keyword"
+    },
+    "evidence": {
+      "properties": {
+        "quote": {
+          "type": "text"
+        },
+        "source": {
+          "type": "keyword"
+        },
+        "offset": {
+          "type": "long"
+        }
+      }
+    }
+  }
+}

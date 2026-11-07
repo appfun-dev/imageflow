@@ -1,0 +1,333 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "edge_id",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "src",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "dst",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "type",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "weight",
+        "field_type": "double",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "valid_at",
+        "field_type": "date",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "date_precision": "millis",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "invalid_at",
+        "field_type": "date",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "date_precision": "millis",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "created_at",
+        "field_type": "date",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "date_precision": "millis",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "expired_at",
+        "field_type": "date",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "date_precision": "millis",
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "detector",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "confidence",
+        "field_type": "double",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "schema_version",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "src_file",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "src_format",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "dst_format",
+        "field_type": "keyword",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "evidence",
+        "field_type": "object",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "fields": [
+          {
+            "name": "quote",
+            "field_type": "text",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": false,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          },
+          {
+            "name": "source",
+            "field_type": "keyword",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          },
+          {
+            "name": "offset",
+            "field_type": "long",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          }
+        ]
+      },
+      {
+        "name": "meta_version",
+        "field_type": "long",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": true,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        }
+      },
+      {
+        "name": "brain",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "fields": [
+          {
+            "name": "keyword",
+            "field_type": "keyword",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "ignore_above": 256,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          }
+        ]
+      },
+      {
+        "name": "nodes_index",
+        "field_type": "text",
+        "options": {
+          "analyzed": true,
+          "stored": true,
+          "indexed": true,
+          "doc_values": false,
+          "term_positions": true,
+          "multi_value": true,
+          "boost": 1.0
+        },
+        "fields": [
+          {
+            "name": "keyword",
+            "field_type": "keyword",
+            "options": {
+              "analyzed": true,
+              "stored": true,
+              "indexed": true,
+              "doc_values": true,
+              "term_positions": true,
+              "ignore_above": 256,
+              "multi_value": true,
+              "boost": 1.0
+            }
+          }
+        ]
+      }
+    ],
+    "version": 19,
+    "updated_at": "2026-10-27T15:39:47.080277Z"
+  },
+  "dynamic": "dynamic"
+}
