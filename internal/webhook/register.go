@@ -52,6 +52,9 @@ const (
 	PathMutateImageStream = "/mutate-imageflow-appfun-dev-v1alpha1-imagestream"
 	// PathValidateImageStream serves the stream name "--" ban (ADR-002).
 	PathValidateImageStream = "/validate-imageflow-appfun-dev-v1alpha1-imagestream"
+	// PathValidateBuildRun serves the BuildRun target annotation contract
+	// (ADR-011 §2).
+	PathValidateBuildRun = "/validate-shipwright-io-v1beta1-buildrun"
 )
 
 // Register installs all ImageFlow admission handlers on the manager's single
@@ -72,4 +75,6 @@ func Register(mgr ctrl.Manager) {
 		admission.WithCustomDefaulter(scheme, &imageflowv1alpha1.ImageStream{}, &imageStreamDefaulter{}))
 	server.Register(PathValidateImageStream,
 		admission.WithCustomValidator(scheme, &imageflowv1alpha1.ImageStream{}, &imageStreamValidator{}))
+	server.Register(PathValidateBuildRun,
+		&crwebhook.Admission{Handler: &buildRunValidator{decoder: admission.NewDecoder(scheme)}})
 }
