@@ -73,7 +73,6 @@ func newTestBuildRun(name string, opts ...buildRunOption) *unstructured.Unstruct
 	return br
 }
 
-//nolint:unparam // tag is parameterized for future test cases
 func withTargetAnnotation(stream, tag string) buildRunOption {
 	return func(br *unstructured.Unstructured) {
 		br.SetAnnotations(map[string]string{

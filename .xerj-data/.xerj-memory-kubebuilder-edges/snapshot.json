@@ -1,1 +1,0 @@
-{"segments":[{"id":"3b221a8d-4c50-455c-a7e9-add07dd43482","doc_count":3022,"size_bytes":246269,"min_seq_no":1,"max_seq_no":3136,"created_at_ms":1793115783657,"has_tombstones":false,"seg_path":"3b221a8d-4c50-455c-a7e9-add07dd43482.seg","sidx_path":"3b221a8d-4c50-455c-a7e9-add07dd43482.sidx"}],"generation":9,"max_seq_no":3136}

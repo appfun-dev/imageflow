@@ -1,6 +1,0 @@
-{
-  "index.query.strict_unknown_fields": true,
-  "index": {
-    "xerj_ingest_shards": 1
-  }
-}

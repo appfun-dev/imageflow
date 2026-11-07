@@ -26,10 +26,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
@@ -370,8 +370,6 @@ func brwGetStream(t *testing.T, cl client.Client, ns, name string) *imageflowv1a
 // brwRequireStreamAssociation asserts the (tag -> digest, reference)
 // association on ImageStream.status — the ticket #18 requirement that every
 // test asserts ImageStream.status.
-//
-//nolint:unparam // tag is parameterized for future test cases
 func brwRequireStreamAssociation(t *testing.T, stream *imageflowv1alpha1.ImageStream, tag, digest, ref string, wantCreated time.Time) {
 	t.Helper()
 	var tagList *imageflowv1alpha1.NamedTagEventList
@@ -528,7 +526,7 @@ func (l *brwLane1) reconcile(t *testing.T, br *unstructured.Unstructured) {
 	if err != nil {
 		t.Fatalf("reconcile BuildRun %s/%s: %v", br.GetNamespace(), br.GetName(), err)
 	}
-	if res.RequeueAfter != 0 {
+	if res.Requeue || res.RequeueAfter != 0 {
 		t.Fatalf("reconcile asked for requeue: %+v (failures must be terminal)", res)
 	}
 }
@@ -913,8 +911,6 @@ func brwResetProcessGlobals(t *testing.T) {
 // starts it. SkipNameValidation is enabled because this test binary also
 // builds the production controller names on fake managers (unit tests), and
 // controller-runtime validates names process-globally.
-//
-//nolint:unparam // enableWatcher varies across call sites; Manager return used by some callers
 func brwStartManager(t *testing.T, env *brwSharedEnv, enableWatcher bool) ctrl.Manager {
 	t.Helper()
 	brwFreshMetricsRegistry(t)
