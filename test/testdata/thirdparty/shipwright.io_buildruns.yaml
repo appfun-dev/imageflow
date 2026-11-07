@@ -1,72 +1,41 @@
+# Minimal Shipwright BuildRun CRD stand-in for envtest (BC-003 / ADR-001:
+# ImageFlow carries zero compile-time Shipwright dependency; this test-only
+# fixture gives the API server just enough schema to persist BuildRun objects
+# — metadata.annotations for the admission contract (T4) and .status for the
+# watcher flows (T5) — without vendoring the upstream CRD.
+#
+# The root-level x-kubernetes-preserve-unknown-fields keeps every field the
+# watcher contract (ADR-011) reads or writes, notably:
+#   - metadata.annotations               (buildrun.imageflow.appfun.dev/target)
+#   - spec.output.image                  (fallback image repository)
+#   - status.conditions[]                (Succeeded read; Registered written)
+#   - status.output.digest               (digest gate input)
+#   - status.buildSpec.output.image      (primary image repository)
+#
+# The status subresource must stay declared: the watcher stamps its
+# Registered condition through client.Status().Update, and without it the
+# API server has no /status endpoint and the write fails.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: buildruns.shipwright.io
-  annotations:
-    # Minimal third-party fixture for envtest (BC-003: no Shipwright Go module
-    # is vendored, the watcher consumes BuildRuns as unstructured objects).
-    # The schema declares exactly the fields the BuildRun watcher contract
-    # reads or writes (ADR-011) and preserves everything else:
-    #   - spec.output.image                (fallback image repository)
-    #   - status.conditions[]              (Succeeded read; Registered written)
-    #   - status.output.digest             (digest gate input)
-    #   - status.buildSpec.output.image    (primary image repository)
-    appfun.dev/test-fixture: "buildrun-watcher-envtest"
 spec:
   group: shipwright.io
+  scope: Namespaced
   names:
     kind: BuildRun
     listKind: BuildRunList
     plural: buildruns
     singular: buildrun
-  scope: Namespaced
+    shortNames:
+      - br
   versions:
     - name: v1beta1
       served: true
       storage: true
       subresources:
-        # The watcher stamps its Registered condition through the status
-        # subresource (client.Status().Update); without this declaration the
-        # API server has no /status endpoint and the write fails.
         status: {}
       schema:
         openAPIV3Schema:
           type: object
-          properties:
-            spec:
-              type: object
-              x-kubernetes-preserve-unknown-fields: true
-              properties:
-                output:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                  properties:
-                    image:
-                      type: string
-            status:
-              type: object
-              x-kubernetes-preserve-unknown-fields: true
-              properties:
-                output:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                  properties:
-                    digest:
-                      type: string
-                buildSpec:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-                  properties:
-                    output:
-                      type: object
-                      x-kubernetes-preserve-unknown-fields: true
-                      properties:
-                        image:
-                          type: string
-                conditions:
-                  type: array
-                  items:
-                    # Shipwright conditions (Succeeded) and the watcher's own
-                    # Registered condition share this list; keep every field.
-                    type: object
-                    x-kubernetes-preserve-unknown-fields: true
+          x-kubernetes-preserve-unknown-fields: true

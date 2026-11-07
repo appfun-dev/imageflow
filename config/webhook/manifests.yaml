@@ -58,6 +58,27 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-shipwright-io-v1beta1-buildrun
+  failurePolicy: Fail
+  name: vbuildrun.kb.io
+  rules:
+  - apiGroups:
+    - shipwright.io
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - buildruns
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-imageflow-appfun-dev-v1alpha1-imagestream
   failurePolicy: Fail
   name: vimagestream.kb.io

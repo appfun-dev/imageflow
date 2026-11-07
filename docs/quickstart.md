@@ -6,7 +6,8 @@
 2. 从公共 Registry **导入**一个真实镜像，建立目录（ImageStream / ImageArtifact / 只读镜像视图）；
 3. 用一个 **ImageSubscription** 把目录里的 digest **投递**到真实工作负载；
 4. **观察**投递审计（recentDeliveries）、双命名空间 Events、rollout 状态与 Prometheus 指标；
-5. 附：Shipwright BuildRun → ImageStreamMapping 的推送登记管道示例（§15 场景 16 的两阶段模型）。
+5. 附：Shipwright BuildRun → ImageStreamMapping 的推送登记管道示例（§15 场景 16 的两阶段模型）；
+6. 附：BuildRun Watcher 自动登记路径（v1.1，消除 CI 胶水脚本）。
 
 预计用时：环境就绪后 30–60 分钟（含阅读）。所有命令都在仓库根目录执行。
 
@@ -392,7 +393,78 @@ fi
 构建成功、登记失败时两者互不掩盖：BuildRun 仍是 Succeeded，Mapping 明确报告失败原因
 （如 `InvalidImageReference`、`StreamNotFound`），修好后可用同名任务重试或新建任务。
 
-## 13. 清理
+## 13. Shipwright BuildRun → ImageFlow 自动登记（BuildRun Watcher）
+
+v1.1 新增 **BuildRun Watcher**：一个 feature-gated 可选 controller，watch Shipwright
+BuildRun 对象，在其 Succeeded 且携带 digest 时**自动执行等价于 ImageStreamMapping 的
+登记逻辑**，消除第 12 节中 CI 流水线侧的胶水脚本。
+
+> **BC-002**：ImageFlow **不执行构建**——仅观察 Shipwright BuildRun status 并登记其产物。
+> 构建能力完全由 Shipwright 提供。
+
+### 前置条件
+
+| 依赖 | 说明 |
+|---|---|
+| Shipwright | 集群已安装 Shipwright v0.21+，`shipwright.io/v1beta1` Build CRD 存在 |
+| Feature flag | manager Deployment 启动参数含 `--enable-buildrun-watcher=true`（默认 false） |
+| RBAC | `imageflow-buildrun-watcher` ClusterRole 已绑定到 controller SA（见 `docs/ops.md` §9） |
+| 构建策略 | 使用支持 system results 的策略（如 kaniko/buildah），否则 `.status.output.digest` 为空 |
+
+### 注解 BuildRun
+
+在 BuildRun 上设置 `buildrun.imageflow.appfun.dev/target` 注解声明目标 stream/tag：
+
+```bash
+kubectl -n quickstart-team annotate buildrun quickstart-build-run-1 \
+  'buildrun.imageflow.appfun.dev/target={"stream":"quickstart-api","tag":"stable"}'
+```
+
+注解值为 JSON `{"stream":"<rfc1123-name>","tag":"<rfc1123-name>"}`，admission webhook
+校验 JSON schema、必填字段与 RFC 1123 值约束；非法注解在写入时即被拒绝。
+
+也可在创建 BuildRun 时直接带上注解：
+
+```yaml
+apiVersion: shipwright.io/v1beta1
+kind: BuildRun
+metadata:
+  name: quickstart-build-run-auto
+  namespace: quickstart-team
+  annotations:
+    buildrun.imageflow.appfun.dev/target: '{"stream":"quickstart-api","tag":"stable"}'
+spec:
+  build:
+    name: quickstart-build
+```
+
+### 预期结果验证
+
+BuildRun Succeeded 且 `.status.output.digest` 非空时，Watcher 自动登记（幂等，语义等同
+手动创建 ImageStreamMapping）：
+
+```bash
+# 1) BuildRun 上的 Registered condition = True/Succeeded
+kubectl -n quickstart-team get buildrun quickstart-build-run-auto \
+  -o jsonpath='{.status.conditions[?(@.type=="Registered")]}'; echo
+
+# 2) ImageStream.status 已更新为新 digest（AGG-001：目录事实源）
+kubectl -n imageflow-system get imagestream quickstart-api \
+  -o jsonpath='{.status.tags[?(@.tag=="stable")].items[0].digest}'; echo
+
+# 3) ImageStreamTag 视图已合成
+kubectl -n imageflow-system get imagestreamtag quickstart-api--stable -o name
+
+# 4) 下游订阅自动投递（若已有 ImageSubscription 引用该 stream:tag）
+kubectl -n quickstart-team get imagesubscription web-live \
+  -o jsonpath='{.status.recentDeliveries}' | jq
+```
+
+> 与第 12 节手动 Mapping 路径的区别：Watcher 路径无需 CI 胶水脚本，但要求
+> `--enable-buildrun-watcher=true` + Shipwright CRD 存在。两条路径语义完全一致
+> （幂等、同 `(stream, tag, digest)` 重复 = no-op），可互换使用。
+
+## 14. 清理
 
 ```bash
 make undeploy IMG=controller:quickstart    # 删除 config/default 部署
@@ -402,7 +474,7 @@ kind delete cluster --name quickstart
 git checkout config/manager/kustomization.yaml   # 还原 kustomize edit set image 的本地改动
 ```
 
-## 14. 常见问题速查
+## 15. 常见问题速查
 
 | 现象 | 第一步 |
 |---|---|
