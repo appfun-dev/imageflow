@@ -66,6 +66,7 @@ Deployment 默认 limits `500m/128Mi`、requests `10m/64Mi`，restricted PSS
 | `--subscription-delivery-limit` | `5` | `recentDeliveries` 上限（§12.9）；截断发 `DeliveryHistoryTruncated` 事件并计 `imageflow_deliveries_truncated_total` |
 | `--mirror-event-limit` | `5` | 镜像视图 `status.events[]` 上限；截断发 `EventSummaryTruncated` 事件并计 `imageflow_mirror_events_truncated_total` |
 | `--registry-allowlist` | 空（= 放行全部） | 逗号分隔的 Registry 主机白名单；**非空即 fail-closed**：名单外主机在发起任何 IO 前拒绝（`RegistryDenied`，ADR-007 SSRF 面）。生产强烈建议显式配置 |
+| `--enable-buildrun-watcher` | `false` | 启用 BuildRun Watcher controller（v1.1）。启用后前置检测 Shipwright CRD 存在性，不存在则报错退出。详见 §9 |
 
 ### 运行时 flags（cmd/main.go）
 
@@ -169,6 +170,7 @@ T12 审计结论（issue #13 AC1）：
 | ImageSubscription | `Unsupported` | 目标为内建适配器不支持的 Kind/形态（ADR-006 第一批 = Deployment/StatefulSet/DaemonSet；非第一批内建 Kind 如实拒绝） |
 | ImageSubscription | `StatusPolicyEvaluated` | **v1 恒为 False**：reason=`NotConfigured`（未配置 statusPolicyRef）或 `EvaluatorDeferred`（配置了但评估器推迟到 v1.1，ADR-005）。这是如实报告，不是故障 |
 | ImageStreamTag / ImageTag（镜像视图） | `Ready`、`ArtifactLinked` | 视图合成健康 / 已关联 ImageArtifact |
+| BuildRun（v1.1，Watcher 写入） | `Registered` | `True/Succeeded` = digest 登记成功；`False/MissingDigest` = BuildRun Succeeded 但 `.status.output.digest` 为空（构建策略未提供 system results）；`False/<其他 reason>` = 登记失败（stream 不存在、RBAC 拒绝等）。详见 §9 |
 
 `rolloutStatus`（聚合，worst-state 优先序）：`Failed > Conflict > Unknown >
 Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknown`。
@@ -232,6 +234,8 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 | SAR 大量 rate_limited | `imageflow_subscription_sar_checks_total{verdict="rate_limited"}` | 复核风暴（订阅×目标×频率超预算）→ 调大 `--sar-recheck-period`；限流是保护，被 shed 的检查会重试，绝不 fail-open |
 | manager 重启后状态 | — | 无需干预：SSA 所有权声明 + `recentDeliveries` 均持久化在对象上，重启后从持久化状态收敛，不重复副作用（等值收敛不产生新记录/事件；kind 级验证见 §15-14 用例） |
 | 镜像视图事件被截断 | `EventSummaryTruncated` 事件 + `imageflow_mirror_events_truncated_total` | `--mirror-event-limit`（默认 5）到顶，正常有界行为；完整历史看 Events/审计日志 |
+| BuildRun Succeeded 但 ImageStream 未更新 | `kubectl get buildrun X -o jsonpath='{.status.conditions[?(@.type=="Registered")]}'` | `MissingDigest` → 构建策略未提供 system results（§9 MissingDigest 排查）；无 Registered condition → Watcher 未启用或注解缺失；`False/<reason>` → 看 message（stream 不存在、RBAC 等） |
+| manager 启动报 Shipwright CRD 缺失 | manager pod logs | `--enable-buildrun-watcher=true` 但集群未装 Shipwright → 关闭 flag 或安装 Shipwright（§9） |
 
 ## 7. 有界状态与容量
 
@@ -245,3 +249,78 @@ kind e2e 默认全部跑在进程内 registrydouble 上（CI 常态）。3 条�
 （`test/e2e/import_e2e_test.go`）需要 `IMAGEFLOW_E2E_REGISTRY_HOST/_REPO/_TAG`
 （+可选 `_PULL_SECRET`/`_REGISTRY_CA`/`_PUSH_USERNAME`/`_PUSH_PASSWORD`）才会执行，
 漂移腿**必须**有推送凭据；CI 保持 skip（T12 裁定），完整环境契约见 `TESTING.md`。
+
+## 9. BuildRun Watcher（v1.1）
+
+BuildRun Watcher 是 v1.1 新增的 feature-gated 可选 controller，watch Shipwright
+BuildRun 对象并在其 Succeeded 且携带 digest 时自动执行等价于 ImageStreamMapping 的
+登记逻辑。**ImageFlow 不执行构建**（BC-002）——仅观察 BuildRun status 并登记产物。
+
+### `--enable-buildrun-watcher` flag
+
+| Flag | 默认 | 语义 |
+|---|---|---|
+| `--enable-buildrun-watcher` | `false` | 启用 BuildRun Watcher controller。设为 `true` 后，manager 启动时前置检测 `shipwright.io/v1beta1` Build CRD 存在性；CRD 不存在则报错退出（不静默 no-op）。默认 false 确保未安装 Shipwright 的集群升级无副作用 |
+
+启用方式：在 manager Deployment args 中追加 `--enable-buildrun-watcher=true`。
+Helm chart（如有）对应 `buildrunWatcher.enabled: true`。
+
+### RBAC 前置条件
+
+Watcher 使用独立 ClusterRole `imageflow-buildrun-watcher`（`config/rbac/buildrun_watcher_clusterrole.yaml`），
+仅在 flag 启用时绑定到 controller SA：
+
+- `shipwright.io/buildruns`：`get`、`list`、`watch`
+- `shipwright.io/buildruns/status`：`patch`（写入 Registered condition）
+
+**不授予** Build / BuildStrategy 权限；Watcher 仅消费 BuildRun status。安全审计要点：
+Watcher 仅在显式启用时才获得 Shipwright BuildRun 的读权限，RBAC 最小权限原则不被
+默认配置破坏。
+
+启用 Watcher 前确认：
+
+```bash
+# 1) Shipwright CRD 存在
+kubectl get crd builds.shipwright.io -o name
+
+# 2) ClusterRole 已创建（随 config/default 安装）
+kubectl get clusterrole imageflow-buildrun-watcher -o name
+
+# 3) ClusterRoleBinding 已绑定（flag 启用时需手动或 kustomize patch 绑定）
+kubectl get clusterrolebinding | grep imageflow-buildrun-watcher
+```
+
+### MissingDigest 排查
+
+BuildRun Succeeded 但 `.status.output.digest` 为空时，Watcher 在 BuildRun status 上设置：
+
+```yaml
+conditions:
+- type: Registered
+  status: "False"
+  reason: MissingDigest
+  message: "BuildRun succeeded but .status.output.digest is empty; build strategy may not provide system results"
+```
+
+排查步骤：
+
+| 步骤 | 命令 | 预期 |
+|---|---|---|
+| 1. 查看 BuildRun status condition | `kubectl get buildrun X -o jsonpath='{.status.conditions[?(@.type=="Registered")]}'` | reason=`MissingDigest` |
+| 2. 检查构建策略是否支持 system results | `kubectl get clusterbuildstrategy <name> -o yaml \| grep -A5 results` | 策略定义含 `results[]` 且包含 digest 输出 |
+| 3. 查看 BuildRun 完整 status | `kubectl get buildrun X -o yaml \| yq '.status'` | `output.digest` 字段是否存在 |
+| 4. 换用支持 system results 的策略 | — | kaniko / buildah 等策略提供 digest；自定义策略需在 `spec.results` 中声明 digest 输出 |
+
+> 此 Condition 复用 Mapping 任务的 Condition 体系（ADR-011 §4），保持登记路径语义一致。
+> 不使用 Event-only 通知（违反 ADR-004「不静默降级」原则），可被 `kubectl wait` 观测。
+
+### 注解契约
+
+BuildRun 通过 `buildrun.imageflow.appfun.dev/target` 注解声明目标 stream/tag：
+
+- Key：`buildrun.imageflow.appfun.dev/target`
+- Value：JSON `{"stream":"<rfc1123-name>","tag":"<rfc1123-name>"}`
+- Admission：validating webhook 对带该注解的 BuildRun 执行 JSON unmarshal + 必填字段检查 + 值 RFC 1123 校验；失败返回明确 rejection message
+- 注解仅由用户/CI 设置在 BuildRun 上；Watcher 只读、不写回
+
+详见 `docs/quickstart.md` §13 示例。
