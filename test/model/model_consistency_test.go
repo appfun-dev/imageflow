@@ -107,8 +107,9 @@ func assertSameSet(t *testing.T, label string, got, want map[string]bool) {
 }
 
 func matches(text string, expression *regexp.Regexp) []string {
-	var values []string
-	for _, match := range expression.FindAllStringSubmatch(text, -1) {
+	allMatches := expression.FindAllStringSubmatch(text, -1)
+	values := make([]string, 0, len(allMatches))
+	for _, match := range allMatches {
 		values = append(values, match[1])
 	}
 	return values
@@ -158,7 +159,8 @@ func TestRequiredArtifactsAndMarkdownLinks(t *testing.T) {
 	for _, document := range documents {
 		for _, rawTarget := range linkPattern.FindAllStringSubmatch(readRepoFile(t, document), -1) {
 			target := strings.TrimSpace(rawTarget[1])
-			if target == "" || strings.HasPrefix(target, "#") || strings.Contains(target, "://") || strings.HasPrefix(target, "mailto:") {
+			isExternal := strings.Contains(target, "://") || strings.HasPrefix(target, "mailto:")
+			if target == "" || strings.HasPrefix(target, "#") || isExternal {
 				continue
 			}
 			// Repository links do not use optional Markdown titles or escaped spaces.

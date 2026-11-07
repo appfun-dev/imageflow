@@ -346,7 +346,9 @@ var _ = Describe("T6 BuildRun watcher (kind, real Shipwright)", Ordered, Label("
 
 		By("warming third-party images into the kind node (slow registries)")
 		for _, img := range t6WarmImages {
-			_, err := utils.Run(exec.Command("docker", "pull", img))
+			// --platform linux/amd64 avoids multi-platform manifest digest
+			// mismatches when kind loads the image into containerd.
+			_, err := utils.Run(exec.Command("docker", "pull", "--platform", "linux/amd64", img))
 			Expect(err).NotTo(HaveOccurred(), "docker pull %s", img)
 			_, err = utils.Run(exec.Command("kind", "load", "docker-image", img,
 				"--name", t6KindCluster()))
@@ -505,7 +507,7 @@ subjects:
 			{"logs", "-n", "shipwright-build", "deployment/shipwright-build-controller", "--tail=150"},
 		} {
 			out, err := t6Kubectl(args...)
-			fmt.Fprintf(GinkgoWriter, "$ kubectl %s\n%s\n(err: %v)\n", strings.Join(args, " "), out, err)
+			_, _ = fmt.Fprintf(GinkgoWriter, "$ kubectl %s\n%s\n(err: %v)\n", strings.Join(args, " "), out, err)
 		}
 		out, err := t6Kubectl("get", "pods", "-n", t6Namespace,
 			"-o", "jsonpath={.items[*].metadata.name}")
@@ -518,7 +520,7 @@ subjects:
 			}
 			lout, lerr := t6Kubectl("logs", pod, "-n", t6Namespace,
 				"--all-containers", "--tail=120", "--prefix")
-			fmt.Fprintf(GinkgoWriter, "$ kubectl logs %s\n%s\n(err: %v)\n", pod, lout, lerr)
+			_, _ = fmt.Fprintf(GinkgoWriter, "$ kubectl logs %s\n%s\n(err: %v)\n", pod, lout, lerr)
 		}
 	})
 
