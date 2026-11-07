@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -71,8 +72,16 @@ func validateBuildRunTarget(name string, annotations map[string]string) error {
 
 	var target buildRunTarget
 	if err := json.Unmarshal([]byte(value), &target); err != nil {
+		// The message must name the failing constraint (ADR-011 §2): a syntax
+		// error means the value is not JSON at all, a type error means it is
+		// JSON but not the required object.
+		detail := "must be JSON object of form {\"stream\":\"<name>\",\"tag\":\"<name>\"} (ADR-011)"
+		var syntaxErr *json.SyntaxError
+		if errors.As(err, &syntaxErr) {
+			detail = "invalid JSON: " + detail
+		}
 		return apierrors.NewInvalid(buildRunGK, name, field.ErrorList{
-			field.Invalid(p, value, fmt.Sprintf("must be a JSON object of form {\"stream\":\"<name>\",\"tag\":\"<name>\"} (ADR-011): %v", err)),
+			field.Invalid(p, value, fmt.Sprintf("%s: %v", detail, err)),
 		})
 	}
 
