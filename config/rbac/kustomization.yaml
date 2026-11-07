@@ -1,0 +1,32 @@
+resources:
+# All RBAC will be applied under this service account in
+# the deployment namespace. You may comment out this resource
+# if your manager will use a service account that exists at
+# runtime. Be sure to update RoleBinding and ClusterRoleBinding
+# subjects if changing service account names.
+- service_account.yaml
+- role.yaml
+- role_binding.yaml
+- leader_election_role.yaml
+- leader_election_role_binding.yaml
+# The following RBAC configurations are used to protect
+# the metrics endpoint with authn/authz. These configurations
+# ensure that only authorized users and service accounts
+# can access the metrics endpoint. Comment the following
+# permissions if you want to disable this protection.
+# More info: https://book.kubebuilder.io/reference/metrics.html
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+# Hand-written catalog RBAC (T12, ADR-003 R3): org-wide read-only catalog
+# ClusterRole + namespaced app-team Role template. Both deploy UNBOUND —
+# binding them to teams/groups is an org decision documented in
+# docs/quickstart.md and docs/ops.md. The Role lands in imageflow-system as a
+# live template; apply a copy into each app-team namespace (a RoleBinding
+# cannot reference a Role in another namespace).
+- catalog_reader_clusterrole.yaml
+- app_team_role.yaml
+# BuildRun Watcher RBAC (T1, ADR-004 Amended + ADR-011): feature-gated
+# ClusterRole for Shipwright BuildRun access. Deployed unbound; bind only when
+# --enable-buildrun-watcher=true on the manager deployment.
+- buildrun_watcher_clusterrole.yaml

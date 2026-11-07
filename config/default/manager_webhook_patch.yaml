@@ -1,0 +1,35 @@
+# This patch enables the webhook server inside the manager deployment:
+# it passes the webhook flags (ADR-001 single webhook service) and mounts the
+# cert-manager-issued serving certificate (config/certmanager, Secret
+# webhook-server-cert) that --webhook-cert-path points at.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-port=9443
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs/
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-name=tls.crt
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --webhook-cert-key=tls.key
+- op: add
+  path: /spec/template/spec/containers/0/ports/-
+  value:
+    containerPort: 9443
+    name: webhook-server
+    protocol: TCP
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    mountPath: /tmp/k8s-webhook-server/serving-certs
+    name: cert
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: cert
+    secret:
+      defaultMode: 420
+      secretName: webhook-server-cert

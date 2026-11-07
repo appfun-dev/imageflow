@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "SOP-14",
+      "name": "质量治理",
+      "source": "bizdevops-modeling-sop:SOP-14",
+      "status": "ACTIVE",
+      "triggers": [
+        "API 对外暴露或跨团队使用",
+        "出现 SLA/SLO、限流、配额、计费、违规通知或监控承诺"
+      ],
+      "nonTriggers": [
+        "仅内部使用的 API，无质量承诺",
+        "骨架和模式精化之前的契约前探索"
+      ],
+      "audience": "API 负责人、平台工程师、SRE",
+      "prerequisites": [
+        "核心模型为 DRAFT 或 ACCEPTED",
+        "契约骨架和模式精化已完成"
+      ],
+      "artifacts": [
+        "docs/model/extensions/sop-14-quality-governance.md"
+      ],
+      "gateHooks": {
+        "B": "定义质量承诺和声明层级；为每个 SLO、限流和计费声明指定度量方式、执行点和带外载体。ImageFlow 项目参见 sop-14-quality-governance.md §设计决策。",
+        "C": "在工单中追加网关限流/计量、身份到档位映射、监控告警、违规证据和通知任务。",
+        "D": "对照最终网关、监控、部署配置和可观测行为核验 MDSL/质量登记册——不仅核验契约文本。ImageFlow 项目参见 sop-14-quality-governance.md §设计决策。"
+      },
+      "categories": ["QUALITY_GOVERNANCE"],
+      "ruleIdPrefixes": ["QG-"],
+      "verification": {
+        "automated": "可量化 SLO 存在、配额含时间窗口且单位受控、挂载点有效、执行点存在、监控闭环完整。",
+        "manual": "工具无法检测的矛盾组合仍由人工裁决。",
+        "negativeControl": "缺少 SLO 到监控的映射，或限流声明无执行点，必须被捕获。"
+      },
+      "outOfBand": "币种/计费周期、按客户端区分的配额、超限行为、精确百分位——由版本化配置/登记册承载，不得以'已写入契约'替代。",
+      "owner": "",
+      "retirement": {
+        "criteria": "",
+        "evidenceRetention": "退役时保留历史决策和证据；不允许静默删除。"
+      }
+    },
+    {
+      "id": "SOP-15",
+      "name": "版本演进",
+      "source": "bizdevops-modeling-sop:SOP-15",
+      "status": "NOT_ENABLED",
+      "triggers": [
+        "契约已发布或被多方消费",
+        "需要破坏性变更、并行版本、弃用/退役或消费方迁移"
+      ],
+      "nonTriggers": [
+        "未发布的内部契约，无外部消费方",
+        "纯增量变更，无兼容性顾虑"
+      ],
+      "audience": "API 负责人、集成工程师、消费方团队",
+      "prerequisites": [
+        "核心模型为 DRAFT 或 ACCEPTED",
+        "已发布的契约基线存在"
+      ],
+      "artifacts": [],
+      "gateHooks": {
+        "B": "确定版本方案、挂载层级、演进策略和兼容性决策；版本格式不能仅依赖 DSL 自校验。",
+        "C": "在工单中追加主/次/补丁操作、消费方迁移、并行版本支持、遥测和退役任务。",
+        "D": "对照最终契约、生成物、路由/兼容代码和遥测配置核验实际演进行为；确认版本元数据正确传播到下游。"
+      },
+      "categories": ["VERSION_EVOLUTION"],
+      "ruleIdPrefixes": ["VE-"],
+      "verification": {
+        "automated": "每个破坏性变更都有主版本升级和迁移计划；每个弃用元素都有通知期、调用方监控证据和退役前置条件；各层级策略一致或差异有理由。",
+        "manual": "跨层级策略一致性和迁移计划充分性。",
+        "negativeControl": "破坏性变更无主版本/迁移计划，或弃用元素无通知期/调用方证据，必须被捕获。"
+      },
+      "outOfBand": "元素级弃用日期、通知期和退役时间表——当 DSL 无法表达时由扩展登记册承载；禁止静默删除元素。",
+      "owner": "",
+      "retirement": {
+        "criteria": "",
+        "evidenceRetention": "退役时保留历史决策和证据；不允许静默删除。"
+      }
+    }
+  ]
+}

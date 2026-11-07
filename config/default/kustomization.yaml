@@ -1,0 +1,227 @@
+# Adds namespace to all resources.
+namespace: imageflow-system
+
+# Value of this field is prepended to the
+# names of all resources, e.g. a deployment named
+# "wordpress" becomes "alices-wordpress".
+# Note that it should also match with the prefix (text before '-') of the namespace
+# field above.
+namePrefix: imageflow-
+
+# Labels to add to all resources and selectors.
+#labels:
+#- includeSelectors: true
+#  pairs:
+#    someName: someValue
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
+# [WEBHOOK] Webhook service exposed by the manager.
+- ../webhook
+# [CERTMANAGER] Enabled by ticket T3: the single webhook service (ADR-001) is
+# fail-closed, so its serving certificate chain must be part of the default
+# deployment. Metrics certificates deliberately stay disabled — ADR-010 rules
+# v1 metrics exposure = plaintext HTTP :8080, in-cluster only (the exact
+# secure-metrics upgrade path lives in docs/ops.md §Metrics).
+- ../certmanager
+# [PROMETHEUS] To enable prometheus monitor, uncomment all sections with [PROMETHEUS].
+#- ../prometheus
+# [METRICS] Expose the controller manager metrics service.
+- metrics_service.yaml
+# [NETWORK POLICY] Protect the /metrics endpoint and Webhook Server with NetworkPolicy.
+#- ../network-policy
+
+# Uncomment the patches line if you enable Metrics
+patches:
+# [METRICS] The metrics endpoint is exposed over HTTP on :8080 via manager args.
+#- path: manager_metrics_patch.yaml
+#  target:
+#    kind: Deployment
+
+# [WEBHOOK] Enable the webhook server inside the manager deployment.
+- path: manager_webhook_patch.yaml
+  target:
+    kind: Deployment
+
+# [CERTMANAGER] Webhook replacements enabled by ticket T3. The metrics
+# certificate blocks (controller-manager-metrics-service -> metrics-certs,
+# Prometheus ServiceMonitor TLS) stay commented out per ADR-010 (plaintext
+# :8080 for v1; upgrade path in docs/ops.md §Metrics).
+replacements:
+# - source: # Uncomment the following block to enable certificates for metrics
+#     kind: Service
+#     version: v1
+#     name: controller-manager-metrics-service
+#     fieldPath: metadata.name
+#   targets:
+#     - select:
+#         kind: Certificate
+#         group: cert-manager.io
+#         version: v1
+#         name: metrics-certs
+#       fieldPaths:
+#         - spec.dnsNames.0
+#         - spec.dnsNames.1
+#       options:
+#         delimiter: '.'
+#         index: 0
+#         create: true
+#     - select: # Uncomment the following to set the Service name for TLS config in Prometheus ServiceMonitor
+#         kind: ServiceMonitor
+#         group: monitoring.coreos.com
+#         version: v1
+#         name: controller-manager-metrics-monitor
+#       fieldPaths:
+#         - spec.endpoints.0.tlsConfig.serverName
+#       options:
+#         delimiter: '.'
+#         index: 0
+#         create: true
+#
+# - source:
+#     kind: Service
+#     version: v1
+#     name: controller-manager-metrics-service
+#     fieldPath: metadata.namespace
+#   targets:
+#     - select:
+#         kind: Certificate
+#         group: cert-manager.io
+#         version: v1
+#         name: metrics-certs
+#       fieldPaths:
+#         - spec.dnsNames.0
+#         - spec.dnsNames.1
+#       options:
+#         delimiter: '.'
+#         index: 1
+#         create: true
+#     - select: # Uncomment the following to set the Service namespace for TLS in Prometheus ServiceMonitor
+#         kind: ServiceMonitor
+#         group: monitoring.coreos.com
+#         version: v1
+#         name: controller-manager-metrics-monitor
+#       fieldPaths:
+#         - spec.endpoints.0.tlsConfig.serverName
+#       options:
+#         delimiter: '.'
+#         index: 1
+#         create: true
+#
+ - source: # [WEBHOOK] Serving certificate DNS name from the webhook Service name
+     kind: Service
+     version: v1
+     name: webhook-service
+     fieldPath: .metadata.name # Name of the service
+   targets:
+     - select:
+         kind: Certificate
+         group: cert-manager.io
+         version: v1
+         name: serving-cert
+       fieldPaths:
+         - .spec.dnsNames.0
+         - .spec.dnsNames.1
+       options:
+         delimiter: '.'
+         index: 0
+         create: true
+ - source: # [WEBHOOK] Serving certificate DNS namespace from the webhook Service namespace
+     kind: Service
+     version: v1
+     name: webhook-service
+     fieldPath: .metadata.namespace # Namespace of the service
+   targets:
+     - select:
+         kind: Certificate
+         group: cert-manager.io
+         version: v1
+         name: serving-cert
+       fieldPaths:
+         - .spec.dnsNames.0
+         - .spec.dnsNames.1
+       options:
+         delimiter: '.'
+         index: 1
+         create: true
+
+ - source: # [CERTMANAGER] CA injection into the ValidatingWebhookConfiguration
+     kind: Certificate
+     group: cert-manager.io
+     version: v1
+     name: serving-cert # This name should match the one in certificate.yaml
+     fieldPath: .metadata.namespace # Namespace of the certificate CR
+   targets:
+     - select:
+         kind: ValidatingWebhookConfiguration
+       fieldPaths:
+         - .metadata.annotations.[cert-manager.io/inject-ca-from]
+       options:
+         delimiter: '/'
+         index: 0
+         create: true
+ - source:
+     kind: Certificate
+     group: cert-manager.io
+     version: v1
+     name: serving-cert
+     fieldPath: .metadata.name
+   targets:
+     - select:
+         kind: ValidatingWebhookConfiguration
+       fieldPaths:
+         - .metadata.annotations.[cert-manager.io/inject-ca-from]
+       options:
+         delimiter: '/'
+         index: 1
+         create: true
+
+ - source: # [CERTMANAGER] CA injection into the MutatingWebhookConfiguration
+     kind: Certificate
+     group: cert-manager.io
+     version: v1
+     name: serving-cert
+     fieldPath: .metadata.namespace # Namespace of the certificate CR
+   targets:
+     - select:
+         kind: MutatingWebhookConfiguration
+       fieldPaths:
+         - .metadata.annotations.[cert-manager.io/inject-ca-from]
+       options:
+         delimiter: '/'
+         index: 0
+         create: true
+ - source:
+     kind: Certificate
+     group: cert-manager.io
+     version: v1
+     name: serving-cert
+     fieldPath: .metadata.name
+   targets:
+     - select:
+         kind: MutatingWebhookConfiguration
+       fieldPaths:
+         - .metadata.annotations.[cert-manager.io/inject-ca-from]
+       options:
+         delimiter: '/'
+         index: 1
+         create: true
+#
+# - source: # Uncomment the following block if you have a ConversionWebhook (--conversion)
+#     kind: Certificate
+#     group: cert-manager.io
+#     version: v1
+#     name: serving-cert
+#     fieldPath: .metadata.namespace # Namespace of the certificate CR
+#   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
+# +kubebuilder:scaffold:crdkustomizecainjectionns
+# - source:
+#     kind: Certificate
+#     group: cert-manager.io
+#     version: v1
+#     name: serving-cert
+#     fieldPath: .metadata.name
+#   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
+# +kubebuilder:scaffold:crdkustomizecainjectionname

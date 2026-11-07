@@ -1,0 +1,19 @@
+# This kustomization.yaml is not intended to be run as standalone,
+# instead it is used to build the config/crd directory with the generated CRDs.
+resources:
+- bases/imageflow.appfun.dev_imagestreams.yaml
+- bases/imageflow.appfun.dev_imageartifacts.yaml
+- bases/imageflow.appfun.dev_imagesubscriptions.yaml
+- bases/imageflow.appfun.dev_imagestreamtags.yaml
+- bases/imageflow.appfun.dev_imagetags.yaml
+- bases/imageflow.appfun.dev_imagestreamimports.yaml
+- bases/imageflow.appfun.dev_imagestreammappings.yaml
+# +kubebuilder:scaffold:crdkustomizeresource
+
+patches:
+# [CERTMANAGER] To enable cert-manager, uncomment all the sections with [CERTMANAGER] prefix.
+# patches here are for enabling the CA injection for each CRD
+# +kubebuilder:scaffold:crdkustomizecainjectionpatch
+
+configurations:
+- kustomizeconfig.yaml

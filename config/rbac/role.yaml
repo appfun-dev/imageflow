@@ -1,0 +1,116 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imageartifacts
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamimports
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamimports/status
+  - imagestreammappings/status
+  - imagestreams/status
+  - imagestreamtags/status
+  - imagesubscriptions/status
+  - imagetags/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreammappings
+  verbs:
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreams
+  - imagesubscriptions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags
+  - imagetags
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

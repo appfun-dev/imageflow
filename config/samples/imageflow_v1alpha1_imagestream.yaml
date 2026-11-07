@@ -1,0 +1,19 @@
+# ImageStream is the catalog's single source of truth (ADR-002 R1).
+# Create it in the catalog namespace (imageflow-system).
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageStream
+metadata:
+  name: payments-api
+  namespace: imageflow-system
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  tags:
+  - name: stable
+    from:
+      kind: DockerImage
+      name: quay.io/example/payments-api:stable
+    importPolicy:
+      scheduled: true
+      intervalSeconds: 900

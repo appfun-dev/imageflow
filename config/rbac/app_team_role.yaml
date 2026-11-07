@@ -1,0 +1,49 @@
+# Hand-written (NOT generated — controller-gen never touches this file).
+#
+# Namespaced app-team Role TEMPLATE (ADR-003 R3, ImageFlow v1).
+#
+# Application teams get FULL rights on the objects they own inside their own
+# namespace: ImageSubscriptions (declare delivery targets) and the two task
+# kinds ImageStreamMapping (register an image you pushed — e.g. from a
+# Shipwright BuildRun step) and ImageStreamImport (pull an external tag into
+# the catalog). They deliberately get NO write access to catalog truth objects
+# (ImageStream/ImageArtifact/mirrors are platform-team + controller owned;
+# mirrors are spec-immutable by CEL anyway) — catalog browsing comes from the
+# org-wide catalog-reader ClusterRole instead.
+#
+# A Kubernetes RoleBinding cannot reference a Role in another namespace, so
+# this file is a TEMPLATE: apply a copy into every app-team namespace and bind
+# it there. The copy the default kustomize build deploys into imageflow-system
+# (prefixed imageflow-app-team) is a live reference, not the team grant.
+#
+#   kubectl apply -n <team-ns> -f config/rbac/app_team_role.yaml
+#   kubectl create rolebinding imageflow-app-team \
+#     -n <team-ns> --role=app-team \
+#     --group=<team-group>            # or --serviceaccount=<team-ns>:<name>
+#
+# Note: creating subscriptions whose targets live in OTHER namespaces also
+# requires the standard RBAC `update` grant on those target workloads in the
+# target namespace for the subscription creator (ADR-003: SAR-checked, feature
+# not bug — ImageFlow never delivers to targets its creator may not update).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-team
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/component: catalog-rbac
+rules:
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagesubscriptions
+  - imagestreammappings
+  - imagestreamimports
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete

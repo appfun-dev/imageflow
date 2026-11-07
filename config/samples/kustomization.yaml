@@ -1,0 +1,10 @@
+# Samples for the user-writable catalog Kinds.
+# ImageArtifact and the mirror objects (ImageStreamTag/ImageTag) are deliberately
+# NOT sampled: they are controller-owned and synthesized from the registration
+# paths (ADR-002 R2/R4/R9); user-writable surface is metadata.annotations only.
+resources:
+- imageflow_v1alpha1_imagestream.yaml
+- imageflow_v1alpha1_imagesubscription.yaml
+- imageflow_v1alpha1_imagestreamimport.yaml
+- imageflow_v1alpha1_imagestreammapping.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

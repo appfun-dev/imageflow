@@ -1,0 +1,146 @@
+// Status: ACCEPTED (human review 2026-11-07)
+// Technology-neutral logical contract for ImageFlow's v1alpha1 resource surface.
+// P means an intentionally unspecified payload placeholder, not an empty payload.
+// Go API types and generated CRDs own all fields, defaults, validation, and serialization.
+// No HTTP provider binding is declared because these operations are not HTTP routes.
+
+API description ImageFlowAPI version "v1alpha1"
+usage context PUBLIC_API for BACKEND_INTEGRATION
+overview "ACCEPTED logical resource operations; endpoint names map to the CML resource aggregates"
+
+data type ResourceIdentity P
+data type ImageStreamSpec P
+data type ImageStreamResource P
+data type ImageArtifactResource P
+data type ImageSubscriptionSpec P
+data type ImageSubscriptionResource P
+data type ImageStreamImportSpec P
+data type ImageStreamImportResource P
+data type ImageStreamMappingSpec P
+data type ImageStreamMappingResource P
+data type ImageStreamTagResource P
+data type ImageTagResource P
+data type BuildRunAnnotation P
+data type BuildRunDigest P
+data type RegistrationCondition P
+
+endpoint type ImageStreamContract serves as MASTER_DATA_HOLDER role
+exposes
+  operation declareImageStream
+    with responsibility STATE_CREATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageStreamSpec
+    delivering payload ImageStreamResource
+  operation readImageStream
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageStreamResource
+  operation replaceImageStreamTags
+    with responsibility STATE_REPLACEMENT_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageStreamSpec
+    delivering payload ImageStreamResource
+
+// Artifacts are created or reused by registration, not independently asserted as catalog truth.
+endpoint type ImageArtifactContract serves as REFERENCE_DATA_HOLDER role
+exposes
+  operation readImageArtifact
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageArtifactResource
+
+endpoint type ImageSubscriptionContract serves as MASTER_DATA_HOLDER role
+exposes
+  operation declareImageSubscription
+    with responsibility STATE_CREATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageSubscriptionSpec
+    delivering payload ImageSubscriptionResource
+  operation readImageSubscription
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageSubscriptionResource
+  operation replaceImageSubscription
+    with responsibility STATE_REPLACEMENT_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageSubscriptionSpec
+    delivering payload ImageSubscriptionResource
+
+endpoint type ImageStreamImportContract serves as STATEFUL_PROCESSING_RESOURCE role
+exposes
+  operation requestImageStreamImport
+    with responsibility STATE_CREATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageStreamImportSpec
+    delivering payload ImageStreamImportResource
+  operation readImageStreamImport
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageStreamImportResource
+
+endpoint type ImageStreamMappingContract serves as STATEFUL_PROCESSING_RESOURCE role
+exposes
+  operation requestImageStreamMapping
+    with responsibility STATE_CREATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ImageStreamMappingSpec
+    delivering payload ImageStreamMappingResource
+  operation readImageStreamMapping
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageStreamMappingResource
+
+// Mirrors expose retrieval only. Their spec and status are controller-owned.
+endpoint type ImageStreamTagContract serves as INFORMATION_HOLDER_RESOURCE role
+exposes
+  operation readImageStreamTag
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageStreamTagResource
+
+endpoint type ImageTagContract serves as INFORMATION_HOLDER_RESOURCE role
+exposes
+  operation readImageTag
+    with responsibility RETRIEVAL_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload ResourceIdentity
+    delivering payload ImageTagResource
+
+// BuildRun observation: watches external Shipwright BuildRun status and triggers catalog registration.
+// Technology-neutral; Kubernetes watch mechanics and CRD field paths are implementation details.
+endpoint type BuildRunWatcherContract serves as STATEFUL_PROCESSING_RESOURCE role
+exposes
+  operation observeBuildRunSucceeded
+    with responsibility EVENT_NOTIFICATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload BuildRunAnnotation
+    delivering payload RegistrationCondition
+  operation registerFromBuildRun
+    with responsibility STATE_CREATION_OPERATION
+    in REQUEST_REPLY conversation
+    expecting payload BuildRunDigest
+    delivering payload RegistrationCondition
+
+// Quality governance (SOP-14): global default SLA template.
+// Precise value 98.0% recorded in outOfBand registry; MDSL integer constraint requires 98.
+// Latency p99 < 1000ms is a conservative v1alpha1 baseline; tighten after production data.
+SLA template DefaultSLA
+  objective availability "98 PERCENT" 98 PERCENT
+  objective latency "p99 response time upper bound" 1000 milliseconds
+
+API provider ImageFlowAPI version "v1alpha1"
+  offers ImageStreamContract
+  offers ImageArtifactContract
+  offers ImageSubscriptionContract
+  offers ImageStreamImportContract
+  offers ImageStreamMappingContract
+  offers ImageStreamTagContract
+  offers ImageTagContract
+  offers BuildRunWatcherContract
+  with provider SLA DefaultSLA

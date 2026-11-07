@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+  name: system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: imageflow
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: imageflow
+    spec:
+      # Single controller-manager + single in-process webhook server (ADR-001):
+      # the webhook flags/cert volume are appended by
+      # config/default/manager_webhook_patch.yaml; the webhook server only
+      # starts when --webhook-cert-path is set. Multi-arch images are built
+      # with `make docker-buildx` (linux/amd64 + linux/arm64).
+      securityContext:
+        # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
+        # This ensures that deployments meet the highest security requirements for Kubernetes.
+        # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - command:
+        - /manager
+        args:
+          # ---- runtime flags (cmd/main.go) ----
+          - --leader-elect
+          - --health-probe-bind-address=:8081
+          # Metrics exposure for v1 is plaintext HTTP on :8080, in-cluster
+          # only (ADR-010). The secure path (--metrics-secure=true +
+          # --metrics-cert-path/-name/-key) is fully scaffolded in
+          # config/default and documented, with the exact flip procedure, in
+          # docs/ops.md §Metrics.
+          - --metrics-bind-address=:8080
+          - --metrics-secure=false
+          # ---- ImageFlow behavior flags (internal/config; values = code
+          # defaults = ADR-frozen v1 semantics; listed explicitly so this
+          # manifest is the deployment source of truth — see docs/ops.md) ----
+          # TTL garbage collection of completed task objects (single owner:
+          # the task GC controller).
+          - --mapping-ttl-success=1h
+          - --mapping-ttl-failure=24h
+          # Default polling interval applied when an ImageStream tag does not
+          # set importPolicy.intervalSeconds (the CRD default is 900s; these
+          # flags are the default-when-unset seam).
+          - --import-default-interval=15m
+          - --scheduled-default-interval=15m
+          # ADR-003 periodic SAR re-verification period for subscription
+          # targets; also the TTL of the SAR result cache.
+          - --sar-recheck-period=10m
+          # Frozen v1 status bounds: tag history 3 / recent deliveries 5 /
+          # mirror events 5 (ADR-002, ADR-008).
+          - --stream-tag-history-limit=3
+          - --subscription-delivery-limit=5
+          - --mirror-event-limit=5
+          # ADR-007 registry allowlist; empty = allow all registries.
+          # Example: --registry-allowlist=quay.io,registry.internal.example.com
+          - --registry-allowlist=
+        image: controller:latest
+        name: manager
+        ports:
+        - containerPort: 8080
+          name: http-metrics
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        # Sized for the v1 reference deployment (9 controllers + webhook
+        # server + informer caches). Scale memory with catalog size (streams,
+        # artifacts, mirrors, target workloads watched); see docs/ops.md
+        # §Sizing.
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts: []
+      volumes: []
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10

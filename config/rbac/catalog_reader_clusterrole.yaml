@@ -1,0 +1,47 @@
+# Hand-written (NOT generated — controller-gen never touches this file).
+#
+# Org-wide read-only catalog ClusterRole (ADR-003 R3, ImageFlow v1).
+#
+# Application teams must be able to BROWSE the image catalog — ImageStreams,
+# ImageArtifacts, and the read-only ImageStreamTag/ImageTag mirror views —
+# without a per-namespace RoleBinding for every stream namespace. That is the
+# exact sprawl ADR-003 R3 exists to prevent: bind this ClusterRole once via a
+# single org-wide ClusterRoleBinding to the team's group or ServiceAccount.
+#
+# ADR-003 R3 names ImageStream/ImageArtifact; the mirror kinds
+# (imagestreamtags/imagetags) are included on orchestrator ruling (T12):
+# design-doc §15 scenario 1 ("query the digest currently associated with a
+# tag") and the quickstart are dead on arrival if catalog browsing cannot read
+# tag mirrors. The grant is zero-risk: ADR-002 mirrors are spec-immutable
+# (CEL x-kubernetes-validations reject every user write to spec and mirror
+# status — pinned by test/integration/catalog_crd_test.go), and read verbs
+# cannot mutate anything.
+#
+# This file ships UNBOUND by design: who gets catalog read access (group name,
+# ServiceAccount, federation) is an org decision. Create the binding yourself:
+#
+#   kubectl create clusterrolebinding imageflow-catalog-reader-<team> \
+#     --clusterrole=imageflow-catalog-reader \
+#     --group=<team-group>            # or --serviceaccount=<ns>:<name>
+#
+# (name shown as installed by config/default, which applies the imageflow-
+# namePrefix; the raw name in this file is catalog-reader.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: catalog-reader
+  labels:
+    app.kubernetes.io/name: imageflow
+    app.kubernetes.io/component: catalog-rbac
+rules:
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreams
+  - imageartifacts
+  - imagestreamtags
+  - imagetags
+  verbs:
+  - get
+  - list
+  - watch
