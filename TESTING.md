@@ -1,113 +1,287 @@
 # ImageFlow 测试约定
 
-本文件是测试策略的可执行说明（决策背景见 `docs/adr/ADR-009-testing-strategy.md`；
-T12 按仓库现实重写：v1 实际采用 **Ginkgo + Gomega**，未引入 testify/suite 与
-Allure——ADR-009 中相应工具章节以本文与实现为准；可追溯性由
-`docs/scenario-map.md` 与各 ticket 的 evidence comment 承担）。
+本文件是 `docs/adr/ADR-009-testing-strategy.md` 的可执行版本：日常命令、目录结构、Allure 标注模板与代码示例。
 
-## 分层结构
+> **现状说明**：T12 期间落地了 Ginkgo + Gomega 的集成/e2e 套件。本文件按 ADR-009 把 **testify/suite + allure-go** 恢复为后续新增测试与重构的首要约定；既有 Ginkgo 套件继续维护，新增/拆分用例时优先按本文件执行。
+
+## 目录结构
 
 ```text
 imageflow/
-├── internal/**/*_test.go        # 单元层：与生产代码同包，纯内存/fake client
-├── test/registrydouble/         # 共享 OCI v2 registry double（TLS+basic auth+故障注入）
-├── test/integration/            # envtest 层：真实 API server + 真实控制器（Ginkgo 套件）
-└── test/e2e/                    # kind 层：真实集群 + 真实镜像构建部署（Ginkgo 套件，CI 执行）
+├── internal/**/*.go              # 生产代码
+├── internal/**/*_test.go         # 同包单元测试（可选，与代码共位）
+├── test/
+│   ├── unit/                     # 纯内存、无集群依赖；毫秒级完成
+│   ├── integration/              # envtest / 轻量 fake；真实 API server + 控制器
+│   ├── e2e/                      # kind 集群；端到端镜像流与 Workload 更新
+│   └── registrydouble/           # 共享 OCI v2 registry double（TLS + basic auth + 故障注入）
+├── allure-results/               # gitignore，Allure JSON 输出
+├── TESTING.md                    # 本文件
+└── docs/adr/ADR-009-testing-strategy.md
 ```
 
-- **单元层**：控制器纯逻辑（状态机、路径文法、词汇表、TTL 判定、凭据不泄漏的
-  单元面），无集群依赖。
-- **envtest 层**（`test/integration/`，约 96 个命名用例）：真实 API server + etcd +
-  真实控制器 manager（`RunSpecs` 在 `manager_test.go`，**没有** `suite_test.go`）。
-  限制：envtest 无 kube-controller-manager——原生 GC 级联与原生 rollout 不存在，
-  测试直接断言 ownerRef 契约、直接写 workload status 子资源模拟原生控制器行为。
-  需要 `KUBEBUILDER_ASSETS`（`make envtest` 或 CI 自动准备）。
-- **kind 层**（`test/e2e/`，24 个命名用例，CI 执行）：真实集群、真实 Deployment 滚动、
-  真实 webhook/证书链、进程内 registrydouble 提供真实 OCI 语义（真实 sha256、
-  schema2 manifest、TLS、basic auth、401/404/5xx/hang 故障注入）。本机无容器运行时，
-  本地只做编译验证：`go vet ./test/e2e/`。
+- **单元层**：纯函数、schema 校验、字段路径解析、授权判断等。
+- **集成层**：真实 API server + etcd + 真实控制器 manager（需 `KUBEBUILDER_ASSETS`）。
+- **e2e 层**：真实 kind 集群、Deployment 滚动、webhook/证书链、registrydouble。
 
-## 运行命令
+## 快速开始
 
 ```bash
-# 全部非 e2e 测试（单元 + envtest；CI 的 make test 同款）
-make test
+# 1. 安装 Allure 命令行（本地查看报告用）
+brew install allure        # macOS
+# 或见 https://allurereport.org/docs/install/
 
-# 手动等价（注意排除 e2e，且需要 envtest 资产）
-export KUBEBUILDER_ASSETS=<path-to>/k8s/<version>-<os>-<arch>
-go test -count=1 $(go list ./... | grep -v /e2e)
+# 2. 运行全部测试（入口永远不变）
+go test ./...
 
-# kind e2e 全链（建集群 → 构建镜像 → 安装 → 跑 24 specs → 删集群）
-make test-e2e
+# 3. 只跑单元层
+go test ./test/unit/...
 
-# lint（golangci-lint v2.1.0，0 issues 门槛）
-make lint
+# 4. 生成并查看 HTML 报告
+allure serve allure-results
+# 或生成静态站点
+allure generate allure-results -o allure-report
 ```
 
-CI（`.github/workflows/`）：`lint.yml`、`test.yml`（`go mod tidy` 校验 + `make test`）、
-`test-e2e.yml`（kind + cert-manager + `make test-e2e`，Ginkgo 超时 30m；当前全绿用时
-约 16 分钟墙钟）。e2e manager pod 一律绑定**生成的** manager-role（68acbdc 协议，
-禁止手写规则清单——markers 变更后绑定自动跟随）。
+## Allure 结果目录
 
-## 命名与组织约定
+- 默认输出到 `./allure-results`。
+- 可通过环境变量覆盖：`ALLURE_RESULTS_DIR=/tmp/allure-results go test ./...`
+- `allure-results/` 与 `allure-report/` 已加入 `.gitignore`，**不要提交**。
 
-- **命名用例**：`It("...")` 描述即用例名（kebab-case 长句，如
-  `t9-e2e-deployment-digest-registration-delivers-and-starts-the-native-rollout`），
-  ticket 前缀（t4/t7/t8/t9/t10/t11/t12）标识 lane；`docs/scenario-map.md` 按名字引用。
-- **lane 隔离**：每条 kind lane 独占命名空间（`t7-import-e2e`、`t8-authz-e2e`、
-  `t9-delivery-e2e`、`t10-imagefields-e2e`、`t11-observer-e2e`、`t12-hardening-e2e`），
-  自建 SA/ClusterRoleBinding/manager pod（args 模式：
-  `--sar-recheck-period=20s --leader-elect=false --metrics-bind-address=0`），
-  AfterAll 清理；lane 间可共存于同一集群。
-- **控制器名进程内全局唯一**：测试 manager 内注册的控制器名加 `-it` 后缀。
-- **窗口纪律**（kind 层）：`Eventually` 2m/2s（慢路径 3m/2s–5m/5s），
-  `Consistently` 30s/10s；保持全绿运行远离 30m 预算（超时上调需单独记录）。
-- **kind 节点污点**：工作负载一律加 blanket toleration `operator: Exists`；
-  StatefulSet 用 `podManagementPolicy: Parallel`；需要真实 Ready 的 pod 用
-  `registry.k8s.io/pause:3.9`（digest `sha256:7031c1b2…21097`）。
-- **lint 陷阱**：goconst 对包内 ≥3 次的字符串字面量报错（赋值/表达式上下文才计数，
-  函数调用实参不计）；跨 ns RoleBinding 不能引用他 ns 的 Role（复制 Role 对象）。
-- **registrydouble 复用**：需要真实 Registry 语义一律用 `test/registrydouble`
-  （S2 一致性已验证），禁止另起 double。
+## 可追溯性 schema
 
-## 冻结契约（测试不得破坏，改动需 orchestrator 裁定）
+每条需要追踪的测试必须携带：
 
-- T9 per-target Reason 词汇表与 §12.9 `recentDeliveries` 记录形状（引擎属主）。
-- T11 R3：观察器**不写** per-target entry Reason/Message；其 Rollout* reason 只出现在
-  它治愈的投递记录、事件与 `StatusPolicyEvaluated` condition 上。
-- 聚合 rolloutStatus 优先序 `Failed > Conflict > Unknown > Progressing > Superseded > Succeeded`。
-- SSA field manager 格式 `imageflow.appfun.dev/sub-<ns>-<name>`（超长截断+哈希）。
-- 指标命名 `imageflow_<subsystem>_<metric>_<unit>`；`docs/metrics-contract.md` append-only。
-- **已知瞬态**（有记录，勿"顺手修复"）：T9 kind specs 1–3 钉 `rolloutStatus=Progressing`
-  ——诚实 Failed 翻转在 15–75s 后才落地，快于 2s 轮询窗口；两轮 CI 均有余量通过。
-  若新增用例使其变 flake，先上报再处理（放宽方向 = 接受 Progressing-or-Failed）。
-
-## 真实 Registry e2e 腿（可选，CI 默认 skip）
-
-kind 套件默认全部跑在 registrydouble 上。`test/e2e/import_e2e_test.go` 中 3 条
-**真实 Registry 腿**仅当环境变量齐备时执行：
-
-| 变量 | 必填 | 语义 |
+| 维度 | Allure API | 取值规则 |
 |---|---|---|
-| `IMAGEFLOW_E2E_REGISTRY_HOST` | 是 | 真实 Registry 主机（S2 客户端强制 `https://`） |
-| `IMAGEFLOW_E2E_REGISTRY_REPO` | 是 | 仓库路径（如 `org/repo`） |
-| `IMAGEFLOW_E2E_REGISTRY_TAG` | 是 | 测试用 tag（按需腿会改写其指向，见下） |
-| `IMAGEFLOW_E2E_REGISTRY_PUSH_USERNAME` / `_PUSH_PASSWORD` | 漂移腿必须 | 测试**自身**重指 tag 内容以制造漂移（ImageFlow 永不推送，ADR-007；无凭据时漂移腿显式 Skip，可用运维预发布 tag 走按需腿） |
-| `IMAGEFLOW_E2E_REGISTRY_PULL_SECRET` | 否 | dockerconfigjson 文件路径（凭据腿） |
-| `IMAGEFLOW_E2E_REGISTRY_CA` | 否 | PEM CA 证书路径（私有 CA；挂进 manager pod 并以 `SSL_CERT_FILE` 生效） |
+| 测试用例 ID | `allure.WithAllureID("IF-<issue-id>")` | 本测试用例对应的 GitHub Issue 号 |
+| TMS | `allure.WithTMS("IF-<issue-id>", "<github-issue-url>")` | 指向同一测试用例 issue |
+| Spec | `allure.WithTMS("SPEC-<id>", "<github-issue-url>")` | 标题以 `Spec:` 开头的 GitHub issue |
+| User Story（序号） | `allure.WithLabel("userstory", "US-<Seq>")` | Spec 中 User Stories 列表序号 |
+| User Story（独立 issue） | `allure.WithLink("<url>", "US-<issue-id>", "userstory")` | 故事拆分为独立 issue 时使用 |
+| 场景名 | `allure.WithLabel("scenario", "<场景名>")` | 具体测试场景 |
+| Epic | `allure.WithEpic("Phase X: ...")` | 项目阶段 |
+| Feature | `allure.WithFeature("<功能域>")` | 功能域 / ADR 编号 |
+| Story | `allure.WithStory("US-<Seq>")` | 用户故事编号 |
+| 文档 / ADR | `allure.WithLink("<url>", "ADR-###", "docs")` | 指向相关 ADR 或设计文档 |
+| Bug 回归 | `allure.WithIssue(name, url)` | 仅用于回归某个 bug issue 时 |
 
-语义：三者（HOST/REPO/TAG）齐备时真实腿**替换** double 成为默认源；缺推送凭据的
-子能力各自显式 Skip 并说明所缺变量。**T12 裁定（issue #13）：CI 保持 skip**——
-漂移腿需要推送凭据（我们不对任何公共 Registry 持有），纯匿名公共镜像不能覆盖三条腿，
-且引入外部 Registry 可用性/限流会使 CI 因非代码原因变红。`docs/scenario-map.md`
-的硬规则与此一致：场景映射只允许引用 **CI 实际运行**的命名用例，skip 腿至多作为
-可选补充证据。
+## 层级映射
 
-## 可追溯性
+| Allure 层级 | 来源 |
+|---|---|
+| `ParentSuite` | `unit` / `integration` / `e2e` |
+| `Suite` | testify/suite 结构体名去掉 `Suite` 后缀 |
+| `SubSuite` | 可选子分组 |
+| `Epic` | 项目阶段 |
+| `Feature` | Spec / 功能域 / ADR |
+| `Story` | User Story |
 
-- §15 十七条场景 ↔ 命名用例映射：`docs/scenario-map.md`（每条场景 ≥1 个 CI 运行用例）。
-- 每个 ticket 的验收证据（AC → 用例、CI run、偏差）以 evidence comment 形式记录在
-  对应 GitHub issue 上（见 `docs/agents/issue-tracker.md`）。
+## 标注模板
+
+### 单元测试
+
+```go
+func (s *FieldPathSuite) TestAcceptsContainerNameFilter() {
+    allure.Test(s.T(), "imageFields 路径接受 [name=app] 单层过滤",
+        allure.WithAllureID("IF-101"),
+        allure.WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+        allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        allure.WithLabel("userstory", "US-3"),
+        allure.WithLabel("scenario", "合法路径通过校验"),
+        allure.WithEpic("Phase 1: API and minimal image model"),
+        allure.WithFeature("ADR-005 imageFields write contract"),
+        allure.WithStory("US-3"),
+        allure.WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-005-write-contract-cue-deferral.md", "ADR-005", "docs"),
+        allure.WithParentSuite("unit"),
+        allure.WithSuite("FieldPath"),
+        func(a *allure.Context) {
+            err := subscription.ValidateImageFieldPath(".spec.template.spec.containers[name=app].image")
+            require.NoError(a, err)
+        },
+    )
+}
+```
+
+### 集成 / e2e 测试（必须带描述）
+
+```go
+func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
+    allure.Test(s.T(), "订阅创建者缺少 target update 权限时拒绝写入",
+        allure.WithAllureID("IF-102"),
+        allure.WithTMS("IF-102", "https://github.com/appfun-dev/imageflow/issues/102"),
+        allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        allure.WithLabel("userstory", "US-5"),
+        allure.WithLabel("scenario", "RBAC 不足时报告 Forbidden"),
+        allure.WithEpic("Phase 1: API and minimal image model"),
+        allure.WithFeature("ADR-003 cross-namespace authorization"),
+        allure.WithStory("US-5"),
+        allure.WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-003-subscription-authorization.md", "ADR-003", "docs"),
+        allure.WithParentSuite("integration"),
+        allure.WithSuite("SubscriptionAuthorization"),
+        allure.WithDescription(`
+验证：当 ImageSubscription 的创建者没有被授权更新目标 workload 时，
+控制器应通过 SubjectAccessReview 识别并在该目标上产生 Forbidden Condition，
+且不对目标做任何字段写入。
+
+前置条件：
+- envtest 已启动 controller-runtime 环境
+- 创建 source ImageStreamTag 与 target Deployment
+- 创建只读 target 的 ServiceAccount 作为订阅创建者
+
+预期结果：
+- subscription.status.targets[] 中对应项为 Forbidden
+- Deployment image 字段未被修改
+        `),
+        func(a *allure.Context) {
+            a.Step("创建只读 ServiceAccount 与 ImageSubscription", func(ctx context.Context) error {
+                // ...
+                return nil
+            })
+            a.Step("触发 reconcile 并断言 SAR 结果", func(ctx context.Context) error {
+                a.StepDescription("控制器调用 SubjectAccessReview 检查 update 权限")
+                // ...
+                return nil
+            })
+        },
+    )
+}
+```
+
+### 表格驱动 + 参数外显
+
+```go
+func (s *FieldPathSuite) TestValidateImageFieldPath() {
+    cases := []struct {
+        name    string
+        path    string
+        wantErr bool
+    }{
+        {"container name filter", ".spec.template.spec.containers[name=app].image", false},
+        {"wildcard rejected", ".spec.template.spec.containers[*].image", true},
+        {"numeric index rejected", ".spec.template.spec.containers[0].image", true},
+    }
+
+    for _, tc := range cases {
+        s.Run(tc.name, func() {
+            allure.Test(s.T(), tc.name,
+                allure.WithAllureID("IF-101"),
+                allure.WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+                allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+                allure.WithLabel("userstory", "US-3"),
+                allure.WithLabel("scenario", "imageFields 路径文法矩阵"),
+                allure.WithParameter("path", tc.path),
+                allure.WithParameter("wantErr", tc.wantErr),
+                allure.WithEpic("Phase 1: API and minimal image model"),
+                allure.WithFeature("ADR-005 imageFields write contract"),
+                allure.WithStory("US-3"),
+                allure.WithParentSuite("unit"),
+                allure.WithSuite("FieldPath"),
+                func(a *allure.Context) {
+                    err := subscription.ValidateImageFieldPath(tc.path)
+                    if tc.wantErr {
+                        require.Error(a, err)
+                    } else {
+                        require.NoError(a, err)
+                    }
+                },
+            )
+        })
+    }
+}
+```
+
+### 复杂步骤 + 步骤参数
+
+```go
+func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
+    allure.Test(s.T(), "rollout 中到达新 tag 时旧投递记为 Superseded",
+        // ... metadata omitted for brevity
+        func(a *allure.Context) {
+            a.Step("写入第一个 tag 并观察 ImageApplied", func(ctx context.Context) error {
+                a.StepParameter("firstTag", "v1.0.0")
+                a.StepParameter("firstDigest", "sha256:aaa...")
+                // ...
+                return nil
+            })
+            a.Step("在 rollout 进行中写入第二个 tag", func(ctx context.Context) error {
+                a.StepDescription("模拟镜像源在原生 rollout 尚未完成时发生第二次变化")
+                a.StepParameter("secondTag", "v1.1.0")
+                // ...
+                return nil
+            })
+            a.Step("断言旧投递为 Superseded", func(ctx context.Context) error {
+                // ...
+                return nil
+            })
+        },
+    )
+}
+```
+
+## 命名约定
+
+| 对象 | 约定 | 示例 |
+|---|---|---|
+| suite 结构体 | `<Domain><Scope>Suite` | `FieldPathSuite`、`SubscriptionAuthorizationSuite` |
+| suite 文件 | `snake_case_test.go` | `subscription_fieldpath_test.go` |
+| 测试方法 | `Test<Scenario>` | `TestAcceptsContainerNameFilter` |
+| Allure 显示名 | 中文或英文完整句，不含参数值 | `imageFields 路径接受 [name=app] 单层过滤` |
+| AllureID | `IF-<issue-id>` | `IF-101` |
+| Spec ID | `SPEC-<issue-id>` | `SPEC-1` |
+| User Story | `US-<Seq>` 或 `US-<issue-id>` | `US-3` |
+
+## 描述与参数外显规则
+
+- **Integration / E2E 测试**：必须携带 `allure.WithDescription` 或 `allure.WithDescriptionHTML`。
+- **HTML 描述触发条件**：描述含表格、列表、代码块或多行结构化内容时使用 `WithDescriptionHTML`。
+- **表格驱动测试**：通过 `allure.WithParameter(name, value)` 外显参数；测试显示名保持稳定。
+- **步骤参数/说明**：关键步骤使用 `a.StepParameter` / `a.StepDescription` 补充。
+
+## 可追溯性 checklist
+
+提交测试前逐条核对：
+
+- [ ] 测试位于 `test/unit/`、`test/integration/`、`test/e2e/` 或生产代码同包 `_test.go`。
+- [ ] 使用 `testify/suite` 组织；suite 结构体名以 `Suite` 结尾。
+- [ ] 测试方法内调用 `allure.Test(s.T(), ...)`。
+- [ ] `allure.WithAllureID("IF-<id>")` 与 `allure.WithTMS("IF-<id>", url)` 指向同一测试用例 issue。
+- [ ] `allure.WithTMS("SPEC-<id>", url)` 指向标题以 `Spec:` 开头的 GitHub issue。
+- [ ] `allure.WithLabel("userstory", "US-<Seq>")` 已标注。
+- [ ] `allure.WithLabel("scenario", "<场景名>")` 已填写。
+- [ ] `Epic` / `Feature` / `Story` 已按层级映射填写。
+- [ ] `ParentSuite` = `unit|integration|e2e`；`Suite` = 结构体名去掉 `Suite` 后缀。
+- [ ] Integration / E2E 测试已携带 `WithDescription` 或 `WithDescriptionHTML`。
+- [ ] 表格驱动测试已使用 `allure.WithParameter` 外显参数。
+- [ ] 关键步骤已使用 `a.StepParameter` / `a.StepDescription` 补充说明。
+
+## 依赖与版本
+
+```text
+require (
+    github.com/allure-framework/allure-go/commons/gotest <version-with-testify>
+    github.com/allure-framework/allure-go/testify/assert
+    github.com/allure-framework/allure-go/testify/require
+    github.com/stretchr/testify
+)
+```
+
+> **注意**：`allure-go/testify` 包在部分早期 release 中不存在，请确保 pinned 到包含 `testify/assert|require` 的版本（可用 `go get github.com/allure-framework/allure-go@latest` 或主干版本，并在 `go.mod` 中记录明确版本）。
+
+## CI 约定
+
+- CI 中只执行 `go test ./...` 并归档 `allure-results/` 目录。
+- 不生成 HTML 报告到仓库；HTML 生成留给本地或单独的 Allure Server。
+- 失败截图 / 日志可通过 `a.GlobalAttachment` 或 `a.Attachment` 写入 `allure-results/`，随目录一起归档。
+
+## 既有 Ginkgo/Gomega 套件
+
+T12 之前已落地的 `test/integration/` 与 `test/e2e/` Ginkgo 套件继续维护：
+
+- 新增用例或拆分旧用例时，优先按本文件使用 testify/suite + allure-go。
+- 既有 Ginkgo 用例的重构可分批进行，不必一次性全量迁移。
+- 在 Allure 报告未覆盖既有 Ginkgo 套件期间，可追溯性继续由 `docs/scenario-map.md` 与 ticket evidence comment 承担。
 
 ## BuildRun Watcher 测试矩阵（v1.1，T7）
 
