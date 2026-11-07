@@ -108,3 +108,32 @@ kind 套件默认全部跑在 registrydouble 上。`test/e2e/import_e2e_test.go`
 - §15 十七条场景 ↔ 命名用例映射：`docs/scenario-map.md`（每条场景 ≥1 个 CI 运行用例）。
 - 每个 ticket 的验收证据（AC → 用例、CI run、偏差）以 evidence comment 形式记录在
   对应 GitHub issue 上（见 `docs/agents/issue-tracker.md`）。
+
+## BuildRun Watcher 测试矩阵（v1.1，T7）
+
+BuildRun Watcher 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisions。
+
+### envtest 单元测试（`internal/controller/buildrun_watcher_controller_test.go`）
+
+| 用例 | 断言 |
+|---|---|
+| 合法注解 JSON 通过 admission | BuildRun 创建成功，注解值被接受 |
+| 非法 JSON 注解被 admission 拒绝 | BuildRun 创建失败，rejection message 含 schema 错误 |
+| 缺 stream/tag 字段被 admission 拒绝 | BuildRun 创建失败，rejection message 指明缺失字段 |
+| 非 RFC 1123 值被 admission 拒绝 | BuildRun 创建失败，rejection message 指明值约束 |
+| Succeeded + digest → Registered=True/Succeeded | BuildRun status condition 正确设置；ImageStream.status 更新；ImageArtifact 创建 |
+| Succeeded + 空 digest → Registered=False/MissingDigest | BuildRun status condition reason=`MissingDigest`；ImageStream 不变 |
+| Failed BuildRun 不触发登记 | 无 Registered condition 写入；ImageStream 不变 |
+| 幂等登记：同 (stream, tag, digest) 重复 reconcile | 第二次 reconcile 为 no-op；无重复 Image Change / Event |
+| CRD 缺失时 manager 启动失败 | `Register()` 返回 error；manager 不启动 |
+| stream 不存在 → Registered=False/StreamNotFound | BuildRun status condition 报告具体失败原因 |
+
+### kind e2e 场景（`test/e2e/`）
+
+| 场景 | 描述 |
+|---|---|
+| 真实 Shipwright BuildRun → digest 登记 → ImageStream.status 更新 | 使用带 system results 的构建策略（kaniko/buildah），验证端到端自动登记链路 |
+| 缺 digest 场景的 Condition 可观测性 | 使用不提供 system results 的策略或模拟空 digest，验证 `Registered=False/MissingDigest` 可被 `kubectl wait` 观测 |
+| flag 关闭时 Watcher 不启动 | `--enable-buildrun-watcher=false`（默认），验证无 BuildRun informer 创建、无 reconcile 行为 |
+| 注解 admission 端到端校验 | 在真实集群中验证 webhook 对非法注解的拒绝行为 |
+| 自动登记后下游订阅投递 | BuildRun 自动登记 → ImageStream.status 更新 → 已有 ImageSubscription 自动投递到工作负载 |
