@@ -2,7 +2,19 @@
 # ImageFlow carries zero compile-time Shipwright dependency; this test-only
 # fixture gives the API server just enough schema to persist BuildRun objects
 # — metadata.annotations for the admission contract (T4) and .status for the
-# watcher flows (T5+) — without vendoring the upstream CRD.
+# watcher flows (T5) — without vendoring the upstream CRD.
+#
+# The root-level x-kubernetes-preserve-unknown-fields keeps every field the
+# watcher contract (ADR-011) reads or writes, notably:
+#   - metadata.annotations               (buildrun.imageflow.appfun.dev/target)
+#   - spec.output.image                  (fallback image repository)
+#   - status.conditions[]                (Succeeded read; Registered written)
+#   - status.output.digest               (digest gate input)
+#   - status.buildSpec.output.image      (primary image repository)
+#
+# The status subresource must stay declared: the watcher stamps its
+# Registered condition through client.Status().Update, and without it the
+# API server has no /status endpoint and the write fails.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
