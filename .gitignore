@@ -36,3 +36,8 @@ allure-report/
 
 # Agent worktrees
 .worktrees/
+.xerj-data/
+.xerj-state/
+.xerjignore
+.refs/
+docs/*.setup.md
