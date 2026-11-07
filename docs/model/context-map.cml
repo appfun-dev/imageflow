@@ -1,0 +1,147 @@
+// Status: ACCEPTED (human review 2026-11-07)
+// Current-state ImageFlow v1alpha1 model. See README.md for authority and activation.
+// Field-level Kubernetes schemas remain in api/v1alpha1 and config/crd/bases.
+
+ContextMap ImageFlowContextMap {
+  type = SYSTEM_LANDSCAPE
+  state = AS_IS
+  contains ImageFlow, OCIRegistry, KubernetesPlatform, Shipwright
+
+  // Registry metadata is consumed through the registry-client anti-corruption layer.
+  OCIRegistry [U,PL] -> [D,ACL] ImageFlow
+
+  // Kubernetes supplies API, RBAC, workload, and rollout conventions.
+  // This governance edge does not attempt to show every runtime data direction.
+  KubernetesPlatform [U,OHS,PL] -> [D,CF] ImageFlow
+
+  // Shipwright is upstream via published language (BuildRun CRD status).
+  // v1: logical handoff only — CI or a user creates an ImageStreamMapping after a push.
+  // v1.1: BuildRunWatcher module observes BuildRun status and triggers CatalogRegistration.
+  // ImageFlow does not execute builds and does not depend on Shipwright API types.
+  Shipwright [U,PL] -> [D,ACL] ImageFlow
+}
+
+BoundedContext ImageFlow {
+  type = SYSTEM
+  domainVisionStatement = "Kubernetes-native image metadata catalog and digest-based subscription delivery without becoming a registry or build engine"
+  responsibilities = "Own image catalog metadata and tag-to-digest history", "Register imported and pushed images idempotently", "Deliver digest references to subscribed workloads", "Report image application, rollout, and health independently"
+  implementationTechnology = "Go, controller-runtime, Kubernetes CRDs; one manager/webhook deployment"
+
+  "Catalog metadata, registration tasks, and controller-owned read mirrors."
+  Module Catalog {
+    Aggregate ImageStreamAggregate {
+      responsibilities = "Be the single source of truth for tag-to-digest associations and bounded per-tag history"
+      Entity ImageStream {
+        aggregateRoot
+        String name key;
+      }
+      ValueObject TagDigestAssociation {
+        immutable
+        String tag key;
+        String digest;
+      }
+      // Logical Image Change: persisted through ImageStream status, not a standalone Kind.
+      DomainEvent ImageChanged {
+        String stream;
+        String tag;
+        String oldDigest;
+        String newDigest;
+        String source;
+      }
+    }
+
+    Aggregate ImageArtifactAggregate {
+      responsibilities = "Deduplicate content-addressed image metadata cluster-wide without storing blobs"
+      Entity ImageArtifact {
+        aggregateRoot
+        String digest key;
+      }
+    }
+
+    Aggregate ImageStreamImportAggregate {
+      responsibilities = "Read external registry metadata and register a tag or verified digest through the shared catalog path"
+      Entity ImageStreamImport {
+        aggregateRoot
+        String name key;
+      }
+    }
+
+    Aggregate ImageStreamMappingAggregate {
+      responsibilities = "Register an already-pushed repository digest as the build-output handoff into the catalog"
+      Entity ImageStreamMapping {
+        aggregateRoot
+        String name key;
+      }
+    }
+
+    Aggregate ImageStreamTagAggregate {
+      responsibilities = "Project a read-only named-tag mirror from ImageStream and ImageArtifact state"
+      Entity ImageStreamTag {
+        aggregateRoot
+        String name key;
+      }
+    }
+
+    Aggregate ImageTagAggregate {
+      responsibilities = "Project a read-only digest-tag mirror from ImageStream and ImageArtifact state"
+      Entity ImageTag {
+        aggregateRoot
+        String name key;
+      }
+    }
+
+    "Shared idempotent registration used by both Import and Mapping; recovery starts from persisted objects."
+    Service CatalogRegistration
+  }
+
+  "Subscription intent and per-target outcome records."
+  Module Subscription {
+    Aggregate ImageSubscriptionAggregate {
+      responsibilities = "Bind one catalog stream tag to independent workload targets and retain bounded delivery outcomes"
+      Entity ImageSubscription {
+        aggregateRoot
+        String name key;
+      }
+      // The three dimensions are deliberately separate; field-level enums live in the CRD schema.
+      ValueObject OutcomeStages {
+        boolean imageApplied;
+        String rolloutStatus;
+        String healthStatus;
+      }
+    }
+  }
+
+  "Digest-only image-field delivery. Native Kubernetes controllers perform rollout."
+  Module Delivery {
+    Service DeliveryEngine
+  }
+
+  "Observe targets independently and never translate Unknown into success."
+  Module Observation {
+    Service OutcomeObserver
+  }
+
+  "Watch external Shipwright BuildRun CRDs and trigger catalog registration on succeeded builds with digest output."
+  Module BuildRunWatcher {
+    responsibilities = "Observe Shipwright BuildRun status changes and invoke CatalogRegistration when a build succeeds with a digest"
+    Service BuildRunWatcherService
+  }
+}
+
+BoundedContext OCIRegistry {
+  type = SYSTEM
+  responsibilities = "Store image blobs and serve OCI/Distribution metadata"
+  implementationTechnology = "External registry such as Quay or another compatible registry"
+}
+
+BoundedContext KubernetesPlatform {
+  type = SYSTEM
+  responsibilities = "Provide the resource API, RBAC, workload controllers, rollout status, Events, and garbage collection"
+  implementationTechnology = "Vanilla Kubernetes for v1"
+}
+
+BoundedContext Shipwright {
+  type = SYSTEM
+  responsibilities = "Execute builds and report build outcomes outside ImageFlow"
+  implementationTechnology = "External Shipwright build pipeline or an equivalent CI build producer"
+}

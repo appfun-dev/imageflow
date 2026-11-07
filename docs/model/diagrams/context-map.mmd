@@ -1,0 +1,17 @@
+%% Status: ACCEPTED (human review 2026-11-07)
+%% Derived from ../context-map.cml. Update CML first, then this review view.
+%% Edges show CML upstream/downstream governance, not every runtime data direction.
+flowchart LR
+  ImageFlow["ImageFlow<br/>catalog · subscription · delivery · observation · buildrun-watcher"]
+  OCIRegistry["OCI Registry<br/>external blobs and metadata"]
+  KubernetesPlatform["Kubernetes Platform<br/>API · RBAC · workloads · rollout"]
+  Shipwright["Shipwright<br/>external build producer"]
+
+  OCIRegistry -->|"U/PL → D/ACL: registry metadata"| ImageFlow
+  KubernetesPlatform -->|"U/OHS/PL → D/CF: platform conventions"| ImageFlow
+  Shipwright -->|"U/PL → D/ACL: BuildRun status / pushed-digest handoff"| ImageFlow
+
+  classDef internal fill:#d8ecff,stroke:#24557a,color:#12293d;
+  classDef external fill:#f2f2f2,stroke:#666,color:#222,stroke-dasharray:5 5;
+  class ImageFlow internal;
+  class OCIRegistry,KubernetesPlatform,Shipwright external;

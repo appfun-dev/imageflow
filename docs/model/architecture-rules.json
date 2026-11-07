@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "status": "ACCEPTED",
+  "activation": "ERROR rules are merge-blocking. Human review completed 2026-11-07.",
+  "existingViolations": [],
+  "rules": [
+    {
+      "id": "BC-001",
+      "category": "BOUNDED_CONTEXT_BOUNDARY",
+      "statement": "v1 remains one ImageFlow bounded context; Catalog, Subscription, Delivery, and Observation are logical modules, not separately deployed contexts.",
+      "scope": {
+        "modelElements": ["ImageFlow", "Catalog", "Subscription", "Delivery", "Observation"],
+        "codePaths": ["cmd", "internal/controller"]
+      },
+      "because": "The confirmed single-context layout and ADR-001 avoid inventing deployment boundaries that the architecture does not have.",
+      "severity": "ERROR",
+      "verification": "Model-axis review of deployment and controller ownership; add package fitness functions before claiming automatic boundary enforcement."
+    },
+    {
+      "id": "BC-002",
+      "category": "BOUNDED_CONTEXT_BOUNDARY",
+      "statement": "ImageFlow handles metadata and digest delivery only; OCI blob storage, build execution, and native workload rollout remain with their external owners.",
+      "scope": {
+        "modelElements": ["ImageFlow", "OCIRegistry", "Shipwright", "KubernetesPlatform"],
+        "codePaths": ["api/v1alpha1", "internal/controller"]
+      },
+      "because": "GLOSSARY and ADR-001/ADR-005/ADR-007 explicitly prevent ImageFlow from becoming a registry, build engine, or rollout engine.",
+      "severity": "ERROR",
+      "verification": "Trace external calls and side effects in final code; behavioral evidence must distinguish build, registration, image application, and rollout."
+    },
+    {
+      "id": "AGG-001",
+      "category": "AGGREGATE_BOUNDARY",
+      "statement": "ImageStream.status is the only tag-to-digest catalog truth; ImageStreamTag and ImageTag are derived mirrors and cannot independently mutate that truth.",
+      "scope": {
+        "modelElements": ["ImageStreamAggregate", "ImageStreamTagAggregate", "ImageTagAggregate"],
+        "codePaths": ["api/v1alpha1", "internal/controller", "config/crd/bases"]
+      },
+      "because": "ADR-002 R1/R4 requires one catalog source of truth and controller-owned projections.",
+      "severity": "ERROR",
+      "verification": "Inspect every spec/status write and owner reference; run catalog and mirror integration tests."
+    },
+    {
+      "id": "AGG-002",
+      "category": "AGGREGATE_BOUNDARY",
+      "statement": "Import and Mapping share persisted, idempotent registration; ImageArtifact is content-addressed and deduplicated, and Image Change recovery never depends on memory-only events.",
+      "scope": {
+        "modelElements": ["ImageArtifactAggregate", "ImageStreamImportAggregate", "ImageStreamMappingAggregate", "CatalogRegistration", "ImageChanged"],
+        "codePaths": ["api/v1alpha1", "internal/controller"]
+      },
+      "because": "ADR-002 and ADR-004 require digest deduplication, bounded persisted change state, retry safety, and restart recovery.",
+      "severity": "ERROR",
+      "verification": "Trace both registration paths into shared registration and inspect crash/retry tests against persisted objects."
+    },
+    {
+      "id": "AGG-003",
+      "category": "AGGREGATE_BOUNDARY",
+      "statement": "ImageSubscription owns independent per-target outcome state and bounded recent deliveries; Image Change and Delivery Result do not become additional standalone resource Kinds.",
+      "scope": {
+        "modelElements": ["ImageSubscriptionAggregate", "OutcomeStages", "ImageChanged"],
+        "codePaths": ["api/v1alpha1", "internal/controller", "config/crd/bases"]
+      },
+      "because": "ADR-002 R3 and ADR-008 define subscription-owned observation surfaces and bounded history without extra CRDs.",
+      "severity": "ERROR",
+      "verification": "Compare final Go/CRD Kind inventory and inspect per-target status updates, bounded arrays, and restart convergence."
+    },
+    {
+      "id": "ST-001",
+      "category": "STEREOTYPE",
+      "statement": "ImageStreamTag and ImageTag are read-only controller-owned mirrors; users may annotate them but may not write their spec or status or retag through them.",
+      "scope": {
+        "modelElements": ["ImageStreamTag", "ImageTag", "ImageStreamTagContract", "ImageTagContract"],
+        "codePaths": ["api/v1alpha1", "internal/controller", "config/crd/bases"]
+      },
+      "because": "ADR-002 R4 and the mirror CEL contracts require derived read models; retagging uses a new Mapping.",
+      "severity": "ERROR",
+      "verification": "Check CEL immutability, webhook/RBAC behavior, controller synthesis, and the retrieval-only MDSL contracts."
+    },
+    {
+      "id": "ST-002",
+      "category": "STEREOTYPE",
+      "statement": "ImageStreamImport and ImageStreamMapping behave as short-lived tasks with diagnosable terminal status and accepted TTL cleanup, not permanent catalog records.",
+      "scope": {
+        "modelElements": ["ImageStreamImportAggregate", "ImageStreamMappingAggregate", "ImageStreamImportContract", "ImageStreamMappingContract"],
+        "codePaths": ["api/v1alpha1", "internal/controller", "config/crd/bases"]
+      },
+      "because": "ADR-002 R5/R6 and ADR-004 separate task lifetime from durable catalog state.",
+      "severity": "ERROR",
+      "verification": "Inspect completion classification and injected-clock TTL tests; successful tasks use 1h and failed tasks use 24h unless an accepted ADR changes them."
+    },
+    {
+      "id": "ST-003",
+      "category": "STEREOTYPE",
+      "statement": "DeliveryEngine and OutcomeObserver keep imageApplied, rolloutStatus, and healthStatus independent; Unknown is explicit and is never converted to success.",
+      "scope": {
+        "modelElements": ["DeliveryEngine", "OutcomeObserver", "OutcomeStages", "ImageSubscriptionContract"],
+        "codePaths": ["api/v1alpha1", "internal/controller"]
+      },
+      "because": "ADR-005 and ADR-008 require independent Outcome Stages and forbid fabricated rollout or health success.",
+      "severity": "ERROR",
+      "verification": "Trace final status writes and evaluate unit/integration/e2e evidence for progressing, succeeded, failed, unknown, superseded, and conflict states."
+    },
+    {
+      "id": "AGG-004",
+      "category": "AGGREGATE_BOUNDARY",
+      "statement": "BuildRunWatcher may only write to ImageStream and ImageArtifact aggregates through CatalogRegistration; it must not directly mutate subscription, delivery, or observation state.",
+      "scope": {
+        "modelElements": ["BuildRunWatcher", "BuildRunWatcherService", "CatalogRegistration", "ImageStreamAggregate", "ImageArtifactAggregate"],
+        "codePaths": ["internal/controller"]
+      },
+      "because": "ADR-004 and ADR-011 require BuildRunWatcher to be semantically equivalent to an ImageStreamMapping registration; direct writes to other aggregates would bypass idempotency and change-detection invariants.",
+      "severity": "ERROR",
+      "verification": "Trace BuildRunWatcher reconcile path to confirm it invokes shared CatalogRegistration and does not write to ImageSubscription, DeliveryEngine, or OutcomeObserver state."
+    },
+    {
+      "id": "BC-003",
+      "category": "BOUNDED_CONTEXT_BOUNDARY",
+      "statement": "Shipwright CRD types must not leak into ImageFlow API types or MDSL contracts; BuildRunWatcher accesses Shipwright resources through an ACL boundary using RESTMapper discovery and unstructured or typed watchers isolated from the public API surface.",
+      "scope": {
+        "modelElements": ["BuildRunWatcher", "ImageFlow", "Shipwright"],
+        "codePaths": ["internal/controller", "api/v1alpha1"]
+      },
+      "because": "ADR-001 and ADR-004 require zero compile-time hard dependency on Shipwright; leaking external CRD types into ImageFlow API would violate bounded context isolation and prevent independent evolution.",
+      "severity": "ERROR",
+      "verification": "Verify api/v1alpha1 types do not import shipwright.io packages; verify BuildRunWatcher uses RESTMapper or isolated type references gated behind the feature flag."
+    },
+    {
+      "id": "ST-004",
+      "category": "STEREOTYPE",
+      "statement": "New registration sources such as BuildRunWatcher must follow the existing CatalogRegistration contract: idempotent on (stream, tag, digest), persisted recovery, and explicit failure Conditions rather than silent degradation.",
+      "scope": {
+        "modelElements": ["BuildRunWatcherService", "CatalogRegistration", "BuildRunWatcherContract", "RegistrationCondition"],
+        "codePaths": ["internal/controller"]
+      },
+      "because": "ADR-004 requires all registration paths to share idempotency and persistence semantics; ADR-011 requires explicit Registered=False/MissingDigest rather than silent skip.",
+      "severity": "ERROR",
+      "verification": "Inspect BuildRunWatcher reconcile logic for idempotency key usage, Condition writes on missing digest, and shared registration invocation; run envtest and e2e coverage for both success and failure paths."
+    },
+    {
+      "id": "QG-SLA-TEMPLATE-EXISTS",
+      "category": "QUALITY_GOVERNANCE",
+      "sourceSops": ["SOP-14"],
+      "statement": "MDSL 中必须存在名为 DefaultSLA 的 SLA template，且 API provider ImageFlowAPI 通过 'with provider SLA DefaultSLA' 引用该模板。",
+      "scope": {
+        "modelElements": ["DefaultSLA", "ImageFlowAPI"],
+        "codePaths": ["docs/model/contracts/imageflow-api.mdsl"]
+      },
+      "because": "SOP-14 要求全局默认 SLA 以 template + provider 引用方式声明，避免对每个 endpoint 重复声明；精确值由 outOfBand 登记册承载。",
+      "severity": "ERROR",
+      "verification": "检查 imageflow-api.mdsl 中是否存在 'SLA template DefaultSLA' 定义及 'with provider SLA DefaultSLA' 引用。"
+    },
+    {
+      "id": "QG-SLA-OBJECTIVE-COMPLETE",
+      "category": "QUALITY_GOVERNANCE",
+      "sourceSops": ["SOP-14"],
+      "statement": "每个 SLA objective 必须包含指标名称（name）、质量目标描述（qualityGoal）和可量化测量值（measurement），三者缺一不可。",
+      "scope": {
+        "modelElements": ["DefaultSLA"],
+        "codePaths": ["docs/model/contracts/imageflow-api.mdsl"]
+      },
+      "because": "缺少任一要素的 SLO 无法被校验、监控或裁决；SOP-14 要求质量承诺必须可执行。",
+      "severity": "ERROR",
+      "verification": "检查每个 'objective' 子句是否同时包含 name、qualityGoal STRING 和 Measurement（SimpleMeasurement 或 LandingZone）。"
+    }
+  ]
+}
