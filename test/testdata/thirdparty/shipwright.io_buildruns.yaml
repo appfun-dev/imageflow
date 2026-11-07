@@ -1,0 +1,72 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: buildruns.shipwright.io
+  annotations:
+    # Minimal third-party fixture for envtest (BC-003: no Shipwright Go module
+    # is vendored, the watcher consumes BuildRuns as unstructured objects).
+    # The schema declares exactly the fields the BuildRun watcher contract
+    # reads or writes (ADR-011) and preserves everything else:
+    #   - spec.output.image                (fallback image repository)
+    #   - status.conditions[]              (Succeeded read; Registered written)
+    #   - status.output.digest             (digest gate input)
+    #   - status.buildSpec.output.image    (primary image repository)
+    appfun.dev/test-fixture: "buildrun-watcher-envtest"
+spec:
+  group: shipwright.io
+  names:
+    kind: BuildRun
+    listKind: BuildRunList
+    plural: buildruns
+    singular: buildrun
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        # The watcher stamps its Registered condition through the status
+        # subresource (client.Status().Update); without this declaration the
+        # API server has no /status endpoint and the write fails.
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                output:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    image:
+                      type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                output:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    digest:
+                      type: string
+                buildSpec:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    output:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                      properties:
+                        image:
+                          type: string
+                conditions:
+                  type: array
+                  items:
+                    # Shipwright conditions (Succeeded) and the watcher's own
+                    # Registered condition share this list; keep every field.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
