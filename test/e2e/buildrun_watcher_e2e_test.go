@@ -346,13 +346,23 @@ var _ = Describe("T6 BuildRun watcher (kind, real Shipwright)", Ordered, Label("
 
 		By("warming third-party images into the kind node (slow registries)")
 		for _, img := range t6WarmImages {
-			// --platform linux/amd64 avoids multi-platform manifest digest
-			// mismatches when kind loads the image into containerd.
+			// Pull a single-platform image and pipe it directly into
+			// containerd on the kind node. We avoid `kind load docker-image`
+			// because its internal `ctr import --all-platforms` flag causes
+			// content-digest mismatches with multi-platform manifest lists.
 			_, err := utils.Run(exec.Command("docker", "pull", "--platform", "linux/amd64", img))
 			Expect(err).NotTo(HaveOccurred(), "docker pull %s", img)
-			_, err = utils.Run(exec.Command("kind", "load", "docker-image", img,
-				"--name", t6KindCluster()))
-			Expect(err).NotTo(HaveOccurred(), "kind load %s", img)
+			saveCmd := exec.Command("docker", "save", img)
+			nodeName := t6KindCluster() + "-control-plane"
+			importCmd := exec.Command("docker", "exec", "-i", nodeName,
+				"ctr", "--namespace=k8s.io", "images", "import",
+				"--digests", "--snapshotter=overlayfs", "-")
+			pipe, perr := saveCmd.StdoutPipe()
+			Expect(perr).NotTo(HaveOccurred(), "create pipe for %s", img)
+			importCmd.Stdin = pipe
+			Expect(importCmd.Start()).To(Succeed(), "start ctr import for %s", img)
+			Expect(saveCmd.Run()).To(Succeed(), "docker save %s", img)
+			Expect(importCmd.Wait()).To(Succeed(), "ctr import %s", img)
 		}
 
 		By("installing Tekton Pipelines v1.15.1 (Shipwright dependency)")
