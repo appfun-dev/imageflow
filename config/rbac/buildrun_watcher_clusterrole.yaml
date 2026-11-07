@@ -1,6 +1,6 @@
 # BuildRun Watcher RBAC (T1, ADR-004 Amended + ADR-011):
 # Feature-gated ClusterRole granting read access to Shipwright BuildRuns
-# plus status patch for condition updates. Only bound when
+# plus status update/patch for condition updates. Only bound when
 # --enable-buildrun-watcher=true is set on the manager deployment.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -12,4 +12,4 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["shipwright.io"]
     resources: ["buildruns/status"]
-    verbs: ["patch"]
+    verbs: ["patch", "update"]
