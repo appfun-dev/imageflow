@@ -122,6 +122,37 @@ result: #Input.name
 	}
 }
 
+// TestEvalError_UnreferencedRequiredField verifies that a required #Input
+// field missing from the input is an EvalError even when the policy never
+// references that field in a regular (non-definition) expression.
+func TestEvalError_UnreferencedRequiredField(t *testing.T) {
+	e := NewEvaluator()
+
+	policyCUE := `
+#Input: {
+	requiredField: string
+}
+status: "Succeeded"
+`
+	input := map[string]interface{}{
+		"someOtherField": "value",
+		// missing 'requiredField'
+	}
+
+	_, err := e.Evaluate(context.Background(), policyCUE, input)
+	if err == nil {
+		t.Fatal("expected error for missing required field in #Input schema")
+	}
+
+	evalErr, ok := AsEvalError(err)
+	if !ok {
+		t.Fatalf("expected EvalError type, got %T: %v", err, err)
+	}
+	if evalErr.Class != EvalError {
+		t.Errorf("expected EvalError class, got %s", evalErr.Class)
+	}
+}
+
 // TestTimeout verifies evaluation exceeding 100ms returns Timeout error class.
 func TestTimeout(t *testing.T) {
 	e := NewEvaluator()

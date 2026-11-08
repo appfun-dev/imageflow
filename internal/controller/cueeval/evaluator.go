@@ -245,6 +245,20 @@ func (e *Evaluator) evaluateInternal(policyCUE string, inputJSON []byte) (*Resul
 		}
 	}
 
+	// Validate the #Input schema explicitly. Definition fields are exempt
+	// from the top-level concreteness check above, so a required field
+	// declared in the #Input schema but absent from the input would
+	// otherwise go unnoticed when the policy never references it.
+	if inputVal := combined.LookupPath(cue.ParsePath("#Input")); inputVal.Exists() {
+		if err := inputVal.Validate(cue.Concrete(true)); err != nil {
+			return nil, &EvaluationError{
+				Class:   EvalError,
+				Reason:  "SchemaValidationFailed",
+				Message: fmt.Sprintf("input does not match policy schema: %v", err),
+			}
+		}
+	}
+
 	// Extract result fields
 	result := &Result{}
 
