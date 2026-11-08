@@ -135,7 +135,7 @@ func newT11uFixture(t *testing.T, cfg config.Config, objs ...client.Object) *t11
 		).
 		Build()
 	f.metrics = newObserverMetrics()
-	f.reconciler = NewSubscriptionObserverReconciler(f.client, nil, f.recorder, f.clock, cfg, f.metrics)
+	f.reconciler = NewSubscriptionObserverReconciler(f.client, nil, f.recorder, f.clock, cfg, f.metrics, nil) // nil evaluator: T3 tests don't exercise CUE evaluation
 	return f
 }
 

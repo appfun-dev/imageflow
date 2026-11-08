@@ -79,6 +79,7 @@ import (
 	"github.com/appfun-dev/imageflow/internal/authz"
 	"github.com/appfun-dev/imageflow/internal/clock"
 	"github.com/appfun-dev/imageflow/internal/config"
+	"github.com/appfun-dev/imageflow/internal/controller/cueeval"
 )
 
 // Production controller and recorder names. Integration tests build their
@@ -87,6 +88,9 @@ import (
 const (
 	observerControllerName           = "subscription-observer"
 	recorderNameSubscriptionObserver = "imageflow-subscription-observer"
+	// statusPolicySystemNamespace is the only namespace allowed for CUE status
+	// policy ConfigMaps (ADR-013 D9). ConfigMap watch filters to this namespace.
+	statusPolicySystemNamespace = "imageflow-system"
 )
 
 // Observer-owned reasons (T11 extends the frozen T9 TargetReason* vocabulary —
@@ -215,6 +219,9 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 	if timeSource == nil {
 		timeSource = clock.Real{}
 	}
+	// T3: Create shared CUE evaluator for status policy evaluation (ADR-013 D5).
+	// The evaluator caches compiled policies; ConfigMap changes invalidate entries.
+	evaluator := cueeval.NewEvaluator()
 	r := NewSubscriptionObserverReconciler(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -222,6 +229,7 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 		timeSource,
 		opts.Config,
 		sharedObserverMetrics(),
+		evaluator,
 	)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
@@ -229,6 +237,9 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
 		Watches(&appsv1.DaemonSet{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
+		// T3: Watch ConfigMaps in imageflow-system namespace for CUE status policy changes (ADR-013 D5).
+		// Changes trigger cache invalidation and re-enqueue subscriptions referencing the changed ConfigMap.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.subsForConfigMap), builder.WithPredicates(observerConfigMapPredicate{})).
 		Complete(r)
 }
 
@@ -243,12 +254,13 @@ type SubscriptionObserverReconciler struct {
 	clock     clock.Clock
 	config    config.Config
 	metrics   *observerMetrics
+	evaluator *cueeval.Evaluator // T3: CUE status evaluator for ConfigMap-triggered re-evaluation (ADR-013 D5)
 }
 
 // NewSubscriptionObserverReconciler builds the reconciler. A nil apiReader
 // falls back to the cached client; nil metrics build an unregistered collector
-// set for tests.
-func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader, recorder record.EventRecorder, clk clock.Clock, cfg config.Config, metrics *observerMetrics) *SubscriptionObserverReconciler {
+// set for tests; nil evaluator disables CUE status evaluation (T3).
+func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader, recorder record.EventRecorder, clk clock.Clock, cfg config.Config, metrics *observerMetrics, evaluator *cueeval.Evaluator) *SubscriptionObserverReconciler {
 	if apiReader == nil {
 		apiReader = cl
 	}
@@ -265,6 +277,7 @@ func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader
 		clock:     clk,
 		config:    cfg,
 		metrics:   metrics,
+		evaluator: evaluator,
 	}
 }
 
@@ -283,6 +296,7 @@ func (r *SubscriptionObserverReconciler) reader() client.Reader {
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreamtags;imagetags,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreamtags/status;imagetags/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile runs one observation pass: determine every observable target's
 // rollout from fresh native status, heal in-flight delivery records, write
@@ -787,6 +801,32 @@ func (observerWorkloadStatusPredicate) UpdateFunc(e event.UpdateEvent) bool {
 	return true
 }
 
+// observerConfigMapPredicate filters ConfigMap events to the imageflow-system
+// namespace only (ADR-013 D9). Status policy ConfigMaps are restricted to this
+// namespace for security; watching other namespaces would be wasteful.
+type observerConfigMapPredicate struct {
+	predicate.Funcs
+}
+
+func (observerConfigMapPredicate) CreateFunc(e event.CreateEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) DeleteFunc(e event.DeleteEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) UpdateFunc(e event.UpdateEvent) bool {
+	if e.ObjectNew == nil {
+		return false
+	}
+	return e.ObjectNew.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) GenericFunc(e event.GenericEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
 // subsForWorkload maps a workload event to every subscription targeting it
 // (observer-side copy of the engine's mapping; the reconcilers are separate
 // types with separate caches of nothing).
@@ -832,6 +872,46 @@ func (r *SubscriptionObserverReconciler) listSubscriptions(ctx context.Context) 
 		return nil, err
 	}
 	return subs.Items, nil
+}
+
+// subsForConfigMap maps a ConfigMap event to every subscription referencing it
+// via statusPolicyRef (T3, ADR-013 D5). On ConfigMap create/update/delete, it
+// invalidates the evaluator cache for the affected entry and enqueues all
+// subscriptions that reference this ConfigMap by name+namespace match.
+func (r *SubscriptionObserverReconciler) subsForConfigMap(ctx context.Context, obj client.Object) []ctrl.Request {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+	// Invalidate evaluator cache for this ConfigMap (ADR-013 D5).
+	// The cache key uses resourceVersion + key hash; passing empty resourceVersion
+	// clears any cached entry regardless of version.
+	if r.evaluator != nil {
+		r.evaluator.InvalidateCache("", cm.Name)
+	}
+	subs, err := r.listSubscriptions(ctx)
+	if err != nil {
+		return nil
+	}
+	var requests []ctrl.Request
+	for i := range subs {
+		sub := &subs[i]
+		for j := range sub.Spec.Targets {
+			ref := sub.Spec.Targets[j].StatusPolicyRef
+			if ref == nil {
+				continue
+			}
+			// Match by ConfigMap name and namespace (statusPolicyRef.Namespace must be imageflow-system per ADR-013 D9).
+			if ref.Name == cm.Name && ref.Namespace == cm.Namespace {
+				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+					Namespace: sub.Namespace,
+					Name:      sub.Name,
+				}})
+				break // One enqueue per subscription is sufficient
+			}
+		}
+	}
+	return requests
 }
 
 // compile-time interface guards
