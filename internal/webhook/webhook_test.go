@@ -730,6 +730,98 @@ func TestSubscriptionMutatorKeepsCreatedByImmutableOnUpdate(t *testing.T) {
 	})
 }
 
+// TestStatusPolicyRefNamespaceValidation covers the T5 admission gate
+// (ADR-013 D9): statusPolicyRef.namespace must be "imageflow-system".
+// Policies are platform configuration; centralizing them in one namespace
+// reduces the trust surface and matches the RBAC boundary.
+func TestStatusPolicyRefNamespaceValidation(t *testing.T) {
+	tests := []struct {
+		name       string
+		policyRef  *imageflowv1alpha1.StatusPolicyRef
+		wantReject bool
+	}{
+		{
+			name:       "nil statusPolicyRef is accepted",
+			policyRef:  nil,
+			wantReject: false,
+		},
+		{
+			name: "imageflow-system namespace is accepted",
+			policyRef: &imageflowv1alpha1.StatusPolicyRef{
+				Name:      "my-policy",
+				Namespace: "imageflow-system",
+				Key:       "policy.cue",
+			},
+			wantReject: false,
+		},
+		{
+			name: "non-imageflow-system namespace is rejected",
+			policyRef: &imageflowv1alpha1.StatusPolicyRef{
+				Name:      "my-policy",
+				Namespace: "team-a",
+				Key:       "policy.cue",
+			},
+			wantReject: true,
+		},
+		{
+			name: "empty namespace is rejected",
+			policyRef: &imageflowv1alpha1.StatusPolicyRef{
+				Name:      "my-policy",
+				Namespace: "",
+				Key:       "policy.cue",
+			},
+			wantReject: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := testSubscription()
+			sub.Spec.Targets[0].StatusPolicyRef = tc.policyRef
+			v := &subscriptionValidator{}
+			_, err := v.ValidateCreate(context.Background(), sub)
+			if tc.wantReject {
+				if err == nil {
+					t.Fatal("expected rejection, got nil error")
+				}
+				if !apierrors.IsInvalid(err) {
+					t.Fatalf("expected Invalid error, got %T: %v", err, err)
+				}
+				if !strings.Contains(err.Error(), "imageflow-system") {
+					t.Errorf("error must reference imageflow-system constraint: %v", err)
+				}
+				if !strings.Contains(err.Error(), "ADR-013") {
+					t.Errorf("error must reference ADR-013 D9: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected rejection: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestStatusPolicyRefNamespaceValidationOnUpdate verifies the same namespace
+// gate fires on update — the webhook marker already routes both verbs, but
+// the validation function must also be called from ValidateUpdate.
+func TestStatusPolicyRefNamespaceValidationOnUpdate(t *testing.T) {
+	oldSub := testSubscription()
+	newSub := testSubscription()
+	newSub.Spec.Targets[0].StatusPolicyRef = &imageflowv1alpha1.StatusPolicyRef{
+		Name:      "rogue-policy",
+		Namespace: "default",
+		Key:       "evil.cue",
+	}
+	v := &subscriptionValidator{}
+	_, err := v.ValidateUpdate(context.Background(), oldSub, newSub)
+	if err == nil {
+		t.Fatal("update with non-imageflow-system statusPolicyRef.namespace must be rejected")
+	}
+	if !strings.Contains(err.Error(), "ADR-013") {
+		t.Errorf("error must reference ADR-013 D9: %v", err)
+	}
+}
+
 func TestSubscriptionMutatorRejectsUndecodableRequests(t *testing.T) {
 	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		Operation: admissionv1.Create,

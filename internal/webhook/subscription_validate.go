@@ -139,6 +139,12 @@ func (v *subscriptionValidator) ValidateDelete(_ context.Context, _ runtime.Obje
 	return nil, nil
 }
 
+// statusPolicySystemNamespace is the only namespace allowed for CUE status
+// policy ConfigMaps (ADR-013 Decision 9). Policies are platform configuration;
+// centralizing them in one namespace reduces the trust surface and matches
+// the RBAC boundary of the imageflow-system namespace.
+const statusPolicySystemNamespace = "imageflow-system"
+
 // validateSubscriptionShape aggregates every spec-shape violation of one
 // subscription into a single Invalid error, so a misconfiguration is rejected
 // as a whole with a complete report instead of one error at a time.
@@ -150,11 +156,30 @@ func validateSubscriptionShape(sub *imageflowv1alpha1.ImageSubscription) error {
 	targetsPath := field.NewPath("spec", "targets")
 	for i := range sub.Spec.Targets {
 		errs = append(errs, validateTarget(targetsPath.Index(i), &sub.Spec.Targets[i])...)
+		errs = append(errs, validateStatusPolicyRefNamespace(
+			targetsPath.Index(i).Child("statusPolicyRef"), sub.Spec.Targets[i].StatusPolicyRef)...)
 	}
 	errs = append(errs, validateImageReferenceFormat(field.NewPath("spec", "imageReferenceFormat"),
 		sub.Spec.ImageReferenceFormat)...)
 	if len(errs) > 0 {
 		return apierrors.NewInvalid(subscriptionGK, sub.Name, errs)
+	}
+	return nil
+}
+
+// validateStatusPolicyRefNamespace enforces ADR-013 Decision 9: when a target
+// references a CUE status policy, the ConfigMap must live in imageflow-system.
+// A nil ref means "no policy" and always passes; an empty or wrong namespace
+// is rejected with a message pointing to the decision record.
+func validateStatusPolicyRefNamespace(p *field.Path, ref *imageflowv1alpha1.StatusPolicyRef) field.ErrorList {
+	if ref == nil {
+		return nil
+	}
+	if ref.Namespace != statusPolicySystemNamespace {
+		return field.ErrorList{field.Invalid(p.Child("namespace"), ref.Namespace,
+			fmt.Sprintf("must be %q: status policy ConfigMaps are platform configuration"+
+				" restricted to the imageflow-system namespace (ADR-013 Decision 9)",
+				statusPolicySystemNamespace))}
 	}
 	return nil
 }
