@@ -148,6 +148,14 @@ spec:
                         to evaluate rollout/health for this target (ADR-005 §4). Without an
                         evaluable policy, rollout/health report Unknown — never success.
                       properties:
+                        healthKey:
+                          description: |-
+                            HealthKey references the CUE expression within the policy document used
+                            to evaluate health status. Required when statusPolicyRef is set and the
+                            v1.3 evaluator is active. Omit to keep the legacy EvaluatorDeferred behavior.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
                         key:
                           description: Key of the policy document inside the ConfigMap
                             data.
@@ -160,8 +168,17 @@ spec:
                           minLength: 1
                           type: string
                         namespace:
-                          description: Namespace of the ConfigMap.
+                          description: Namespace of the ConfigMap. Must be "imageflow-system"
+                            (ADR-013 D9).
                           maxLength: 63
+                          minLength: 1
+                          type: string
+                        rolloutKey:
+                          description: |-
+                            RolloutKey references the CUE expression within the policy document used
+                            to evaluate rollout status. Required when statusPolicyRef is set and the
+                            v1.3 evaluator is active. Omit to keep the legacy EvaluatorDeferred behavior.
+                          maxLength: 253
                           minLength: 1
                           type: string
                       required:
