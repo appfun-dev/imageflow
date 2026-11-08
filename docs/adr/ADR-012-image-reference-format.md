@@ -38,7 +38,14 @@ ADR-005 §2 冻结 v1 为 digest-only 写入，但预留了增量演进路径：
 - `subscription_delivery_controller.go` 3 处 digest-only 硬编码需参数化；
 - `desiredImage` 的 kubebuilder pattern validation 移除，改由 webhook 条件校验。
 
-## 未解决问题
+## 已解决问题
 
-- **Q4=B 实现复杂度**：Tag 模式下 ImageApplied 比较 digest 需要运行时解析目标字段的 digest（registry lookup 或 ImageStreamTag 反查）。是否接受简化为 tag 字符串比较 + resolvedDigest 仅用于可观测性？—— 标记为 OPEN QUESTION，实现阶段决策。
-- **Format 降级保护**：Update 时是否禁止从 Tag/DigestWithTag 变回 Digest？防止意外降级导致 workload 镜像字段格式突变。—— 标记为 OPEN QUESTION。
+- ~~**Q4=B 实现复杂度**~~：**已解决 (2026-11-08)** — 采用简化方案。Tag 模式下 `ImageApplied` 比较 tag 字符串（`observed == source.desiredImage`），`resolvedDigest` 仅用于可观测性。理由：(a) registry lookup 引入外部依赖和延迟；(b) ImageStreamTag 反查增加 API server 负载；(c) tag 字符串比较足以检测"新 tag 指向新 digest"场景；(d) `resolvedDigest` 提供 digest 可观测性。此决策更新了 §Decision 4 的实际实现语义。
+- ~~**Format 降级保护**~~：**已解决 (2026-11-08)** — 采用降级保护。validating webhook 拒绝从 Tag/DigestWithTag 到 Digest 的 format 变更（`validateFormatTransition`）。升级始终允许。新增 §Decision 7。
+
+## 修订日志
+
+| 日期 | 变更 | 理由 |
+|------|------|------|
+| 2026-11-08 | 初始版本，Accepted | v1.2 grill Wave A/B 决策 |
+| 2026-11-08 | 关闭 Q4=B 和 Format 降级保护 Open Questions | code review 发现 spec/ADR 未正式记录实现阶段决策 |

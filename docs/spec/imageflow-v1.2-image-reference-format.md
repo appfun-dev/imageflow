@@ -111,8 +111,10 @@ ImageFlow v1.2 在 `ImageSubscription.spec` 新增 `imageReferenceFormat` 枚举
 
 ## Open Questions
 
-1. **Q4=B 实现复杂度**：Tag 模式下 ImageApplied 比较 digest 需要运行时解析目标字段的 digest（registry lookup 或 ImageStreamTag 反查）。是否接受简化为 tag 字符串比较 + resolvedDigest 仅用于可观测性？
-2. **Format 降级保护**：Update 时是否禁止从 Tag/DigestWithTag 变回 Digest？防止意外降级导致 workload 镜像字段格式突变。
+1. ~~**Q4=B 实现复杂度**：Tag 模式下 ImageApplied 比较 digest 需要运行时解析目标字段的 digest（registry lookup 或 ImageStreamTag 反查）。是否接受简化为 tag 字符串比较 + resolvedDigest 仅用于可观测性？~~
+   - **已解决 (2026-11-08)**：采用简化方案 — Tag 模式下 `ImageApplied` 比较 tag 字符串（`observed == source.desiredImage`），`resolvedDigest` 仅用于可观测性和 tag 漂移排查。理由：(a) registry lookup 引入外部依赖和延迟；(b) ImageStreamTag 反查增加 API server 负载；(c) tag 字符串比较足以检测"新 tag 指向新 digest"的场景；(d) `resolvedDigest` 提供 digest 可观测性，值班工程师可手动比对。此决策已同步至 ADR-012 §Decision 7。
+2. ~~**Format 降级保护**：Update 时是否禁止从 Tag/DigestWithTag 变回 Digest？防止意外降级导致 workload 镜像字段格式突变。~~
+   - **已解决 (2026-11-08)**：采用降级保护 — validating webhook 拒绝从 Tag/DigestWithTag 到 Digest 的 format 变更。理由：防止意外降级导致 workload 镜像字段格式突变，影响依赖特定格式的下游工具。升级（Digest → Tag/DigestWithTag）始终允许。此决策已同步至 ADR-012 §Decision 5。
 
 ## Further Notes
 
