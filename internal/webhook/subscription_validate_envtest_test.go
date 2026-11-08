@@ -26,7 +26,7 @@ import (
 const (
 	envtestDigestRef = "registry.example.com/payments/api@sha256:" +
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	envtestTagRef = "registry.example.com/payments/api:stable"
+	envtestTagRef       = "registry.example.com/payments/api:stable"
 	envtestCompositeRef = envtestTagRef + "@sha256:" +
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
