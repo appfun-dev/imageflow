@@ -113,5 +113,6 @@ webhooks:
     - UPDATE
     resources:
     - imagesubscriptions
+    - imagesubscriptions/status
   sideEffects: None
   timeoutSeconds: 10

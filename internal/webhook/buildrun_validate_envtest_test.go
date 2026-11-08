@@ -64,9 +64,10 @@ func TestMain(m *testing.M) {
 // startBuildRunAdmissionEnv boots envtest with the generated webhook
 // configurations (config/webhook) and serves the handlers through the same
 // Register seam production uses, on the envtest-issued serving certificate —
-// the webhook-half of the test/integration/webhook_test.go pattern, scoped to
-// what the BuildRun admission contract needs (no ImageFlow CRDs: the suite
-// only ever creates BuildRuns and namespaces).
+// the webhook-half of the test/integration/webhook_test.go pattern. It
+// installs the third-party BuildRun stand-in CRD plus the generated ImageFlow
+// CRDs (T3, #24: the subscription admission suite needs a real
+// ImageSubscription resource, including its status subresource).
 func startBuildRunAdmissionEnv() (func(), error) {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
@@ -74,8 +75,14 @@ func startBuildRunAdmissionEnv() (func(), error) {
 		BinaryAssetsDirectory: os.Getenv("KUBEBUILDER_ASSETS"),
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "test", "testdata", "thirdparty"),
+<<<<<<< HEAD
 			// T2: the subscription mutating-defaulting envtest suite creates
 			// real ImageSubscriptions, so the ImageFlow CRDs must be installed.
+=======
+			// T3 (#24): the subscription admission suite creates real
+			// ImageSubscriptions, so the generated ImageFlow CRDs are
+			// installed alongside the third-party BuildRun stand-in.
+>>>>>>> feature/v1.2-t3-validating-webhook
 			filepath.Join("..", "..", "config", "crd", "bases"),
 		},
 		ErrorIfCRDPathMissing: true,
