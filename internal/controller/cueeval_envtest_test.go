@@ -69,6 +69,19 @@ type t7cFixture struct {
 func newT7cFixture(t *testing.T) *t7cFixture {
 	t.Helper()
 	env := sharedBuildRunEnvtestEnv(t)
+	// The envtest API server is shared by every test in this package, so
+	// objects under fixed names leak between tests. Reset the well-known
+	// policy ConfigMap before each test; otherwise the first writer's
+	// policies (HappyPath's Succeeded/Healthy) silently serve every later
+	// test whose create hits AlreadyExists.
+	t7cEnsureSystemNS(t, env.client)
+	stale := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Namespace: t7cSystemNS,
+		Name:      t7cPolicyCMName,
+	}}
+	if err := env.client.Delete(context.Background(), stale); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("reset policy configmap: %v", err)
+	}
 	rec := record.NewFakeRecorder(64)
 	clk := clock.NewFake(t7cT0)
 	eval := cueeval.NewEvaluator()
@@ -105,8 +118,10 @@ func t7cCreatePolicyConfigMap(t *testing.T, cl client.Client, data map[string]st
 		},
 		Data: data,
 	}
-	err := cl.Create(context.Background(), cm)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	// AlreadyExists is fatal: newT7cFixture resets the ConfigMap, so a
+	// collision means a real leak that must fail loudly instead of silently
+	// reusing another test's policies.
+	if err := cl.Create(context.Background(), cm); err != nil {
 		t.Fatalf("create policy configmap: %v", err)
 	}
 }
