@@ -26,6 +26,11 @@ import (
 
 const testStatusSucceeded = "Succeeded"
 
+// testMinimalSucceededPolicy is the simplest CUE policy that returns Succeeded.
+const testMinimalSucceededPolicy = `
+status: "Succeeded"
+`
+
 // TestHappyPath verifies successful evaluation with valid CUE policy and input.
 func TestHappyPath(t *testing.T) {
 	e := NewEvaluator()
@@ -126,9 +131,7 @@ func TestTimeout(t *testing.T) {
 	defer cancel()
 	time.Sleep(1 * time.Millisecond) // Ensure timeout has occurred
 
-	policyCUE := `
-status: "Succeeded"
-`
+	policyCUE := testMinimalSucceededPolicy
 	input := map[string]interface{}{}
 
 	_, err := e.Evaluate(ctx, policyCUE, input)
@@ -158,9 +161,7 @@ func TestInputSizeLimit(t *testing.T) {
 		largeInput[key] = value
 	}
 
-	policyCUE := `
-status: "Succeeded"
-`
+	policyCUE := testMinimalSucceededPolicy
 
 	_, err := e.Evaluate(context.Background(), policyCUE, largeInput)
 	if err == nil {
@@ -294,9 +295,7 @@ message: "All 3 replicas are ready"
 func TestCacheHit(t *testing.T) {
 	e := NewEvaluator()
 
-	policyCUE := `
-status: "Succeeded"
-`
+	policyCUE := testMinimalSucceededPolicy
 	input := map[string]interface{}{}
 
 	// First evaluation
