@@ -1686,9 +1686,9 @@ func TestDeliveryFormatTagStillRejectsNonDigestCatalog(t *testing.T) {
 // written value and resolvedDigest follow the format (spec decisions 1/2).
 func TestDeliveryDesiredImageForFormat(t *testing.T) {
 	cases := []struct {
-		name             string
-		format           imageflowv1alpha1.ImageReferenceFormat
-		wantDesired      string
+		name               string
+		format             imageflowv1alpha1.ImageReferenceFormat
+		wantDesired        string
 		wantResolvedDigest string
 	}{
 		{"empty defaults to digest", "", t9cDigestA, ""},

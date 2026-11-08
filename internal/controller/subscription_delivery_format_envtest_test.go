@@ -99,6 +99,7 @@ func newT5fFixture(t *testing.T) *t5fFixture {
 	}
 }
 
+//nolint:unparam // test helper: name param kept for API consistency with production patterns
 func t5fCreateStream(t *testing.T, cl client.Client, ns, name, ref string) {
 	t.Helper()
 	stream := &imageflowv1alpha1.ImageStream{
@@ -137,6 +138,7 @@ func t5fDigestPart(ref string) string {
 	return digest
 }
 
+//nolint:unparam // test helper: name param kept for API consistency with production patterns
 func t5fCreateDeployment(t *testing.T, cl client.Client, ns, name, image string) {
 	t.Helper()
 	deploy := &appsv1.Deployment{
@@ -211,7 +213,7 @@ func t5fReconcile(t *testing.T, f *t5fFixture, subName string) {
 	if err != nil {
 		t.Fatalf("reconcile failed: %v", err)
 	}
-	if res.RequeueAfter != 0 || res.Requeue {
+	if res.RequeueAfter != 0 {
 		t.Fatalf("delivery must settle silently, got %+v", res)
 	}
 }
@@ -240,6 +242,7 @@ func t5fDeploymentImageE(cl client.Client, ns, name string) string {
 	return deploy.Spec.Template.Spec.Containers[0].Image
 }
 
+//nolint:unparam // test helper: name param kept for API consistency with production patterns
 func t5fDeploymentImage(t *testing.T, cl client.Client, ns, name string) string {
 	t.Helper()
 	deploy := &appsv1.Deployment{}

@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -41,8 +41,8 @@ var ociTagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
 // match imagesubscriptions/status so the check fires where the value is
 // actually written.
 var desiredImagePatterns = map[imageflowv1alpha1.ImageReferenceFormat]*regexp.Regexp{
-	imageflowv1alpha1.ImageReferenceFormatDigest:       regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`),
-	imageflowv1alpha1.ImageReferenceFormatTag:          regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
+	imageflowv1alpha1.ImageReferenceFormatDigest:        regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`),
+	imageflowv1alpha1.ImageReferenceFormatTag:           regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
 	imageflowv1alpha1.ImageReferenceFormatDigestWithTag: regexp.MustCompile(`^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$`),
 }
 

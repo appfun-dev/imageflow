@@ -418,8 +418,8 @@ func effectiveDeliveryFormat(format imageflowv1alpha1.ImageReferenceFormat) imag
 // grammar the engine writes (ADR-012 §6, spec decision 3) — the same shapes
 // the T3 webhook enforces on persisted status.targets[].desiredImage.
 var formatReferencePatterns = map[imageflowv1alpha1.ImageReferenceFormat]*regexp.Regexp{
-	imageflowv1alpha1.ImageReferenceFormatDigest:       digestRefPatternRegexp,
-	imageflowv1alpha1.ImageReferenceFormatTag:          regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
+	imageflowv1alpha1.ImageReferenceFormatDigest:        digestRefPatternRegexp,
+	imageflowv1alpha1.ImageReferenceFormatTag:           regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
 	imageflowv1alpha1.ImageReferenceFormatDigestWithTag: regexp.MustCompile(`^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$`),
 }
 
