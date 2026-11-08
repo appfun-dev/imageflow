@@ -20,6 +20,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ImageReferenceFormat specifies the format of image references written to
+// target workload fields. Digest is the default and preserves v1 behavior.
+// +kubebuilder:validation:Enum=Digest;Tag;DigestWithTag
+type ImageReferenceFormat string
+
+const (
+	// ImageReferenceFormatDigest writes <repo>@sha256:<64hex> (v1 default).
+	ImageReferenceFormatDigest ImageReferenceFormat = "Digest"
+	// ImageReferenceFormatTag writes <repo>:<tag>.
+	ImageReferenceFormatTag ImageReferenceFormat = "Tag"
+	// ImageReferenceFormatDigestWithTag writes <repo>:<tag>@sha256:<64hex> (OCI composite).
+	ImageReferenceFormatDigestWithTag ImageReferenceFormat = "DigestWithTag"
+)
+
 // SubscriptionTarget declares one workload whose image fields follow the
 // subscription source. Locator fields are mutually exclusive: built-in Kinds
 // (Deployment/StatefulSet/DaemonSet, ADR-006) locate images by containerNames;
@@ -79,6 +93,13 @@ type ImageSubscriptionSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +listType=atomic
 	Targets []SubscriptionTarget `json:"targets"`
+
+	// ImageReferenceFormat selects the format of image references written to
+	// target workload fields. Defaults to Digest (v1 behavior) via mutating
+	// webhook. All targets in a subscription share the same format (ADR-012 §1).
+	// +optional
+	// +kubebuilder:validation:Enum=Digest;Tag;DigestWithTag
+	ImageReferenceFormat ImageReferenceFormat `json:"imageReferenceFormat,omitempty"`
 }
 
 // TargetDeliveryStatus is the per-target Outcome Stages report frozen by ADR-005
@@ -89,11 +110,21 @@ type TargetDeliveryStatus struct {
 	// +kubebuilder:validation:Required
 	TargetRef TargetReference `json:"targetRef"`
 
-	// DesiredImage is the digest reference <repo>@sha256:<64hex> resolved from the
-	// source. Digest references only (ADR-005 §2).
+	// DesiredImage is the image reference written to the target field(s). Format
+	// depends on spec.imageReferenceFormat: Digest (<repo>@sha256:<hex>),
+	// Tag (<repo>:<tag>), or DigestWithTag (<repo>:<tag>@sha256:<hex>).
+	// Pattern validation is webhook-enforced per format (ADR-012 §6).
+	// +optional
+	// +kubebuilder:validation:MaxLength=2048
+	DesiredImage string `json:"desiredImage,omitempty"`
+
+	// ResolvedDigest is the digest reference <repo>@sha256:<64hex> resolved from
+	// the source. Populated when imageReferenceFormat is Tag or DigestWithTag;
+	// empty for Digest format (where DesiredImage already carries the digest).
+	// Used for tag drift detection and observability (ADR-012 §4).
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[^@\s]+@sha256:[0-9a-f]{64}$`
-	DesiredImage string `json:"desiredImage,omitempty"`
+	ResolvedDigest string `json:"resolvedDigest,omitempty"`
 
 	// ObservedImage is the image value currently observed in the target field(s).
 	// Before the first apply it may be any reference (tag or digest), so no

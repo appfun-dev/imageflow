@@ -56,6 +56,21 @@ spec:
               ImageSubscriptionSpec declares source + targets (+ optional per-target status
               policy). Users own the spec; the controller owns the status.
             properties:
+              imageReferenceFormat:
+                allOf:
+                - enum:
+                  - Digest
+                  - Tag
+                  - DigestWithTag
+                - enum:
+                  - Digest
+                  - Tag
+                  - DigestWithTag
+                description: |-
+                  ImageReferenceFormat selects the format of image references written to
+                  target workload fields. Defaults to Digest (v1 behavior) via mutating
+                  webhook. All targets in a subscription share the same format (ADR-012 §1).
+                type: string
               source:
                 description: |-
                   Source of the image changes: a catalog stream tag in logical
@@ -409,9 +424,11 @@ spec:
                   properties:
                     desiredImage:
                       description: |-
-                        DesiredImage is the digest reference <repo>@sha256:<64hex> resolved from the
-                        source. Digest references only (ADR-005 §2).
-                      pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
+                        DesiredImage is the image reference written to the target field(s). Format
+                        depends on spec.imageReferenceFormat: Digest (<repo>@sha256:<hex>),
+                        Tag (<repo>:<tag>), or DigestWithTag (<repo>:<tag>@sha256:<hex>).
+                        Pattern validation is webhook-enforced per format (ADR-012 §6).
+                      maxLength: 2048
                       type: string
                     healthStatus:
                       description: |-
@@ -458,6 +475,14 @@ spec:
                         Reason is a stable machine-readable reason (e.g. Forbidden, Conflict,
                         Unsupported, WaitingForRollout).
                       maxLength: 256
+                      type: string
+                    resolvedDigest:
+                      description: |-
+                        ResolvedDigest is the digest reference <repo>@sha256:<64hex> resolved from
+                        the source. Populated when imageReferenceFormat is Tag or DigestWithTag;
+                        empty for Digest format (where DesiredImage already carries the digest).
+                        Used for tag drift detection and observability (ADR-012 §4).
+                      pattern: ^[^@\s]+@sha256:[0-9a-f]{64}$
                       type: string
                     retryCount:
                       description: |-
