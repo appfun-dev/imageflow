@@ -1,9 +1,9 @@
 # ADR-005：第三方写入合约（imageFields[] 文法 + digest-only 写入）与 CUE 状态策略推迟
 
-- 状态：Accepted
-- 日期：2026-10-16
-- 决策人：项目负责人（grilling 第 1 轮 Q4=B、Wave B Q20=A）
-- 关联：D-010 / D-016 / FR-010 / FR-012；设计文档 §7.3 / §7.4 / §7.5 / §8.1–8.3；ADR-006；ADR-008（待落）
+- 状态：Amended
+- 日期：2026-10-16（原始）/ 2026-11-08（修订）
+- 决策人：项目负责人（grilling 第 1 轮 Q4=B、Wave B Q20=A；v1.2 grill Wave A Q1-Q3、Wave B Q4-Q6）
+- 关联：D-010 / D-016 / FR-010 / FR-012；设计文档 §7.3 / §7.4 / §7.5 / §8.1–8.3；ADR-006；ADR-008（待落）；ADR-012（v1.2 imageReferenceFormat）
 
 ## 背景
 
@@ -41,6 +41,14 @@
 - digest-only 意味着目标对象的 image 字段不再携带 tag 语义，按 tag 展示的外部工具会看到 `repo@sha256:...`；
 - D-010、D-016 关闭。
 
+## 修订日志
+
+### 2026-11-08（v1.2 imageReferenceFormat）
+
+- §2 写入值格式：原"只写 digest 引用"修订为"默认 digest 引用；v1.2 起可通过 `imageReferenceFormat` 枚举选择 Tag 或 DigestWithTag 格式"。详见 ADR-012。
+- §3 状态模型：新增 `resolvedDigest` 字段（format=Tag/DigestWithTag 时填充），用于 tag 漂移可观测性。
+- 未解决问题中 `imageReferenceFormat` 条目已关闭（由 ADR-012 承接）。
+
 ## 未解决问题
 
-- v1.1 `imageReferenceFormat` 枚举的具体字段名与默认值 —— v1.1 细化，必须增量兼容。
+- ~~v1.1 `imageReferenceFormat` 枚举的具体字段名与默认值~~ —— **已关闭**（2026-11-08，由 ADR-012 承接）。
