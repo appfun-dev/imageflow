@@ -187,6 +187,7 @@ func t7cCreateDeployment(t *testing.T, cl client.Client, ns, name, image string)
 	}
 }
 
+//nolint:unparam // test helper with stable signature for readability.
 func t7cCreateSubscriptionWithPolicy(t *testing.T, cl client.Client, ns, name string, rolloutKey, healthKey string) {
 	t.Helper()
 	sub := &imageflowv1alpha1.ImageSubscription{
@@ -264,6 +265,7 @@ func t7cGetSub(t *testing.T, cl client.Client, ns, name string) *imageflowv1alph
 	return sub
 }
 
+//nolint:unparam // test helper with stable signature for readability.
 func t7cEntry(sub *imageflowv1alpha1.ImageSubscription, deployName string) *imageflowv1alpha1.TargetDeliveryStatus {
 	for i := range sub.Status.Targets {
 		if sub.Status.Targets[i].TargetRef.Name == deployName {
@@ -527,7 +529,7 @@ func TestCUEEvalEnvtestNamespaceRejection(t *testing.T) {
 		ref := &imageflowv1alpha1.StatusPolicyRef{
 			Name:      "policy",
 			Namespace: "wrong-namespace",
-			Key:       "rollout.cue",
+			Key:       t7cRolloutKey,
 		}
 		// The validateStatusPolicyRefNamespace function is tested via webhook
 		// integration tests. Here we verify the constant is correct.

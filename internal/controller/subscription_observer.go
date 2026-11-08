@@ -575,8 +575,13 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 // healthKey (T4, ADR-013 D3/D6). It fetches the ConfigMap, builds input from
 // the target workload's unstructured status, and writes results onto the
 // outcome. Errors are classified per ADR-013 D6; all failures → Unknown.
+//
 //nolint:unparam // sub reserved for future audit/logging; kept for API stability.
-func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(ctx context.Context, _ *imageflowv1alpha1.ImageSubscription, target imageflowv1alpha1.SubscriptionTarget, entry *imageflowv1alpha1.TargetDeliveryStatus, out *observerOutcome) {
+func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(
+	ctx context.Context, _ *imageflowv1alpha1.ImageSubscription,
+	target imageflowv1alpha1.SubscriptionTarget,
+	entry *imageflowv1alpha1.TargetDeliveryStatus, out *observerOutcome,
+) {
 	ref := target.StatusPolicyRef
 	if ref == nil {
 		return
