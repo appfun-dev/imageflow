@@ -923,8 +923,8 @@ func TestObserverStatusPolicyRefDoesNotDisableNativeBuiltinObservation(t *testin
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonStatusPolicyEvaluatorDeferred {
 		t.Fatalf("StatusPolicyEvaluated condition = %+v, want False/EvaluatorDeferred", cond)
 	}
-	if !strings.Contains(cond.Message, "defers the CUE evaluator to v1.1") {
-		t.Fatalf("condition message %q must explain the deferral", cond.Message)
+	if !strings.Contains(cond.Message, "legacy contract") && !strings.Contains(cond.Message, "rolloutKey/healthKey") {
+		t.Fatalf("condition message %q must explain the legacy deferral or missing CUE keys", cond.Message)
 	}
 }
 
@@ -996,7 +996,7 @@ func TestObserverHonestUnknownForThirdPartyTarget(t *testing.T) {
 
 func TestObserverStatusPolicyConditionTransitions(t *testing.T) {
 	computed := &imageflowv1alpha1.ImageSubscriptionStatus{}
-	setStatusPolicyCondition(computed, 0, 7, t11uStart)
+	setStatusPolicyCondition(computed, 0, nil, 7, t11uStart)
 	cond := meta.FindStatusCondition(computed.Conditions, ConditionTypeStatusPolicyEvaluated)
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != ReasonStatusPolicyNotConfigured {
 		t.Fatalf("condition = %+v, want False/NotConfigured", cond)
@@ -1006,7 +1006,8 @@ func TestObserverStatusPolicyConditionTransitions(t *testing.T) {
 	}
 	// Reason flip without a Status flip keeps LastTransitionTime (standard
 	// condition convention) but picks up the new generation and message.
-	setStatusPolicyCondition(computed, 2, 8, t11uStart.Add(time.Hour))
+	// 2 policyRefs with no evalResults → legacy EvaluatorDeferred.
+	setStatusPolicyCondition(computed, 2, nil, 8, t11uStart.Add(time.Hour))
 	cond = meta.FindStatusCondition(computed.Conditions, ConditionTypeStatusPolicyEvaluated)
 	if cond.Reason != ReasonStatusPolicyEvaluatorDeferred || cond.ObservedGeneration != 8 {
 		t.Fatalf("condition = %+v, want EvaluatorDeferred at generation 8", cond)
