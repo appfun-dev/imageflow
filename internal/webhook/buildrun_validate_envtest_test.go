@@ -74,6 +74,9 @@ func startBuildRunAdmissionEnv() (func(), error) {
 		BinaryAssetsDirectory: os.Getenv("KUBEBUILDER_ASSETS"),
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "test", "testdata", "thirdparty"),
+			// T2: the subscription mutating-defaulting envtest suite creates
+			// real ImageSubscriptions, so the ImageFlow CRDs must be installed.
+			filepath.Join("..", "..", "config", "crd", "bases"),
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{

@@ -14,9 +14,11 @@ import (
 // +kubebuilder:webhook:path=/mutate-imageflow-appfun-dev-v1alpha1-imagesubscription,mutating=true,failurePolicy=fail,sideEffects=None,groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=create;update,versions=v1alpha1,name=mimagesubscription.kb.io,admissionReviewVersions=v1,timeoutSeconds=10
 
 // subscriptionMutator injects the imageflow.appfun.dev/created-by annotation
-// with the authenticated requester identity (ADR-003). It is a raw
-// admission.Handler — not an admission.CustomDefaulter — because defaulters do
-// not see the AdmissionRequest and therefore cannot access req.UserInfo.
+// with the authenticated requester identity (ADR-003) and defaults
+// spec.imageReferenceFormat to Digest when omitted (ADR-012 decision 3). It is
+// a raw admission.Handler — not an admission.CustomDefaulter — because
+// defaulters do not see the AdmissionRequest and therefore cannot access
+// req.UserInfo.
 //
 // Identity semantics:
 //   - CREATE: the authenticated requester always wins; a user-supplied
@@ -40,6 +42,7 @@ func (m *subscriptionMutator) Handle(_ context.Context, req admission.Request) a
 	if err := m.decoder.Decode(req, sub); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+	defaultImageReferenceFormat(sub)
 
 	switch req.Operation {
 	case admissionv1.Create:
@@ -61,6 +64,17 @@ func (m *subscriptionMutator) Handle(_ context.Context, req admission.Request) a
 		return admission.Errored(http.StatusInternalServerError, err)
 	}
 	return admission.PatchResponseFromRaw(req.Object.Raw, mutated)
+}
+
+// defaultImageReferenceFormat fills spec.imageReferenceFormat with the v1
+// default (Digest) when the field is omitted (ADR-012 decision 3). Running on
+// both create and update means subscriptions predating v1.2 are defaulted on
+// their next update — zero manual migration. An explicit value is never
+// overwritten; enum validity is the CRD/validating-webhook's job (T3).
+func defaultImageReferenceFormat(sub *imageflowv1alpha1.ImageSubscription) {
+	if sub.Spec.ImageReferenceFormat == "" {
+		sub.Spec.ImageReferenceFormat = imageflowv1alpha1.ImageReferenceFormatDigest
+	}
 }
 
 // enforceCreatedBy writes the trusted created-by value onto the object:
