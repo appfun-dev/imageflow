@@ -390,3 +390,133 @@ webhook 在创建/更新时自动填充默认值 `Digest`。相关 webhook 行�
   `Digest`，行为与 v1 完全一致。
 - 升级 v1.2 不需要任何手动迁移。
 - 决策背景：ADR-012；完整 spec：`docs/spec/imageflow-v1.2-image-reference-format.md`。
+
+## 11. CUE 状态策略编写与调试（v1.3）
+
+v1.3 实现 CUE Status Evaluator（[ADR-013](adr/ADR-013-cue-status-evaluator.md)），允许通过 ConfigMap 部署自定义 CUE 策略来评估第三方 Workload 的 rollout/health 状态。本节面向平台工程师，覆盖策略编写、调试、排错与运维注意事项。
+
+### 错误分类与排查
+
+CUE 评估器将失败分为三类（[ADR-013 D6](adr/ADR-013-cue-status-evaluator.md)），每类对应不同的 Condition Reason 和排查路径：
+
+| ErrorClass | Condition Reason | 含义 | 排查方向 |
+|---|---|---|---|
+| `CompileError` | `CompileError` | CUE 策略语法错误或类型错误 | 检查策略文件语法；使用 `cue vet` 本地验证；查看 controller 日志中的编译错误详情 |
+| `EvalError` | `EvalError` / `InputTooLarge` | 输入不匹配 schema、字段缺失、运行时 panic，或输入 JSON 超过 256KB | 检查输入 schema 定义；确认 workload status 结构匹配；大对象考虑裁剪输入字段 |
+| `Timeout` | `Timeout` | 单次评估超过 100ms | 简化策略逻辑；避免深层嵌套或复杂递归；CUE 是声明式语言，100ms 足够覆盖典型判定 |
+
+所有错误 → `rolloutStatus=Unknown` 或 `healthStatus=Unknown` + `StatusPolicyEvaluated=False` Condition。**绝不默认成功**（[ADR-005 §4](adr/ADR-005-write-contract-cue-deferral.md)）。
+
+排查命令：
+
+```bash
+# 查看订阅上的 StatusPolicyEvaluated condition
+kubectl -n <ns> get imagesubscription X \
+  -o jsonpath='{.status.conditions[?(@.type=="StatusPolicyEvaluated")]}' | jq
+
+# 查看 per-target 状态
+kubectl -n <ns> get imagesubscription X \
+  -o jsonpath='{.status.targets[0]}' | jq
+
+# 查看 controller 日志中的 CUE 评估错误
+kubectl -n imageflow-system logs deployment/imageflow-controller-manager | grep -i 'cue\|eval'
+```
+
+### 使用 test-cases.yaml 预部署验证
+
+在同一 ConfigMap 的 data 中放置 `test-cases.yaml` key，可在部署前验证策略逻辑正确性：
+
+```yaml
+# ConfigMap data 中的 test-cases.yaml
+data:
+  rollout.cue: |
+    #Input: { ... }
+    result: { ... }
+  test-cases.yaml: |
+    - input:
+        metadata: { generation: 2 }
+        spec: { replicas: 3 }
+        status:
+          observedGeneration: 1
+          updatedReplicas: 2
+          availableReplicas: 2
+      expected:
+        status: Progressing
+        reason: NewGeneration
+    - input:
+        metadata: { generation: 1 }
+        spec: { replicas: 3 }
+        status:
+          observedGeneration: 1
+          updatedReplicas: 3
+          availableReplicas: 3
+      expected:
+        status: Succeeded
+        reason: AllAvailable
+    - input:
+        metadata: { generation: 1 }
+        spec: { replicas: 3 }
+        status:
+          observedGeneration: 1
+          updatedReplicas: 3
+          availableReplicas: 0
+      expected:
+        status: Progressing
+        reason: UpdatingReplicas
+```
+
+测试用例格式：YAML 数组，每项包含 `input`（传入策略的 JSON 对象）和 `expected`（期望的 `{status, reason}`）。evaluator 提供 `RunTests(configMap)` 方法执行测试。
+
+> **最佳实践**：每次修改策略时同步更新 test-cases.yaml，确保回归覆盖。测试用例随 ConfigMap 版本化，同一策略版本建立可重复测试（[ADR-005 §8.3](adr/ADR-005-write-contract-cue-deferral.md)）。
+
+### 缓存行为与 ConfigMap Watch
+
+- **编译缓存**：策略按 `ConfigMap resourceVersion + key hash` 缓存编译结果，避免每次 reconcile 重新编译；
+- **自动失效**：controller watch ConfigMap 变更，resourceVersion 变化时自动失效对应缓存条目；
+- **生效时机**：ConfigMap 更新后，下一个 reconcile 周期自动使用新策略，**无需重启 controller**；
+- **in-flight 评估**：策略热更新期间，已开始的评估继续使用旧策略完成，新评估使用新策略（不中断 in-flight）。
+
+### Namespace 限制
+
+Status Policy ConfigMap **仅允许在 `imageflow-system` namespace 创建**。这是安全边界要求（[ADR-013 D9](adr/ADR-013-cue-status-evaluator.md)）：
+
+- Admission webhook 校验 `statusPolicyRef.namespace == "imageflow-system"`；
+- 非 `imageflow-system` namespace 的引用 → admission 拒绝；
+- ConfigMap 变更审计通过 Kubernetes Audit Log。
+
+尝试在其他 namespace 创建策略 ConfigMap 或在 `statusPolicyRef` 中引用其他 namespace 会被 webhook 拒绝：
+
+```bash
+# ❌ 被拒绝：非 imageflow-system namespace
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-policy
+  namespace: default          # ← 不允许
+data:
+  rollout.cue: |
+    ...
+EOF
+# Error: admission webhook denied: status policy ConfigMap must be in imageflow-system namespace
+```
+
+### 沙箱安全约束
+
+CUE 评估在严格沙箱中运行（[ADR-013 D2/D9](adr/ADR-013-cue-status-evaluator.md)）：
+
+| 约束 | 说明 |
+|---|---|
+| 禁止外部 import | 仅允许 CUE 标准库；`import "net/http"` 等 → CompileError |
+| 无网络访问 | 评估过程不发起任何网络请求 |
+| 无文件系统访问 | 不能读写文件；所有输入通过 API 传入 |
+| 超时保护 | 单次评估最大 100ms，超限 → Timeout |
+| 输入大小限制 | 序列化 JSON 最大 256KB，超限 → EvalError/InputTooLarge |
+| Panic 隔离 | 评估在独立 goroutine 中运行，panic 不影响 controller |
+
+### 相关文档
+
+- 快速上手：`docs/quickstart.md` §11（CUE 状态策略配置指南）
+- 架构决策：[ADR-013](adr/ADR-013-cue-status-evaluator.md)（CUE Status Evaluator 实现）
+- 合约冻结：[ADR-005 §4](adr/ADR-005-write-contract-cue-deferral.md)（CUE evaluator 合约规范）
+- 完整 Spec：`docs/spec/imageflow-v1.3-cue-status-evaluator.md`
