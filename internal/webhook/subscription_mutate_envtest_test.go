@@ -49,9 +49,14 @@ func TestMutateImageReferenceFormatDefaulting(t *testing.T) {
 		}
 	})
 
-	t.Run("update with cleared format persists Digest", func(t *testing.T) {
+	t.Run("update with cleared format re-defaults to Digest", func(t *testing.T) {
+		// Simulate a pre-v1.2 object: create without format (mutating webhook
+		// defaults to Digest), then clear the field and update. The re-default
+		// path (Digest→Digest) must be admitted — this is the zero-manual-migration
+		// guarantee for objects predating v1.2. Note: Tag→cleared is correctly
+		// rejected as a downgrade by T3's validateFormatTransition.
 		sub := envtestSubscription("fmt-default-update")
-		sub.Spec.ImageReferenceFormat = imageflowv1alpha1.ImageReferenceFormatTag
+		// Create without explicit format — mutating webhook defaults to Digest
 		if err := envtestClient.Create(ctx, sub); err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -59,9 +64,11 @@ func TestMutateImageReferenceFormatDefaulting(t *testing.T) {
 		if err := envtestClient.Get(ctx, client.ObjectKeyFromObject(sub), stored); err != nil {
 			t.Fatalf("get: %v", err)
 		}
+		if stored.Spec.ImageReferenceFormat != imageflowv1alpha1.ImageReferenceFormatDigest {
+			t.Fatalf("initial format = %q, want Digest (mutating default)", stored.Spec.ImageReferenceFormat)
+		}
 		// A client writing the object back without the field (omitempty drops
-		// the empty string) must be re-defaulted — the zero-manual-migration
-		// path for objects predating v1.2.
+		// the empty string) must be re-defaulted to Digest.
 		stored.Spec.ImageReferenceFormat = ""
 		if err := envtestClient.Update(ctx, stored); err != nil {
 			t.Fatalf("update without imageReferenceFormat must be admitted: %v", err)
