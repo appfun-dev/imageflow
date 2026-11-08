@@ -14,11 +14,17 @@ package controller
 // Every pass is a full convergence pass against persisted state: dedup,
 // retry and restart recovery all fall out of reconcile idempotence.
 //
-// # Write contract (ADR-005)
+// # Write contract (ADR-005, ADR-012)
 //
-// The value written is ALWAYS a digest reference <repo>@sha256:<64hex>;
-// the engine refuses to apply anything else (defense in depth on top of the
-// catalog-side pattern guards). Built-in adapters (ADR-006 first batch:
+// The catalog association (ImageStream.status.tags[].items[0]) is ALWAYS a
+// digest reference; the engine refuses anything else at resolve time.
+// spec.imageReferenceFormat (v1.2, ADR-012 §Decision 1/2, spec decisions
+// 1/2/7) then shapes the value WRITTEN to target fields: Digest keeps the v1
+// <repo>@sha256:<64hex> form, Tag writes <repo>:<tag>, DigestWithTag writes
+// the OCI composite <repo>:<tag>@sha256:<64hex> — each guarded last-mile
+// against its format grammar. Tag/DigestWithTag additionally report the
+// resolved digest reference on status.targets[].resolvedDigest for
+// observability and drift detection. Built-in adapters (ADR-006 first batch:
 // Deployment/StatefulSet/DaemonSet) locate images by containerNames in the
 // pod template — required, non-empty, no default guessing. Writes are minimal
 // Server-Side Apply configurations that never touch unrelated fields.
@@ -87,6 +93,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -396,6 +403,65 @@ func (r *SubscriptionDeliveryReconciler) Reconcile(
 	return ctrl.Result{RequeueAfter: pass.requeue}, pass.joinedError()
 }
 
+// effectiveDeliveryFormat resolves spec.imageReferenceFormat: an empty value
+// means Digest (mutating-webhook defaulting, ADR-012 §3), so subscriptions
+// predating v1.2 keep the v1 digest-only behavior. An unknown value degrades
+// to Digest at the render/guard sites (the v1-safe direction).
+func effectiveDeliveryFormat(format imageflowv1alpha1.ImageReferenceFormat) imageflowv1alpha1.ImageReferenceFormat {
+	if format == "" {
+		return imageflowv1alpha1.ImageReferenceFormatDigest
+	}
+	return format
+}
+
+// formatReferencePatterns maps each imageReferenceFormat to the reference
+// grammar the engine writes (ADR-012 §6, spec decision 3) — the same shapes
+// the T3 webhook enforces on persisted status.targets[].desiredImage.
+var formatReferencePatterns = map[imageflowv1alpha1.ImageReferenceFormat]*regexp.Regexp{
+	imageflowv1alpha1.ImageReferenceFormatDigest:        digestRefPatternRegexp,
+	imageflowv1alpha1.ImageReferenceFormatTag:           regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
+	imageflowv1alpha1.ImageReferenceFormatDigestWithTag: regexp.MustCompile(`^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$`),
+}
+
+// referenceMatchesFormat is the format-aware last-mile write guard: the value
+// the engine is about to apply must match the grammar of the selected format.
+func referenceMatchesFormat(format imageflowv1alpha1.ImageReferenceFormat, ref string) bool {
+	pattern, ok := formatReferencePatterns[effectiveDeliveryFormat(format)]
+	return ok && pattern.MatchString(ref)
+}
+
+// desiredImageForFormat renders (spec decisions 1/2): (1) the reference the
+// engine writes to and compares against target fields, and (2) the
+// status.targets[].resolvedDigest observability value ("" for Digest, where
+// DesiredImage already carries the digest). digestRef must already be a
+// digest reference (the resolve-time catalog contract); a malformed input
+// defensively degrades to the v1 digest behavior. The tag comes from the
+// logical source name "<stream>:<tag>" and equals ImageStreamTag.spec.tag by
+// construction (the mirror is synthesized from the same pair), so no extra
+// object read is needed (ADR-012 §5).
+func desiredImageForFormat(
+	format imageflowv1alpha1.ImageReferenceFormat,
+	digestRef string,
+	tag string,
+) (desired, resolvedDigest string) {
+	switch effectiveDeliveryFormat(format) {
+	case imageflowv1alpha1.ImageReferenceFormatTag:
+		repo, _, err := SplitDigestReference(digestRef)
+		if err != nil {
+			return digestRef, ""
+		}
+		return repo + ":" + tag, digestRef
+	case imageflowv1alpha1.ImageReferenceFormatDigestWithTag:
+		repo, digest, err := SplitDigestReference(digestRef)
+		if err != nil {
+			return digestRef, ""
+		}
+		return repo + ":" + tag + "@" + digest, digestRef
+	default:
+		return digestRef, ""
+	}
+}
+
 // sourceState is the resolved catalog association of the subscription source.
 type sourceState struct {
 	// spec is the subscription source as declared (recentDeliveries §12.9
@@ -403,10 +469,25 @@ type sourceState struct {
 	spec imageflowv1alpha1.SubscriptionSourceRef
 	// name renders the source for Event messages.
 	name string
-	// ref is the digest reference to write (only when reason is empty).
+	// ref is the digest reference of the catalog association (only when
+	// reason is empty); it stays the §12.9 recentDeliveries NewImage truth
+	// regardless of the selected format.
 	ref string
 	// digest of the association.
 	digest string
+	// format is the effective spec.imageReferenceFormat ("" resolved to
+	// Digest so pre-v1.2 objects behave exactly as v1).
+	format imageflowv1alpha1.ImageReferenceFormat
+	// desiredImage is the formatted reference the engine writes to and
+	// compares against target fields (spec decisions 1/2/7): the digest
+	// reference itself for Digest, <repo>:<tag> for Tag, the OCI composite
+	// <repo>:<tag>@sha256:<hex> for DigestWithTag.
+	desiredImage string
+	// resolvedDigest reports the digest truth on
+	// status.targets[].resolvedDigest for Tag/DigestWithTag (observability
+	// and drift detection); empty for Digest (DesiredImage already carries
+	// the digest there).
+	resolvedDigest string
 	// created is when the association was recorded (Image Change time, the
 	// start of the end-to-end delivery latency).
 	created *metav1.Time
@@ -429,6 +510,7 @@ func (r *SubscriptionDeliveryReconciler) resolveSource(
 	sub *imageflowv1alpha1.ImageSubscription,
 ) sourceState {
 	src := sub.Spec.Source
+	format := effectiveDeliveryFormat(sub.Spec.ImageReferenceFormat)
 	if src.Kind != mirrorSourceKindImageStreamTag {
 		return sourceState{
 			reason: TargetReasonSourceUnresolved,
@@ -474,20 +556,27 @@ func (r *SubscriptionDeliveryReconciler) resolveSource(
 			}
 		}
 		if !digestRefPatternRegexp.MatchString(current.ImageReference) {
-			// ADR-005 §2 write contract: only digest references are ever
-			// written. The catalog patterns make this unreachable; the engine
-			// refuses instead of writing a tag reference.
+			// The catalog association is a digest reference under EVERY
+			// format (formats shape what is written, not what the catalog
+			// stores; the digest is also needed for resolvedDigest and the
+			// DigestWithTag composite). The catalog patterns make this
+			// unreachable; the engine refuses instead of trusting a tag
+			// reference (ADR-005 §2, ADR-012 §5).
 			return sourceState{
 				reason: TargetReasonInvalidImageReference,
 				message: fmt.Sprintf("catalog association %q of %s:%s is not a digest reference "+
-					"<repo>@sha256:<64hex>; tag references are never written (ADR-005)",
+					"<repo>@sha256:<64hex>; tag references are never trusted (ADR-005, ADR-012)",
 					current.ImageReference, stream, tag),
 			}
 		}
+		desired, resolvedDigest := desiredImageForFormat(format, current.ImageReference, tag)
 		return sourceState{
-			ref:     current.ImageReference,
-			digest:  current.Digest,
-			created: current.Created.DeepCopy(),
+			ref:            current.ImageReference,
+			digest:         current.Digest,
+			format:         format,
+			desiredImage:   desired,
+			resolvedDigest: resolvedDigest,
+			created:        current.Created.DeepCopy(),
 		}
 	}
 	return sourceState{
@@ -592,10 +681,11 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		return out
 	}
 
-	// The source resolved: the desired digest is reportable on every outcome
-	// from here on, even failures (users see WHAT would be delivered).
+	// The source resolved: the desired (formatted) reference is reportable on
+	// every outcome from here on, even failures (users see WHAT would be
+	// delivered).
 	out.setDesired = true
-	out.desiredImage = source.ref
+	out.desiredImage = source.desiredImage
 
 	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
 	kindAdapter, pathAdapter, class, supported := delivery.Classify(gvk, hasPaths)
@@ -612,7 +702,11 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	out.targetObject = obj
 
 	observed, uniform := observedSummary(plan.Fields)
-	allEqual := uniform && observed == source.ref
+	// ImageApplied comparison (spec decision 7): each format compares the
+	// reference IT writes — the digest for Digest, the tag string only for
+	// Tag (drift stays visible via resolvedDigest), the composite for
+	// DigestWithTag.
+	allEqual := uniform && observed == source.desiredImage
 	out.setObserved = true
 	out.observedImage = observed
 
@@ -634,7 +728,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			out.setImageApplied = true
 			out.imageApplied = allEqual
 			out.setDesired = true
-			out.desiredImage = source.ref
+			out.desiredImage = source.desiredImage
 			out.setObserved = true
 			out.observedImage = observed
 			rollout := imageflowv1alpha1.RolloutConflict
@@ -685,7 +779,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			out.setImageApplied = true
 			out.imageApplied = allEqual
 			out.setDesired = true
-			out.desiredImage = source.ref
+			out.desiredImage = source.desiredImage
 			out.setObserved = true
 			out.observedImage = observed
 			rollout := imageflowv1alpha1.RolloutConflict
@@ -773,9 +867,9 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 	var plan *delivery.Plan
 	var planErr error
 	if hasPaths {
-		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, source.ref)
+		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, source.desiredImage)
 	} else {
-		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, source.ref)
+		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, source.desiredImage)
 	}
 	if planErr != nil {
 		var missing *delivery.ContainersNotFoundError
@@ -807,34 +901,43 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 		}
 	}
 
-	// ADR-005 §2 last-mile guard: the engine never writes a non-digest value,
+	// ADR-005 §2 + ADR-012 §6 last-mile guard: the engine only ever writes a
+	// value matching the grammar of the selected imageReferenceFormat,
 	// whatever upstream produced.
-	if !digestRefPatternRegexp.MatchString(source.ref) {
+	if !referenceMatchesFormat(source.format, source.desiredImage) {
 		out = out.failed(TargetReasonInvalidImageReference, fmt.Sprintf(
-			"resolved reference %q is not a digest reference <repo>@sha256:<64hex>; "+
-				"tag references are never written (ADR-005)", source.ref))
+			"resolved reference %q does not match the imageReferenceFormat=%s grammar; "+
+				"zero writes (ADR-005 §2, ADR-012 §6)", source.desiredImage, source.format))
 		return nil, obj, &out
 	}
 	return plan, obj, nil
 }
 
 // convergedOutcome fills the per-target entry fields of a converged target
-// (desired digest present in every declared field, owned by this
+// (desired formatted reference present in every declared field, owned by this
 // subscription).
 func (r *SubscriptionDeliveryReconciler) convergedOutcome(
 	out deliveryOutcome,
 	source sourceState,
 ) deliveryOutcome {
 	out.setDesired = true
-	out.desiredImage = source.ref
+	out.desiredImage = source.desiredImage
 	out.setObserved = true
-	out.observedImage = source.ref
+	out.observedImage = source.desiredImage
 	out.setImageApplied = true
 	out.imageApplied = true
 	out.reason = TargetReasonApplied
-	out.message = fmt.Sprintf("all declared image fields (%s) hold digest %s and are owned by "+
-		"this subscription's SSA field manager (ADR-008 exclusivity registry)",
-		out.locator, source.digest)
+	if source.resolvedDigest != "" {
+		// Tag/DigestWithTag: the fields hold the formatted reference; the
+		// message keeps the digest truth visible alongside it.
+		out.message = fmt.Sprintf("all declared image fields (%s) hold %s (digest %s) and are "+
+			"owned by this subscription's SSA field manager (ADR-008 exclusivity registry)",
+			out.locator, source.desiredImage, source.digest)
+	} else {
+		out.message = fmt.Sprintf("all declared image fields (%s) hold digest %s and are owned by "+
+			"this subscription's SSA field manager (ADR-008 exclusivity registry)",
+			out.locator, source.digest)
+	}
 	out.resetRetry = true
 	if out.delivered {
 		// A value-changing apply starts a native rollout: seed Progressing.

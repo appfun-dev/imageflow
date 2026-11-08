@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +32,31 @@ const streamNameSeparator = "--"
 // form always maps to a declarable stream tag.
 var ociTagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
 
+// desiredImagePatterns maps each imageReferenceFormat to the reference grammar
+// the delivery controller is contractually bound to write (ADR-012 §6, spec
+// decision 3). The kubebuilder pattern on DesiredImage was removed in T1
+// because one regex cannot express all three formats; this webhook enforces
+// the format selected by spec.imageReferenceFormat instead. Because
+// DesiredImage lives in the status subresource, the webhook rules below also
+// match imagesubscriptions/status so the check fires where the value is
+// actually written.
+var desiredImagePatterns = map[imageflowv1alpha1.ImageReferenceFormat]*regexp.Regexp{
+	imageflowv1alpha1.ImageReferenceFormatDigest:        regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`),
+	imageflowv1alpha1.ImageReferenceFormatTag:           regexp.MustCompile(`^[^@\s]+:[^@\s]+$`),
+	imageflowv1alpha1.ImageReferenceFormatDigestWithTag: regexp.MustCompile(`^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$`),
+}
+
+// effectiveImageReferenceFormat resolves the format used for validation: an
+// empty value means Digest (mutating webhook defaulting, ADR-012 §3), so
+// subscriptions predating v1.2 keep validating against the v1 digest-only
+// shape.
+func effectiveImageReferenceFormat(format imageflowv1alpha1.ImageReferenceFormat) imageflowv1alpha1.ImageReferenceFormat {
+	if format == "" {
+		return imageflowv1alpha1.ImageReferenceFormatDigest
+	}
+	return format
+}
+
 // builtinWorkloadKinds is the first-batch built-in adapter set (ADR-006).
 // Targets referencing one of these apps/v1 Kinds must locate images by
 // containerNames — required, non-empty, no default guessing (spec decision 6).
@@ -46,7 +72,7 @@ var subscriptionGK = schema.GroupKind{
 	Kind:  "ImageSubscription",
 }
 
-// +kubebuilder:webhook:path=/validate-imageflow-appfun-dev-v1alpha1-imagesubscription,mutating=false,failurePolicy=fail,sideEffects=None,groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=create;update,versions=v1alpha1,name=vimagesubscription.kb.io,admissionReviewVersions=v1,timeoutSeconds=10
+// +kubebuilder:webhook:path=/validate-imageflow-appfun-dev-v1alpha1-imagesubscription,mutating=false,failurePolicy=fail,sideEffects=None,groups=imageflow.appfun.dev,resources=imagesubscriptions;imagesubscriptions/status,verbs=create;update,versions=v1alpha1,name=vimagesubscription.kb.io,admissionReviewVersions=v1,timeoutSeconds=10
 
 // subscriptionValidator enforces the subscription shape rules that spec
 // decision 6 assigns to the validating webhook — deliberately NOT to CRD-level
@@ -67,11 +93,15 @@ type subscriptionValidator struct {
 var _ admission.CustomValidator = &subscriptionValidator{}
 
 // ValidateCreate implements admission.CustomValidator: shape first (T3),
-// then the T8 admission-time authorization of the created-by identity against
-// every target.
+// then the desiredImage format check on every value entering now, then the
+// T8 admission-time authorization of the created-by identity against every
+// target.
 func (v *subscriptionValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	sub := obj.(*imageflowv1alpha1.ImageSubscription)
 	if err := validateSubscriptionShape(sub); err != nil {
+		return nil, err
+	}
+	if err := validateNewDesiredImages(nil, sub, true); err != nil {
 		return nil, err
 	}
 	if v.authorizer == nil {
@@ -81,18 +111,27 @@ func (v *subscriptionValidator) ValidateCreate(ctx context.Context, obj runtime.
 }
 
 // ValidateUpdate implements admission.CustomValidator. The full shape is
-// re-validated on every update; the old object adds no exempt state. The T8
-// authorization re-check runs only when spec.targets changed (ADR-003
-// "targets 变更" timing).
+// re-validated on every update; the old object adds no exempt state. Format
+// downgrade protection (T3, #24) rejects switching imageReferenceFormat from
+// Tag/DigestWithTag back to Digest. The T8 authorization re-check runs only
+// when spec.targets changed (ADR-003 "targets 变更" timing).
 func (v *subscriptionValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	newSub := newObj.(*imageflowv1alpha1.ImageSubscription)
 	if err := validateSubscriptionShape(newSub); err != nil {
 		return nil, err
 	}
+	oldSub := oldObj.(*imageflowv1alpha1.ImageSubscription)
+	specChanged := !equality.Semantic.DeepEqual(oldSub.Spec, newSub.Spec)
+	if err := validateNewDesiredImages(oldSub, newSub, !specChanged); err != nil {
+		return nil, err
+	}
+	if err := validateFormatTransition(oldSub, newSub); err != nil {
+		return nil, err
+	}
 	if v.authorizer == nil {
 		return nil, nil
 	}
-	return v.authorizer.authorizeUpdate(ctx, oldObj.(*imageflowv1alpha1.ImageSubscription), newSub)
+	return v.authorizer.authorizeUpdate(ctx, oldSub, newSub)
 }
 
 // ValidateDelete implements admission.CustomValidator; deletes always pass.
@@ -100,9 +139,11 @@ func (v *subscriptionValidator) ValidateDelete(_ context.Context, _ runtime.Obje
 	return nil, nil
 }
 
-// validateSubscriptionShape aggregates every shape violation of one
+// validateSubscriptionShape aggregates every spec-shape violation of one
 // subscription into a single Invalid error, so a misconfiguration is rejected
 // as a whole with a complete report instead of one error at a time.
+// Status-side checks (desiredImage grammar) live in validateNewDesiredImages
+// because they must only fire on values the request actually writes.
 func validateSubscriptionShape(sub *imageflowv1alpha1.ImageSubscription) error {
 	var errs field.ErrorList
 	errs = append(errs, validateSourceRef(field.NewPath("spec", "source"), sub.Spec.Source)...)
@@ -110,10 +151,95 @@ func validateSubscriptionShape(sub *imageflowv1alpha1.ImageSubscription) error {
 	for i := range sub.Spec.Targets {
 		errs = append(errs, validateTarget(targetsPath.Index(i), &sub.Spec.Targets[i])...)
 	}
+	errs = append(errs, validateImageReferenceFormat(field.NewPath("spec", "imageReferenceFormat"),
+		sub.Spec.ImageReferenceFormat)...)
 	if len(errs) > 0 {
 		return apierrors.NewInvalid(subscriptionGK, sub.Name, errs)
 	}
 	return nil
+}
+
+// validateImageReferenceFormat is the secondary enum defense required by spec
+// decision 5: the kubebuilder enum on the field is the primary check, but the
+// webhook re-verifies because it also guards the status subresource and
+// objects written before the enum existed. Empty stays valid here — it means
+// "not yet defaulted" and validates as Digest everywhere else.
+func validateImageReferenceFormat(p *field.Path, format imageflowv1alpha1.ImageReferenceFormat) field.ErrorList {
+	if format == "" {
+		return nil
+	}
+	if _, ok := desiredImagePatterns[format]; !ok {
+		return field.ErrorList{field.NotSupported(p, format, []string{
+			string(imageflowv1alpha1.ImageReferenceFormatDigest),
+			string(imageflowv1alpha1.ImageReferenceFormatTag),
+			string(imageflowv1alpha1.ImageReferenceFormatDigestWithTag),
+		})}
+	}
+	return nil
+}
+
+// validateNewDesiredImages checks status.targets[].desiredImage against the
+// reference grammar of the selected imageReferenceFormat (ADR-012 §6). An
+// empty desiredImage means "nothing delivered yet" and always passes. An
+// unknown format was already reported by validateImageReferenceFormat, so no
+// pattern check runs on top of it.
+//
+// The webhook cannot see which subresource a request targets, so the caller
+// passes strict=true whenever the request provably writes status (create,
+// or an update whose spec is unchanged — a main-resource update always
+// carries a possibly-stale spec, and the API server drops its status
+// anyway). Under strict=false only values that differ from the stored
+// status are checked: requiring the carried stale status to match a just-
+// switched format would otherwise make every format upgrade impossible once
+// a value was delivered.
+func validateNewDesiredImages(oldSub, newSub *imageflowv1alpha1.ImageSubscription, strict bool) error {
+	format := effectiveImageReferenceFormat(newSub.Spec.ImageReferenceFormat)
+	pattern, ok := desiredImagePatterns[format]
+	if !ok {
+		return nil
+	}
+	p := field.NewPath("status", "targets")
+	var errs field.ErrorList
+	for i := range newSub.Status.Targets {
+		desired := newSub.Status.Targets[i].DesiredImage
+		if desired == "" || pattern.MatchString(desired) {
+			continue
+		}
+		if !strict && oldSub != nil && i < len(oldSub.Status.Targets) &&
+			oldSub.Status.Targets[i].DesiredImage == desired {
+			// Unchanged value carried by a main-resource update: the API
+			// server drops it, so it is not entering with this request.
+			continue
+		}
+		errs = append(errs, field.Invalid(p.Index(i).Child("desiredImage"), desired,
+			fmt.Sprintf("must match %s for imageReferenceFormat=%s: %s",
+				pattern.String(), format, "the reference grammar of the selected format (ADR-012 §6)")))
+	}
+	if len(errs) > 0 {
+		return apierrors.NewInvalid(subscriptionGK, newSub.Name, errs)
+	}
+	return nil
+}
+
+// validateFormatTransition implements the format downgrade protection (T3,
+// #24): once a subscription writes Tag or DigestWithTag references, switching
+// back to Digest would silently rewrite every target image field to a
+// different reference shape, so the downgrade is rejected. Upgrades and the
+// lateral Tag → DigestWithTag move stay allowed. Status-subresource updates
+// carry an unchanged spec, so they never trip this check.
+func validateFormatTransition(oldSub, newSub *imageflowv1alpha1.ImageSubscription) error {
+	oldFormat := effectiveImageReferenceFormat(oldSub.Spec.ImageReferenceFormat)
+	newFormat := effectiveImageReferenceFormat(newSub.Spec.ImageReferenceFormat)
+	if newFormat != imageflowv1alpha1.ImageReferenceFormatDigest ||
+		oldFormat == imageflowv1alpha1.ImageReferenceFormatDigest {
+		return nil
+	}
+	return apierrors.NewInvalid(subscriptionGK, newSub.Name, field.ErrorList{
+		field.Invalid(field.NewPath("spec", "imageReferenceFormat"), newSub.Spec.ImageReferenceFormat,
+			fmt.Sprintf("format downgrade from %s to Digest is forbidden: it would silently rewrite"+
+				" every target image field back to the digest-only shape (T3, #24); recreate the"+
+				" subscription if a downgrade is really intended", oldFormat)),
+	})
 }
 
 // validateSourceRef checks the logical "<stream>:<tag>" form (ADR-002): users

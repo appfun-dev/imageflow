@@ -53,6 +53,7 @@ xerj def --prefix ref-controller-runtime <符号名>
 | 触发条件 | 专家 / 模型 | 调用方式 |
 |---------|-----------|---------|
 | TDD、纯测试子任务：单元测试、集成测试、验收测试 | 🎯 Kent Beck·极限编程专家 — provider `kimi-coding`，model `k3`，reasoning `max` | 优先 `wf_run_node`/`summon_expert`（支持 thinking 参数）；若仅可用 `subagent_fork`，见下方工具限制说明 |
+| 涉及特性开发的代码实现 | `/ub-mode` — provider `kimi-coding`，model `k3`，reasoning `max` | `subagent("/ub-mode\n" + task, { provider: "kimi-coding", model: "k3" })`；首行 `/ub-mode` 激活精简原则人设 |
 | 默认（无匹配） | 继承父会话模型 | `subagent(task)` 不覆盖参数 |
 
 ### ⚠️ 工具限制：reasoning 参数透传

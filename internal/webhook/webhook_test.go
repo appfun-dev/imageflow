@@ -302,6 +302,220 @@ func TestValidateSubscriptionShapeRejects(t *testing.T) {
 	}
 }
 
+// --- T3 (#24): imageReferenceFormat-conditional desiredImage validation ---
+
+func TestValidateDesiredImageFormatsAccepts(t *testing.T) {
+	const digestRef = "registry.example.com/payments/api@sha256:" +
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	accepted := map[string]struct {
+		format       imageflowv1alpha1.ImageReferenceFormat
+		desiredImage string
+	}{
+		"empty desiredImage passes under every format (nothing delivered yet)": {
+			imageflowv1alpha1.ImageReferenceFormatDigest, "",
+		},
+		"empty format means Digest (mutating defaulting, ADR-012 §3)": {
+			"", digestRef,
+		},
+		"Digest format with digest reference": {
+			imageflowv1alpha1.ImageReferenceFormatDigest, digestRef,
+		},
+		"Digest pattern tolerates a registry port (spec decision 3 regex)": {
+			imageflowv1alpha1.ImageReferenceFormatDigest,
+			"registry.example.com:5000/payments/api@sha256:" +
+				"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+		"Tag format with tag reference": {
+			imageflowv1alpha1.ImageReferenceFormatTag, "registry.example.com/payments/api:stable",
+		},
+		"DigestWithTag format with composite reference": {
+			imageflowv1alpha1.ImageReferenceFormatDigestWithTag,
+			"registry.example.com/payments/api:stable@sha256:" +
+				"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}
+	for name, tc := range accepted {
+		t.Run(name, func(t *testing.T) {
+			sub := testSubscription()
+			sub.Spec.ImageReferenceFormat = tc.format
+			sub.Status.Targets = []imageflowv1alpha1.TargetDeliveryStatus{{
+				TargetRef:    sub.Spec.Targets[0].TargetRef,
+				DesiredImage: tc.desiredImage,
+			}}
+			validator := &subscriptionValidator{}
+			if _, err := validator.ValidateCreate(context.Background(), sub); err != nil {
+				t.Fatalf("ValidateCreate() = %v, want acceptance", err)
+			}
+		})
+	}
+}
+
+func TestValidateDesiredImageFormatsRejects(t *testing.T) {
+	const digestRef = "registry.example.com/payments/api@sha256:" +
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	rejected := map[string]struct {
+		format       imageflowv1alpha1.ImageReferenceFormat
+		desiredImage string
+		wantMessage  string
+	}{
+		"Digest format rejects a bare tag reference": {
+			imageflowv1alpha1.ImageReferenceFormatDigest,
+			"registry.example.com/payments/api:stable",
+			"imageReferenceFormat=Digest",
+		},
+		"Digest format rejects a short hex digest": {
+			imageflowv1alpha1.ImageReferenceFormatDigest,
+			"registry.example.com/payments/api@sha256:0123abcd",
+			"imageReferenceFormat=Digest",
+		},
+		"Tag format rejects any digest-bearing reference": {
+			imageflowv1alpha1.ImageReferenceFormatTag,
+			digestRef,
+			"imageReferenceFormat=Tag",
+		},
+		"Tag format rejects the composite reference": {
+			imageflowv1alpha1.ImageReferenceFormatTag,
+			"registry.example.com/payments/api:stable@sha256:" +
+				"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			"imageReferenceFormat=Tag",
+		},
+		"Tag format rejects whitespace": {
+			imageflowv1alpha1.ImageReferenceFormatTag,
+			"registry.example.com/payments/api:sta ble",
+			"imageReferenceFormat=Tag",
+		},
+		"DigestWithTag format rejects a bare tag reference": {
+			imageflowv1alpha1.ImageReferenceFormatDigestWithTag,
+			"registry.example.com/payments/api:stable",
+			"imageReferenceFormat=DigestWithTag",
+		},
+		"DigestWithTag format rejects a digest-only reference": {
+			imageflowv1alpha1.ImageReferenceFormatDigestWithTag,
+			digestRef,
+			"imageReferenceFormat=DigestWithTag",
+		},
+		"unknown format is rejected as secondary enum defense": {
+			"digest",
+			digestRef,
+			"Unsupported value",
+		},
+	}
+	for name, tc := range rejected {
+		t.Run(name, func(t *testing.T) {
+			sub := testSubscription()
+			sub.Spec.ImageReferenceFormat = tc.format
+			sub.Status.Targets = []imageflowv1alpha1.TargetDeliveryStatus{{
+				TargetRef:    sub.Spec.Targets[0].TargetRef,
+				DesiredImage: tc.desiredImage,
+			}}
+			validator := &subscriptionValidator{}
+			_, err := validator.ValidateCreate(context.Background(), sub)
+			if err == nil {
+				t.Fatal("ValidateCreate() = nil, want rejection")
+			}
+			if !apierrors.IsInvalid(err) {
+				t.Fatalf("error must surface as Invalid (422): %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("error %q must contain %q", err.Error(), tc.wantMessage)
+			}
+		})
+	}
+}
+
+func TestValidateFormatTransition(t *testing.T) {
+	const (
+		digest        = imageflowv1alpha1.ImageReferenceFormatDigest
+		tag           = imageflowv1alpha1.ImageReferenceFormatTag
+		digestWithTag = imageflowv1alpha1.ImageReferenceFormatDigestWithTag
+	)
+	tests := []struct {
+		name        string
+		oldFormat   imageflowv1alpha1.ImageReferenceFormat
+		newFormat   imageflowv1alpha1.ImageReferenceFormat
+		wantReject  bool
+		wantMessage string
+	}{
+		{"unchanged Digest is allowed", digest, digest, false, ""},
+		{"unchanged Tag is allowed", tag, tag, false, ""},
+		{"upgrade Digest to Tag is allowed", digest, tag, false, ""},
+		{"upgrade Digest to DigestWithTag is allowed", digest, digestWithTag, false, ""},
+		{"lateral Tag to DigestWithTag is allowed", tag, digestWithTag, false, ""},
+		{"empty (pre-v1.2) to Digest is allowed", "", digest, false, ""},
+		{"downgrade Tag to Digest is rejected", tag, digest, true, "downgrade"},
+		{"downgrade DigestWithTag to Digest is rejected", digestWithTag, digest, true, "downgrade"},
+		{"clearing Tag back to empty is a downgrade and is rejected", tag, "", true, "downgrade"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldSub := testSubscription()
+			oldSub.Spec.ImageReferenceFormat = tc.oldFormat
+			newSub := oldSub.DeepCopy()
+			newSub.Spec.ImageReferenceFormat = tc.newFormat
+
+			validator := &subscriptionValidator{}
+			_, err := validator.ValidateUpdate(context.Background(), oldSub, newSub)
+			if !tc.wantReject {
+				if err != nil {
+					t.Fatalf("ValidateUpdate() = %v, want acceptance", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("ValidateUpdate() = nil, want rejection")
+			}
+			if !apierrors.IsInvalid(err) {
+				t.Fatalf("error must surface as Invalid (422): %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Fatalf("error %q must contain %q", err.Error(), tc.wantMessage)
+			}
+		})
+	}
+}
+
+// Stale desiredImage values written under a previous format must not block a
+// spec update (the API server drops status on main-resource updates anyway);
+// only values the request actually changes are validated against the current
+// format (T3, #24).
+func TestValidateDesiredImageStaleStatus(t *testing.T) {
+	const digestRef = "registry.example.com/payments/api@sha256:" +
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	withStatus := func(sub *imageflowv1alpha1.ImageSubscription, desired string) *imageflowv1alpha1.ImageSubscription {
+		sub.Status.Targets = []imageflowv1alpha1.TargetDeliveryStatus{{
+			TargetRef:    sub.Spec.Targets[0].TargetRef,
+			DesiredImage: desired,
+		}}
+		return sub
+	}
+
+	t.Run("stale digest value does not block the Digest to Tag upgrade", func(t *testing.T) {
+		oldSub := withStatus(testSubscription(), digestRef)
+		newSub := oldSub.DeepCopy()
+		newSub.Spec.ImageReferenceFormat = imageflowv1alpha1.ImageReferenceFormatTag
+		validator := &subscriptionValidator{}
+		if _, err := validator.ValidateUpdate(context.Background(), oldSub, newSub); err != nil {
+			t.Fatalf("ValidateUpdate() = %v, want acceptance (status is stale, not written)", err)
+		}
+	})
+
+	t.Run("a changed value is validated against the current format", func(t *testing.T) {
+		oldSub := withStatus(testSubscription(), digestRef)
+		newSub := oldSub.DeepCopy()
+		newSub.Spec.ImageReferenceFormat = imageflowv1alpha1.ImageReferenceFormatTag
+		newSub.Status.Targets[0].DesiredImage = "registry.example.com/payments/api:stable@sha256:" +
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		validator := &subscriptionValidator{}
+		_, err := validator.ValidateUpdate(context.Background(), oldSub, newSub)
+		if err == nil {
+			t.Fatal("ValidateUpdate() = nil, want rejection of the newly written value")
+		}
+		if !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "imageReferenceFormat=Tag") {
+			t.Fatalf("error must name the failing format: %v", err)
+		}
+	})
+}
+
 func TestValidateImageStreamShape(t *testing.T) {
 	stream := &imageflowv1alpha1.ImageStream{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "imageflow-system", Name: "payments-api"},

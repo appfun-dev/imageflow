@@ -6,7 +6,7 @@
 2. 从公共 Registry **导入**一个真实镜像，建立目录（ImageStream / ImageArtifact / 只读镜像视图）；
 3. 用一个 **ImageSubscription** 把目录里的 digest **投递**到真实工作负载；
 4. **观察**投递审计（recentDeliveries）、双命名空间 Events、rollout 状态与 Prometheus 指标；
-5. 附：Shipwright BuildRun → ImageStreamMapping 的推送登记管道示例（§15 场景 16 的两阶段模型）；
+5. 附：Shipwright BuildRun → ImageStreamMapping 的推送登记管道示例（§16 场景 16 的两阶段模型）；
 6. 附：BuildRun Watcher 自动登记路径（v1.1，消除 CI 胶水脚本）。
 
 预计用时：环境就绪后 30–60 分钟（含阅读）。所有命令都在仓库根目录执行。
@@ -79,7 +79,7 @@ kubectl get validatingwebhookconfiguration | grep imageflow # webhook 已注册
 ## 5. 建立目录：创建 ImageStream
 
 目录（ImageStream/ImageArtifact）由平台团队维护在 `imageflow-system`；应用团队只读消费
-（见第 10 节 RBAC）。本例登记公共镜像 `registry.k8s.io/pause:3.9`：
+（见第 11 节 RBAC）。本例登记公共镜像 `registry.k8s.io/pause:3.9`：
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -261,13 +261,101 @@ spec:
 ```
 
 控制器每 `intervalSeconds` 创建一次带 `imageflow.appfun.dev/import-source=scheduled` 标签的
-导入任务；外部 tag 指向的 digest 变化时自动登记（tag 不变、digest 变 ⇒ 真实镜像变化，§15 场景 17），
+导入任务；外部 tag 指向的 digest 变化时自动登记（tag 不变、digest 变 ⇒ 真实镜像变化，§16 场景 17），
 stream 上出现 `TagDriftDetected` 事件，订阅链自动把新 digest 投递到工作负载。
 
 > v1 限制：计划导入仅支持**匿名可拉取**的 Registry（tag 级没有 pullSecret 字段；
 > 凭据仅用于按需 `ImageStreamImport.spec.pullSecretRef`，见 `docs/ops.md`）。
 
-## 10. 团队 RBAC（目录消费 vs 平台管理）
+## 10. 镜像引用格式选择（imageReferenceFormat）
+
+v1.2 新增 `ImageSubscription.spec.imageReferenceFormat` 字段，允许按订阅级别选择写入目标
+workload 镜像字段的引用格式。三种格式各有适用场景：
+
+| 格式 | 写入值示例 | 特点 | 适用场景 |
+|---|---|---|---|
+| `Digest`（默认） | `registry.example.com/app@sha256:abc123…` | 不可变、确定性传递，v1 行为 | 生产环境首选；需要精确版本锁定 |
+| `Tag` | `registry.example.com/app:v1.2.0` | 人类可读；兼容仅识别 tag 的工具 | CI/CD 系统、镜像扫描器或运维面板仅支持 tag 引用时 |
+| `DigestWithTag` | `registry.example.com/app:v1.2.0@sha256:abc123…` | OCI 标准复合格式，兼顾可读性与确定性 | 同时需要 tag 展示和 digest 不可变性 |
+
+### YAML 示例
+
+**Digest（默认，可省略字段）**：
+
+```yaml
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageSubscription
+metadata:
+  name: web-live
+  namespace: quickstart-team
+spec:
+  imageReferenceFormat: Digest    # 默认值，mutating webhook 自动填充；可省略
+  source:
+    kind: ImageStreamTag
+    name: quickstart-api:stable
+    namespace: imageflow-system
+  targets:
+  - targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      namespace: quickstart-team
+      name: web
+    containerNames:
+    - web
+```
+
+**Tag（兼容仅识别 tag 的工具）**：
+
+```yaml
+spec:
+  imageReferenceFormat: Tag       # 写入 repo:tag 格式
+  source:
+    kind: ImageStreamTag
+    name: quickstart-api:stable
+    namespace: imageflow-system
+  targets:
+  - targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      namespace: quickstart-team
+      name: web
+    containerNames:
+    - web
+```
+
+> Tag 模式下 `status.targets[].resolvedDigest` 会记录实际解析到的 digest，用于排查 tag 漂移
+> （详见 `docs/ops.md` §10 tag 漂移排查）。`ImageApplied` 比较仍基于 digest，tag 指向新
+> digest 时会被正确检测为"未应用"。
+
+**DigestWithTag（OCI 复合格式）**：
+
+```yaml
+spec:
+  imageReferenceFormat: DigestWithTag   # 写入 repo:tag@sha256:<hex>
+  source:
+    kind: ImageStreamTag
+    name: quickstart-api:stable
+    namespace: imageflow-system
+  targets:
+  - targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      namespace: quickstart-team
+      name: web
+    containerNames:
+    - web
+```
+
+### 注意事项
+
+- **spec 级粒度**：整个订阅统一格式，所有 target 共享；不支持 per-target 覆盖。
+- **向后兼容**：已有订阅无需任何变更——省略字段时 mutating webhook 自动填充 `Digest`，
+  行为与 v1 完全一致。
+- **授权不变**：format 选择不影响 SAR 授权检查和 admission 校验，tag 写入仍受完整的
+  订阅授权链保护（ADR-003）。
+- **决策背景**：ADR-012；完整 spec 见 `docs/spec/imageflow-v1.2-image-reference-format.md`。
+
+## 11. 团队 RBAC（目录消费 vs 平台管理）
 
 - **应用团队**（只读浏览目录 + 自己 ns 内全权管理订阅/任务）：
 
@@ -287,7 +375,7 @@ stream 上出现 `TagDriftDetected` 事件，订阅链自动把新 digest 投递
   补授权后周期复核（`--sar-recheck-period`，默认 10m）自动翻转状态，无需重建订阅。
 - **平台团队**：`imageflow-system` 管理域 + stream 族全权（管理员自带）。
 
-## 11. 指标与运维入口
+## 12. 指标与运维入口
 
 v1 指标为**集群内明文** `:8080`（ADR-010 裁定，升级路径见 ADR）：
 
@@ -299,7 +387,7 @@ curl -s localhost:8080/metrics | grep '^imageflow_' | head
 指标清单与语义以 `docs/metrics-contract.md`（§T1–§T11）为准；全部 flags、Conditions 词汇表、
 导入失败码与排查路径见 `docs/ops.md`。
 
-## 12. Shipwright：构建成功 → 登记 → 投递（推送路径）
+## 13. Shipwright：构建成功 → 登记 → 投递（推送路径）
 
 ImageFlow 不做构建（复用 Shipwright，ADR-007：**永不推送、永不构建**）。「推送路径」= 构建产物
 已经推到 Registry 后，用 `ImageStreamMapping` 把 `(stream, tag, digest)` 登记进目录（T4），
@@ -383,7 +471,7 @@ EOF
 fi
 ```
 
-**两个阶段的结果分别报告**（§15 场景 16）：
+**两个阶段的结果分别报告**（§16 场景 16）：
 
 | 阶段 | 载体 | 成功 | 失败 |
 |---|---|---|---|
@@ -393,11 +481,11 @@ fi
 构建成功、登记失败时两者互不掩盖：BuildRun 仍是 Succeeded，Mapping 明确报告失败原因
 （如 `InvalidImageReference`、`StreamNotFound`），修好后可用同名任务重试或新建任务。
 
-## 13. Shipwright BuildRun → ImageFlow 自动登记（BuildRun Watcher）
+## 14. Shipwright BuildRun → ImageFlow 自动登记（BuildRun Watcher）
 
 v1.1 新增 **BuildRun Watcher**：一个 feature-gated 可选 controller，watch Shipwright
 BuildRun 对象，在其 Succeeded 且携带 digest 时**自动执行等价于 ImageStreamMapping 的
-登记逻辑**，消除第 12 节中 CI 流水线侧的胶水脚本。
+登记逻辑**，消除第 13 节中 CI 流水线侧的胶水脚本。
 
 > **BC-002**：ImageFlow **不执行构建**——仅观察 Shipwright BuildRun status 并登记其产物。
 > 构建能力完全由 Shipwright 提供。
@@ -460,11 +548,11 @@ kubectl -n quickstart-team get imagesubscription web-live \
   -o jsonpath='{.status.recentDeliveries}' | jq
 ```
 
-> 与第 12 节手动 Mapping 路径的区别：Watcher 路径无需 CI 胶水脚本，但要求
+> 与第 13 节手动 Mapping 路径的区别：Watcher 路径无需 CI 胶水脚本，但要求
 > `--enable-buildrun-watcher=true` + Shipwright CRD 存在。两条路径语义完全一致
 > （幂等、同 `(stream, tag, digest)` 重复 = no-op），可互换使用。
 
-## 14. 清理
+## 15. 清理
 
 ```bash
 make undeploy IMG=controller:quickstart    # 删除 config/default 部署
@@ -474,7 +562,7 @@ kind delete cluster --name quickstart
 git checkout config/manager/kustomization.yaml   # 还原 kustomize edit set image 的本地改动
 ```
 
-## 15. 常见问题速查
+## 16. 常见问题速查
 
 | 现象 | 第一步 |
 |---|---|
@@ -483,7 +571,7 @@ git checkout config/manager/kustomization.yaml   # 还原 kustomize edit set ima
 | 订阅 `Forbidden=True` | 创建者缺目标 ns 的 `update` 权限（ADR-003）；补 RoleBinding 后等一个 recheck 周期 |
 | 导入任务 `Complete=False/Failed` | reason 即 12 个稳定失败码之一；对照 `docs/ops.md` 排查表 |
 | 投递后 rollout 卡在 Progressing/Failed | `kubectl -n <target-ns> rollout status`；digest 不可拉取会如实 Failed（镜像字段仍是已应用的 digest） |
-| 指标为空 | 明文 `:8080` 仅集群内可达，用第 11 节 port-forward；ADR-010 |
+| 指标为空 | 明文 `:8080` 仅集群内可达，用第 12 节 port-forward；ADR-010 |
 
-更多：`docs/ops.md`（部署/flags/指标/Conditions/排查）、`docs/scenario-map.md`（§15 场景 ↔ 命名用例）、
+更多：`docs/ops.md`（部署/flags/指标/Conditions/排查）、`docs/scenario-map.md`（§16 场景 ↔ 命名用例）、
 `GLOSSARY.md`（领域词汇）、`docs/adr/`（决策记录）。

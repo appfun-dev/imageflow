@@ -1460,3 +1460,280 @@ func TestSubscriptionDeliveryAggregateWorstState(t *testing.T) {
 		t.Fatalf("one apply + one status write expected: %+v", f.audit)
 	}
 }
+
+// --- v1.2 image reference formats (T4, ADR-012, spec decisions 1/2/7) -------
+//
+// The engine resolves the catalog association as a digest reference (the
+// ImageStream.status contract is unchanged) and renders the value WRITTEN to
+// target fields per spec.imageReferenceFormat: Digest keeps the v1 behavior,
+// Tag writes <repo>:<tag>, DigestWithTag writes the OCI composite
+// <repo>:<tag>@sha256:<hex>. Tag/DigestWithTag also report the resolved digest
+// reference on status.targets[].resolvedDigest for observability and drift
+// detection.
+
+var (
+	t9cTagRef     = "quay.io/example/checkout:" + t9cTagName
+	t9cCompositeA = strings.Replace(t9cDigestA, "@", ":"+t9cTagName+"@", 1)
+	t9cCompositeB = strings.Replace(t9cDigestB, "@", ":"+t9cTagName+"@", 1)
+)
+
+func t9cFormatSub(format imageflowv1alpha1.ImageReferenceFormat) *imageflowv1alpha1.ImageSubscription {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	sub.Spec.ImageReferenceFormat = format
+	return sub
+}
+
+// TestDeliveryFormatEmptyAndDigestKeepV1Behavior pins backward compatibility:
+// an empty (pre-v1.2 object, no mutating defaulting) or explicit Digest format
+// writes the digest reference exactly as v1 did, with no resolvedDigest.
+func TestDeliveryFormatEmptyAndDigestKeepV1Behavior(t *testing.T) {
+	for _, format := range []imageflowv1alpha1.ImageReferenceFormat{
+		"", imageflowv1alpha1.ImageReferenceFormatDigest,
+	} {
+		t.Run("format="+string(format), func(t *testing.T) {
+			sub := t9cFormatSub(format)
+			deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+			f := newT9cFixture(t, config.Config{}, sub,
+				t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+
+			if _, err := f.reconcile(t); err != nil {
+				t.Fatalf("delivery pass failed: %v", err)
+			}
+			if f.audit.applies != 1 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+				t.Fatalf("one apply + one status write expected, got %+v", f.audit)
+			}
+			if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cDigestA {
+				t.Fatalf("container image = %q, want the v1 digest reference %q", image, t9cDigestA)
+			}
+			entry := t9cEntry(f.getSub(t), t9cDeployName)
+			if entry == nil || entry.DesiredImage != t9cDigestA || entry.ObservedImage != t9cDigestA ||
+				entry.ResolvedDigest != "" || !entry.ImageApplied || entry.Reason != TargetReasonApplied {
+				t.Fatalf("Digest entry mismatch (resolvedDigest must stay empty): %+v", entry)
+			}
+			if got := f.getSub(t); len(got.Status.RecentDeliveries) != 1 ||
+				got.Status.RecentDeliveries[0].NewImage != t9cDigestA {
+				t.Fatalf("delivery record must carry the digest reference: %+v", got.Status.RecentDeliveries)
+			}
+		})
+	}
+}
+
+// TestDeliveryFormatTagWritesTagAndResolvedDigest pins the Tag contract: the
+// target field and desired/observed status carry <repo>:<tag> while
+// resolvedDigest reports the digest truth; ImageApplied compares the tag
+// string (spec decision 7); the delivery record keeps the digest reference.
+func TestDeliveryFormatTagWritesTagAndResolvedDigest(t *testing.T) {
+	sub := t9cFormatSub(imageflowv1alpha1.ImageReferenceFormatTag)
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("delivery pass failed: %v", err)
+	}
+	if f.audit.applies != 1 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("one apply + one status write expected, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cTagRef {
+		t.Fatalf("container image = %q, want the tag reference %q", image, t9cTagRef)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.DesiredImage != t9cTagRef || entry.ObservedImage != t9cTagRef ||
+		entry.ResolvedDigest != t9cDigestA || !entry.ImageApplied || entry.Reason != TargetReasonApplied {
+		t.Fatalf("Tag entry mismatch: %+v", entry)
+	}
+	got := f.getSub(t)
+	if len(got.Status.RecentDeliveries) != 1 || got.Status.RecentDeliveries[0].NewImage != t9cDigestA {
+		t.Fatalf("record must keep the digest truth (NewImage pattern is digest-only): %+v",
+			got.Status.RecentDeliveries)
+	}
+	for _, e := range drainT9cEvents(f.recorder) {
+		if !strings.Contains(e, t9cTagRef) {
+			t.Fatalf("delivery event must name the written tag reference: %s", e)
+		}
+	}
+
+	// Steady state: tag-string equality suppresses every write.
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady-state pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady state must be write-free, got %+v", f.audit)
+	}
+}
+
+// TestDeliveryFormatTagDriftUpdatesResolvedDigestOnly pins the drift story of
+// the simplified Tag comparison (spec decision 7): a new digest behind the
+// same tag leaves the written tag string unchanged (zero applies, no new
+// record) but flips status.targets[].resolvedDigest so the drift is visible.
+func TestDeliveryFormatTagDriftUpdatesResolvedDigestOnly(t *testing.T) {
+	sub := t9cFormatSub(imageflowv1alpha1.ImageReferenceFormatTag)
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("initial delivery failed: %v", err)
+	}
+	drainT9cEvents(f.recorder)
+	f.clock.Advance(time.Minute)
+
+	f.updateStream(t, t9cDigestB, t9cStart.Add(time.Minute))
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("drift pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("same tag string means zero applies (decision 7), got %+v", f.audit)
+	}
+	if f.audit.statusWrites != 1 {
+		t.Fatalf("resolvedDigest flip must persist one status write, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cTagRef {
+		t.Fatalf("tag drift must not rewrite the field, got %q", image)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.DesiredImage != t9cTagRef || entry.ResolvedDigest != t9cDigestB ||
+		!entry.ImageApplied || entry.Reason != TargetReasonApplied {
+		t.Fatalf("drift entry mismatch: %+v", entry)
+	}
+	got := f.getSub(t)
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("a same-tag drift is not a delivery: %+v", got.Status.RecentDeliveries)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("a same-tag drift must be event-free, got %v", events)
+	}
+}
+
+// TestDeliveryFormatDigestWithTagWritesComposite pins the composite contract:
+// the target field carries <repo>:<tag>@sha256:<hex> and resolvedDigest the
+// plain digest reference; a digest change re-renders the composite, so it is
+// a real value-changing delivery.
+func TestDeliveryFormatDigestWithTagWritesComposite(t *testing.T) {
+	sub := t9cFormatSub(imageflowv1alpha1.ImageReferenceFormatDigestWithTag)
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("delivery pass failed: %v", err)
+	}
+	if f.audit.applies != 1 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("one apply + one status write expected, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cCompositeA {
+		t.Fatalf("container image = %q, want the composite %q", image, t9cCompositeA)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.DesiredImage != t9cCompositeA || entry.ObservedImage != t9cCompositeA ||
+		entry.ResolvedDigest != t9cDigestA || !entry.ImageApplied || entry.Reason != TargetReasonApplied {
+		t.Fatalf("composite entry mismatch: %+v", entry)
+	}
+
+	// A new digest re-renders the composite: value-changing delivery.
+	drainT9cEvents(f.recorder)
+	f.clock.Advance(time.Minute)
+	f.updateStream(t, t9cDigestB, t9cStart.Add(time.Minute))
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("composite re-delivery failed: %v", err)
+	}
+	if f.audit.applies != 1 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("composite digest change must deliver once, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cCompositeB {
+		t.Fatalf("container image = %q, want the new composite %q", image, t9cCompositeB)
+	}
+	entry = t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.DesiredImage != t9cCompositeB || entry.ResolvedDigest != t9cDigestB {
+		t.Fatalf("re-delivered composite entry mismatch: %+v", entry)
+	}
+	if got := f.getSub(t); len(got.Status.RecentDeliveries) != 2 ||
+		got.Status.RecentDeliveries[0].NewImage != t9cDigestB {
+		t.Fatalf("composite re-delivery must be recorded: %+v", got.Status.RecentDeliveries)
+	}
+}
+
+// TestDeliveryFormatTagStillRejectsNonDigestCatalog pins the unchanged catalog
+// contract under every format: ImageStream.status carries digest references
+// only (formats shape what is WRITTEN, not what the catalog stores), so a
+// tag-only association is refused with zero writes even in Tag mode.
+func TestDeliveryFormatTagStillRejectsNonDigestCatalog(t *testing.T) {
+	sub := t9cFormatSub(imageflowv1alpha1.ImageReferenceFormatTag)
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub,
+		t9cStream(t9cInitialImage, t9cStart.Add(-time.Minute)), deploy)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("invalid catalog pass must not error: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("non-digest catalog must produce zero target writes, got %+v", f.audit)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonInvalidImageReference ||
+		entry.DesiredImage != "" || entry.ResolvedDigest != "" {
+		t.Fatalf("invalid-catalog entry mismatch: %+v", entry)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("workload image changed despite the invalid catalog: %s", image)
+	}
+}
+
+// TestDeliveryDesiredImageForFormat pins the pure rendering helper behind
+// resolveSource: the digest reference stays the catalog truth while the
+// written value and resolvedDigest follow the format (spec decisions 1/2).
+func TestDeliveryDesiredImageForFormat(t *testing.T) {
+	cases := []struct {
+		name               string
+		format             imageflowv1alpha1.ImageReferenceFormat
+		wantDesired        string
+		wantResolvedDigest string
+	}{
+		{"empty defaults to digest", "", t9cDigestA, ""},
+		{"digest", imageflowv1alpha1.ImageReferenceFormatDigest, t9cDigestA, ""},
+		{"tag", imageflowv1alpha1.ImageReferenceFormatTag, t9cTagRef, t9cDigestA},
+		{"digest with tag", imageflowv1alpha1.ImageReferenceFormatDigestWithTag, t9cCompositeA, t9cDigestA},
+		{"unknown degrades to v1 digest", "Bogus", t9cDigestA, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			desired, resolvedDigest := desiredImageForFormat(tc.format, t9cDigestA, t9cTagName)
+			if desired != tc.wantDesired || resolvedDigest != tc.wantResolvedDigest {
+				t.Fatalf("desiredImageForFormat(%q) = (%q, %q), want (%q, %q)",
+					tc.format, desired, resolvedDigest, tc.wantDesired, tc.wantResolvedDigest)
+			}
+		})
+	}
+}
+
+// TestDeliveryReferenceMatchesFormat pins the last-mile write guard: the value
+// the engine is about to write must match the grammar of the selected format
+// (the same shapes the T3 webhook enforces on persisted desiredImage).
+func TestDeliveryReferenceMatchesFormat(t *testing.T) {
+	cases := []struct {
+		format imageflowv1alpha1.ImageReferenceFormat
+		ref    string
+		want   bool
+	}{
+		{"", t9cDigestA, true},
+		{imageflowv1alpha1.ImageReferenceFormatDigest, t9cDigestA, true},
+		{imageflowv1alpha1.ImageReferenceFormatDigest, t9cTagRef, false},
+		// The Digest grammar's repo part allows ':' (registry ports), so a
+		// composite structurally matches it too — the same overlap the T3
+		// webhook's canonical patterns have (the guard mirrors the webhook).
+		{imageflowv1alpha1.ImageReferenceFormatDigest, t9cCompositeA, true},
+		{imageflowv1alpha1.ImageReferenceFormatTag, t9cTagRef, true},
+		{imageflowv1alpha1.ImageReferenceFormatTag, t9cDigestA, false},
+		{imageflowv1alpha1.ImageReferenceFormatTag, t9cCompositeA, false},
+		{imageflowv1alpha1.ImageReferenceFormatDigestWithTag, t9cCompositeA, true},
+		{imageflowv1alpha1.ImageReferenceFormatDigestWithTag, t9cDigestA, false},
+		{imageflowv1alpha1.ImageReferenceFormatDigestWithTag, t9cTagRef, false},
+	}
+	for _, tc := range cases {
+		if got := referenceMatchesFormat(tc.format, tc.ref); got != tc.want {
+			t.Errorf("referenceMatchesFormat(%q, %q) = %v, want %v", tc.format, tc.ref, got, tc.want)
+		}
+	}
+}
