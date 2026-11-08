@@ -1536,7 +1536,10 @@ func TestEngineSteadyStatePreservesObserverRolloutVerdict(t *testing.T) {
 	source := sourceState{
 		spec: t11uSourceRef(), name: t11uSourceLogical,
 		ref: t11uRefA, digest: t11uDigestA,
-		created: ptr.To(metav1.NewTime(t11uStart.Add(-90 * time.Second))),
+		// Digest format (v1.2 T4): the written/compared value is the digest
+		// reference itself; resolvedDigest stays empty.
+		desiredImage: t11uRefA,
+		created:      ptr.To(metav1.NewTime(t11uStart.Add(-90 * time.Second))),
 	}
 	base := t11uSeededEntry(deployRef, t11uRefA)
 	base.RolloutStatus = imageflowv1alpha1.RolloutSucceeded // observer-written verdict

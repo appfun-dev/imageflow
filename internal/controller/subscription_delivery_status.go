@@ -201,6 +201,10 @@ func mergeEntry(
 
 	if out.setDesired {
 		merged.DesiredImage = out.desiredImage
+		// resolvedDigest reports the digest truth for Tag/DigestWithTag
+		// (observability + drift detection, spec decision 2); Digest clears
+		// it — DesiredImage already carries the digest there.
+		merged.ResolvedDigest = source.resolvedDigest
 	}
 	if out.setObserved {
 		merged.ObservedImage = out.observedImage
@@ -260,7 +264,7 @@ func planEffects(
 	now time.Time,
 	reasonChanged bool,
 ) {
-	freshConverged := base.DesiredImage == source.ref &&
+	freshConverged := base.DesiredImage == source.desiredImage &&
 		base.ImageApplied &&
 		base.Reason == TargetReasonApplied
 
@@ -344,12 +348,12 @@ func imageAppliedEvent(out *deliveryOutcome, source sourceState, valueChanged bo
 	message := fmt.Sprintf(
 		"Image change delivered: %s of %s now reference %s (previous field value: %s); "+
 			"source %s, rollout observation is independent of this field write (ADR-005 §3)",
-		out.locator, authz.FormatTarget(out.ref), source.ref, previous, source.name)
+		out.locator, authz.FormatTarget(out.ref), source.desiredImage, previous, source.name)
 	if !valueChanged {
 		message = fmt.Sprintf(
 			"Delivery confirmed: %s of %s already reference %s; this subscription claimed the "+
 				"field ownership via SSA (exclusivity registry, ADR-008); source %s",
-			out.locator, authz.FormatTarget(out.ref), source.ref, source.name)
+			out.locator, authz.FormatTarget(out.ref), source.desiredImage, source.name)
 	}
 	return plannedEvent{
 		eventType:    corev1.EventTypeNormal,
