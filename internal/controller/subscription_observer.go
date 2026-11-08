@@ -79,6 +79,7 @@ import (
 	"github.com/appfun-dev/imageflow/internal/authz"
 	"github.com/appfun-dev/imageflow/internal/clock"
 	"github.com/appfun-dev/imageflow/internal/config"
+	"github.com/appfun-dev/imageflow/internal/controller/cueeval"
 )
 
 // Production controller and recorder names. Integration tests build their
@@ -87,6 +88,9 @@ import (
 const (
 	observerControllerName           = "subscription-observer"
 	recorderNameSubscriptionObserver = "imageflow-subscription-observer"
+	// statusPolicySystemNamespace is the only namespace allowed for CUE status
+	// policy ConfigMaps (ADR-013 D9). ConfigMap watch filters to this namespace.
+	statusPolicySystemNamespace = "imageflow-system"
 )
 
 // Observer-owned reasons (T11 extends the frozen T9 TargetReason* vocabulary —
@@ -112,14 +116,21 @@ const (
 	EventReasonDeliverySuperseded = "DeliverySuperseded"
 )
 
-// StatusPolicyEvaluated Condition vocabulary: the explicit v1 contract that
-// health is never fabricated (ADR-005 §4/§5). Status is always False in v1 —
-// no evaluator runs — and the reason distinguishes "nobody asked for one"
-// from "one was asked for but the evaluator is deferred to v1.1".
+// StatusPolicyEvaluated Condition vocabulary (ADR-005 §4/§5, ADR-013 D6):
+// v1.3 activates the CUE evaluator. Status=True when all referenced policies
+// evaluate successfully; Status=False with a typed Reason on error. The
+// legacy EvaluatorDeferred reason is preserved for objects whose
+// statusPolicyRef lacks rolloutKey/healthKey (backward compat).
 const (
 	ConditionTypeStatusPolicyEvaluated  = "StatusPolicyEvaluated"
 	ReasonStatusPolicyNotConfigured     = "NotConfigured"
 	ReasonStatusPolicyEvaluatorDeferred = "EvaluatorDeferred"
+	// v1.3 evaluator-active reasons (ADR-013 D6).
+	ReasonStatusPolicyEvaluated     = "Evaluated"
+	ReasonStatusPolicyCompileError  = "CompileError"
+	ReasonStatusPolicyEvalError     = "EvalError"
+	ReasonStatusPolicyTimeout       = "Timeout"
+	ReasonStatusPolicyInputTooLarge = "InputTooLarge"
 )
 
 // auditImageNoneRecorded renders "no previous image" in audit surfaces
@@ -215,6 +226,9 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 	if timeSource == nil {
 		timeSource = clock.Real{}
 	}
+	// T3: Create shared CUE evaluator for status policy evaluation (ADR-013 D5).
+	// The evaluator caches compiled policies; ConfigMap changes invalidate entries.
+	evaluator := cueeval.NewEvaluator()
 	r := NewSubscriptionObserverReconciler(
 		mgr.GetClient(),
 		mgr.GetAPIReader(),
@@ -222,6 +236,7 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 		timeSource,
 		opts.Config,
 		sharedObserverMetrics(),
+		evaluator,
 	)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
@@ -229,6 +244,9 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
 		Watches(&appsv1.DaemonSet{}, handler.EnqueueRequestsFromMapFunc(r.subsForWorkload), builder.WithPredicates(observerWorkloadStatusPredicate{})).
+		// T3: Watch ConfigMaps in imageflow-system namespace for CUE status policy changes (ADR-013 D5).
+		// Changes trigger cache invalidation and re-enqueue subscriptions referencing the changed ConfigMap.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.subsForConfigMap), builder.WithPredicates(observerConfigMapPredicate{})).
 		Complete(r)
 }
 
@@ -243,12 +261,13 @@ type SubscriptionObserverReconciler struct {
 	clock     clock.Clock
 	config    config.Config
 	metrics   *observerMetrics
+	evaluator *cueeval.Evaluator // T3: CUE status evaluator for ConfigMap-triggered re-evaluation (ADR-013 D5)
 }
 
 // NewSubscriptionObserverReconciler builds the reconciler. A nil apiReader
 // falls back to the cached client; nil metrics build an unregistered collector
-// set for tests.
-func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader, recorder record.EventRecorder, clk clock.Clock, cfg config.Config, metrics *observerMetrics) *SubscriptionObserverReconciler {
+// set for tests; nil evaluator disables CUE status evaluation (T3).
+func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader, recorder record.EventRecorder, clk clock.Clock, cfg config.Config, metrics *observerMetrics, evaluator *cueeval.Evaluator) *SubscriptionObserverReconciler {
 	if apiReader == nil {
 		apiReader = cl
 	}
@@ -265,6 +284,7 @@ func NewSubscriptionObserverReconciler(cl client.Client, apiReader client.Reader
 		clock:     clk,
 		config:    cfg,
 		metrics:   metrics,
+		evaluator: evaluator,
 	}
 }
 
@@ -283,6 +303,7 @@ func (r *SubscriptionObserverReconciler) reader() client.Reader {
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreamtags;imagetags,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreamtags/status;imagetags/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 
 // Reconcile runs one observation pass: determine every observable target's
 // rollout from fresh native status, heal in-flight delivery records, write
@@ -328,6 +349,19 @@ type observerPass struct {
 	errs        []error
 	policyRefs  int // spec targets declaring a statusPolicyRef
 	targetCount int
+	// evalResults tracks per-target CUE evaluation outcomes for the
+	// StatusPolicyEvaluated Condition (T4, ADR-013 D6).
+	evalResults []targetEvalResult
+}
+
+// targetEvalResult records the CUE evaluation outcome for one target's
+// statusPolicyRef (T4, ADR-013 D6).
+type targetEvalResult struct {
+	ref       imageflowv1alpha1.TargetReference
+	success   bool
+	errClass  cueeval.ErrorClass
+	errReason string
+	message   string
 }
 
 // observerOutcome is the planned observation effect for one target.
@@ -337,10 +371,16 @@ type observerOutcome struct {
 	// rollout is the determined-or-persisted rollout status after this pass
 	// (drives record healing and the poll requeue).
 	rollout imageflowv1alpha1.RolloutStatus
+	// health is the CUE-evaluated health status (T4, ADR-013). Empty means
+	// no health evaluation was performed (evaluator deferred or not configured).
+	health imageflowv1alpha1.HealthStatus
 	// transition is non-nil when the persisted entry's rolloutStatus must
 	// move; it is applied only when the fresh state still matches `from`
 	// (stale plans are dropped and re-planned on the next trigger).
 	transition *rolloutTransition
+	// healthTransition is non-nil when the persisted entry's healthStatus
+	// must move as a result of CUE evaluation (T4).
+	healthTransition *healthTransition
 	// detMessage is the determination detail (native status summary or the
 	// honest-Unknown contract text) carried on the planned Event. The
 	// per-target Reason/Message stay owned by the delivery engine (they
@@ -348,7 +388,20 @@ type observerOutcome struct {
 	// travels in the dual-namespace Events, the StatusPolicyEvaluated
 	// Condition, and the rolloutStatus field itself.
 	detMessage string
-	errs       []error
+	// evalErrClass carries the CUE evaluation error class when evaluation
+	// failed for this target (T4, ADR-013 D6). Empty on success or when no
+	// evaluation was attempted.
+	evalErrClass cueeval.ErrorClass
+	// evalErrReason carries the machine-readable error reason from CUE
+	// evaluation failure (T4).
+	evalErrReason string
+	errs          []error
+}
+
+// healthTransition tracks a planned health status change from CUE evaluation.
+type healthTransition struct {
+	from imageflowv1alpha1.HealthStatus
+	to   imageflowv1alpha1.HealthStatus
 }
 
 type rolloutTransition struct {
@@ -375,6 +428,16 @@ func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *image
 		}
 		pass.outcomes = append(pass.outcomes, *out)
 		pass.errs = append(pass.errs, out.errs...)
+		// Collect CUE evaluation result for the StatusPolicyEvaluated Condition (T4).
+		if out.evalErrClass != "" || (target.StatusPolicyRef != nil && hasCUEKeys(target.StatusPolicyRef)) {
+			pass.evalResults = append(pass.evalResults, targetEvalResult{
+				ref:       out.ref,
+				success:   out.evalErrClass == "",
+				errClass:  out.evalErrClass,
+				errReason: out.evalErrReason,
+				message:   out.detMessage,
+			})
+		}
 		if out.rollout == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
 			// Poll fallback: watches can be missed; an in-flight rollout is
 			// re-judged on a bounded cadence until it reaches a terminal
@@ -383,6 +446,12 @@ func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *image
 		}
 	}
 	return pass
+}
+
+// hasCUEKeys reports whether the statusPolicyRef has at least one of
+// rolloutKey or healthKey set, indicating the v1.3 evaluator should run.
+func hasCUEKeys(ref *imageflowv1alpha1.StatusPolicyRef) bool {
+	return ref != nil && (ref.RolloutKey != "" || ref.HealthKey != "")
 }
 
 // observeTarget plans the observation effects for one spec target against
@@ -411,25 +480,46 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 
 	out := &observerOutcome{ref: ref, kindLabel: observerKindOther, rollout: entry.RolloutStatus}
 	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+
+	// T4: CUE evaluation path — when rolloutKey/healthKey are set and the
+	// evaluator is available, evaluate CUE policies for rollout/health
+	// (ADR-013 D3/D6). Native observation still runs for built-in kinds
+	// alongside CUE (ADR-006): CUE supplements, does not replace.
+	if hasCUEKeys(target.StatusPolicyRef) && r.evaluator != nil {
+		r.evaluateTargetWithCUE(ctx, sub, target, entry, out)
+	}
+
 	kindLabel, observable := observableBuiltinKind(gvk, target)
 	if !observable {
-		// Honest Unknown (ADR-005 §5, ADR-006): v1 has no evaluator and no
-		// native signal for this class. Any persisted non-terminal rollout
-		// state is flipped ONCE; the contract explanation rides on the Event
-		// (Reason/Message remain the engine's delivery-stage surface).
-		switch entry.RolloutStatus {
-		case imageflowv1alpha1.RolloutProgressing,
-			imageflowv1alpha1.RolloutSucceeded,
-			imageflowv1alpha1.RolloutFailed:
-			out.transition = &rolloutTransition{
-				from: entry.RolloutStatus,
-				to:   imageflowv1alpha1.RolloutUnknown,
+		// Non-observable class: if CUE evaluation ran above, its result
+		// stands. Otherwise fall back to honest Unknown (ADR-005 §5).
+		if out.evalErrClass == "" && !hasCUEKeys(target.StatusPolicyRef) {
+			// Legacy path: no CUE keys, no evaluator → honest Unknown.
+			switch entry.RolloutStatus {
+			case imageflowv1alpha1.RolloutProgressing,
+				imageflowv1alpha1.RolloutSucceeded,
+				imageflowv1alpha1.RolloutFailed:
+				out.transition = &rolloutTransition{
+					from: entry.RolloutStatus,
+					to:   imageflowv1alpha1.RolloutUnknown,
+				}
+				out.detMessage = honestUnknownMessage(gvk, target)
+				out.rollout = imageflowv1alpha1.RolloutUnknown
+			case imageflowv1alpha1.RolloutUnknown, "":
+				// "" is initialized by the engine; Unknown is already honest.
 			}
-			out.detMessage = honestUnknownMessage(gvk, target)
+		} else if out.evalErrClass != "" {
+			// CUE evaluation failed: rollout stays Unknown (ADR-005 §4).
+			if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown && entry.RolloutStatus != "" {
+				out.transition = &rolloutTransition{
+					from: entry.RolloutStatus,
+					to:   imageflowv1alpha1.RolloutUnknown,
+				}
+			}
 			out.rollout = imageflowv1alpha1.RolloutUnknown
-		case imageflowv1alpha1.RolloutUnknown, "":
-			// "" is initialized by the engine; Unknown is already honest.
 		}
+		// If CUE succeeded on a non-observable kind, out.rollout was already
+		// set by evaluateTargetWithCUE above.
 		return out
 	}
 
@@ -445,24 +535,193 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// keeps the persisted state (poll requeue covers reappearance).
 		return out
 	}
-	det := r.determineRollout(ctx, facts, target, *entry)
-	out.rollout = det.status
-	switch {
-	case det.status == entry.RolloutStatus:
-		// No verdict change: steady state. Reason/Message stay the engine's
-		// delivery-stage surface; the standing honest-Unknown explanation is
-		// the StatusPolicyEvaluated Condition (ADR-005 §4/§5).
-	case entry.RolloutStatus == "" && det.status == imageflowv1alpha1.RolloutUnknown:
-		// The engine initializes empty rolloutStatus to Unknown on its next
-		// pass with its own reason surface; the observer does not race it.
-	default:
-		out.transition = &rolloutTransition{
-			from: entry.RolloutStatus,
-			to:   det.status,
+	// Native rollout determination (ADR-006) runs for built-in kinds.
+	// However, if CUE evaluation already failed (evalErrClass set), native
+	// observation must NOT overwrite the rollout status — ADR-005 §4 requires
+	// all failures → Unknown. CUE supplements health; native handles rollout
+	// only when CUE has not already determined an error state.
+	if out.evalErrClass != "" {
+		// CUE failed: rollout stays Unknown, skip native override.
+		if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown && entry.RolloutStatus != "" {
+			out.transition = &rolloutTransition{
+				from: entry.RolloutStatus,
+				to:   imageflowv1alpha1.RolloutUnknown,
+			}
 		}
-		out.detMessage = det.message
+		out.rollout = imageflowv1alpha1.RolloutUnknown
+	} else {
+		det := r.determineRollout(ctx, facts, target, *entry)
+		out.rollout = det.status
+		switch {
+		case det.status == entry.RolloutStatus:
+			// No verdict change: steady state. Reason/Message stay the engine's
+			// delivery-stage surface; the standing honest-Unknown explanation is
+			// the StatusPolicyEvaluated Condition (ADR-005 §4/§5).
+		case entry.RolloutStatus == "" && det.status == imageflowv1alpha1.RolloutUnknown:
+			// The engine initializes empty rolloutStatus to Unknown on its next
+			// pass with its own reason surface; the observer does not race it.
+		default:
+			out.transition = &rolloutTransition{
+				from: entry.RolloutStatus,
+				to:   det.status,
+			}
+			out.detMessage = det.message
+		}
 	}
 	return out
+}
+
+// evaluateTargetWithCUE runs CUE evaluation for a target's rolloutKey and/or
+// healthKey (T4, ADR-013 D3/D6). It fetches the ConfigMap, builds input from
+// the target workload's unstructured status, and writes results onto the
+// outcome. Errors are classified per ADR-013 D6; all failures → Unknown.
+//
+//nolint:unparam // sub reserved for future audit/logging; kept for API stability.
+func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(
+	ctx context.Context, _ *imageflowv1alpha1.ImageSubscription,
+	target imageflowv1alpha1.SubscriptionTarget,
+	entry *imageflowv1alpha1.TargetDeliveryStatus, out *observerOutcome,
+) {
+	ref := target.StatusPolicyRef
+	if ref == nil {
+		return
+	}
+	logger := log.FromContext(ctx)
+
+	// Fetch the ConfigMap containing the CUE policy.
+	cm := &corev1.ConfigMap{}
+	cmKey := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
+	if err := r.client.Get(ctx, cmKey, cm); err != nil {
+		errClass := cueeval.EvalError
+		var errReason string
+		if apierrors.IsNotFound(err) {
+			errReason = "ConfigMapNotFound"
+		} else {
+			errReason = "ConfigMapFetchFailed"
+		}
+		out.evalErrClass = errClass
+		out.evalErrReason = errReason
+		out.detMessage = fmt.Sprintf("CUE status policy ConfigMap %s/%s not available: %v; rollout/health stay Unknown (ADR-005 §4)", ref.Namespace, ref.Name, err)
+		logger.V(1).Info("CUE policy ConfigMap fetch failed", "configmap", cmKey, "error", err)
+		return
+	}
+
+	// Fetch the target workload as unstructured to build CUE input.
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(schema.FromAPIVersionAndKind(target.TargetRef.APIVersion, target.TargetRef.Kind))
+	objKey := types.NamespacedName{Namespace: target.TargetRef.Namespace, Name: target.TargetRef.Name}
+	if err := r.reader().Get(ctx, objKey, obj); err != nil {
+		if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
+			out.errs = append(out.errs, err)
+		}
+		out.evalErrClass = cueeval.EvalError
+		out.evalErrReason = "WorkloadFetchFailed"
+		out.detMessage = fmt.Sprintf("target workload %s not available for CUE input: %v; rollout/health stay Unknown", authz.FormatTarget(target.TargetRef), err)
+		return
+	}
+
+	// Build CUE input from the workload's unstructured content.
+	input := obj.UnstructuredContent()
+
+	// Evaluate rolloutKey if set.
+	if ref.RolloutKey != "" {
+		policyCUE, ok := cm.Data[ref.RolloutKey]
+		if !ok {
+			out.evalErrClass = cueeval.EvalError
+			out.evalErrReason = "RolloutKeyMissing"
+			out.detMessage = fmt.Sprintf("CUE rollout policy key %q not found in ConfigMap %s/%s; rollout stays Unknown (ADR-005 §4)", ref.RolloutKey, ref.Namespace, ref.Name)
+			return
+		}
+		result, err := r.evaluator.Evaluate(ctx, policyCUE, input)
+		if err != nil {
+			evalErr, _ := cueeval.AsEvalError(err)
+			if evalErr != nil {
+				out.evalErrClass = evalErr.Class
+				out.evalErrReason = string(evalErr.Class)
+				out.detMessage = fmt.Sprintf("CUE rollout evaluation failed (%s): %s; rollout stays Unknown (ADR-005 §4)", evalErr.Class, evalErr.Message)
+			} else {
+				out.evalErrClass = cueeval.EvalError
+				out.evalErrReason = "UnknownError"
+				out.detMessage = fmt.Sprintf("CUE rollout evaluation failed: %v; rollout stays Unknown", err)
+			}
+			return
+		}
+		// Map CUE result status to RolloutStatus.
+		rolloutStatus := mapCUERolloutStatus(result.Status)
+		if out.rollout != rolloutStatus {
+			if entry.RolloutStatus != rolloutStatus {
+				out.transition = &rolloutTransition{
+					from: entry.RolloutStatus,
+					to:   rolloutStatus,
+				}
+			}
+			out.rollout = rolloutStatus
+			out.detMessage = fmt.Sprintf("CUE rollout evaluation: status=%s reason=%s message=%s", result.Status, result.Reason, result.Message)
+		}
+	}
+
+	// Evaluate healthKey if set.
+	if ref.HealthKey != "" {
+		policyCUE, ok := cm.Data[ref.HealthKey]
+		if !ok {
+			// Health key missing is not fatal for rollout; record partial error.
+			logger.V(1).Info("CUE health policy key missing", "key", ref.HealthKey, "configmap", cmKey)
+			if out.evalErrClass == "" {
+				out.evalErrClass = cueeval.EvalError
+				out.evalErrReason = "HealthKeyMissing"
+			}
+			return
+		}
+		result, err := r.evaluator.Evaluate(ctx, policyCUE, input)
+		if err != nil {
+			evalErr, _ := cueeval.AsEvalError(err)
+			if evalErr != nil {
+				// Only overwrite if rollout didn't already fail.
+				if out.evalErrClass == "" {
+					out.evalErrClass = evalErr.Class
+					out.evalErrReason = string(evalErr.Class)
+					out.detMessage = fmt.Sprintf("CUE health evaluation failed (%s): %s; health stays Unknown (ADR-005 §4)", evalErr.Class, evalErr.Message)
+				}
+			}
+			return
+		}
+		healthStatus := mapCUEHealthStatus(result.Status)
+		if entry.HealthStatus != healthStatus {
+			out.healthTransition = &healthTransition{
+				from: entry.HealthStatus,
+				to:   healthStatus,
+			}
+		}
+		out.health = healthStatus
+	}
+}
+
+// mapCUERolloutStatus maps a CUE evaluation result status string to the
+// RolloutStatus enum. Unrecognized values → Unknown (honest, ADR-005 §4).
+func mapCUERolloutStatus(status string) imageflowv1alpha1.RolloutStatus {
+	switch status {
+	case "Succeeded":
+		return imageflowv1alpha1.RolloutSucceeded
+	case "Failed":
+		return imageflowv1alpha1.RolloutFailed
+	case "Progressing":
+		return imageflowv1alpha1.RolloutProgressing
+	default:
+		return imageflowv1alpha1.RolloutUnknown
+	}
+}
+
+// mapCUEHealthStatus maps a CUE evaluation result status string to the
+// HealthStatus enum. Unrecognized values → Unknown (honest, ADR-005 §4).
+func mapCUEHealthStatus(status string) imageflowv1alpha1.HealthStatus {
+	switch status {
+	case "Healthy":
+		return imageflowv1alpha1.HealthHealthy
+	case "Unhealthy":
+		return imageflowv1alpha1.HealthUnhealthy
+	default:
+		return imageflowv1alpha1.HealthUnknown
+	}
 }
 
 // observerTransition carries the effects of one status write.
@@ -503,7 +762,7 @@ func (r *SubscriptionObserverReconciler) syncObserverStatus(ctx context.Context,
 		computed := *fresh.Status.DeepCopy()
 		r.applyObserverOutcomes(&fresh, &computed, pass.outcomes, now, &transition)
 		healInFlightRecords(&computed, pass.outcomes)
-		setStatusPolicyCondition(&computed, pass.policyRefs, fresh.Generation, now)
+		setStatusPolicyCondition(&computed, pass.policyRefs, pass.evalResults, fresh.Generation, now)
 		computed.RolloutStatus = AggregateRolloutStatus(computed.Targets)
 		computed.ObservedGeneration = fresh.Generation
 		if equality.Semantic.DeepEqual(fresh.Status, computed) {
@@ -560,10 +819,26 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 			kind:   out.kindLabel,
 			result: observerResultLabel(out.transition.to),
 		})
-		// Health sample per rollout transition: v1 only ever reports unknown
-		// honestly (no evaluator, ADR-005 §4) — rollout success never implies
-		// health.
+		// Health sample per rollout transition. With T4 CUE evaluation,
+		// health may be determined by the evaluator; otherwise it stays
+		// Unknown (ADR-005 §4).
 		transition.healthSamples = append(transition.healthSamples, observerHealthLabel(entry.HealthStatus))
+	}
+	// Apply health transitions from CUE evaluation (T4, ADR-013 D3).
+	for i := range outcomes {
+		out := &outcomes[i]
+		if out.healthTransition == nil {
+			continue
+		}
+		idx := findTargetEntry(computed.Targets, out.ref)
+		if idx < 0 {
+			continue
+		}
+		entry := &computed.Targets[idx]
+		if entry.HealthStatus != out.healthTransition.from {
+			continue // stale plan
+		}
+		entry.HealthStatus = out.healthTransition.to
 	}
 }
 
@@ -609,23 +884,68 @@ func healInFlightRecords(computed *imageflowv1alpha1.ImageSubscriptionStatus, ou
 	}
 }
 
-// setStatusPolicyCondition maintains the explicit v1 health contract
-// Condition (ADR-005 §4/§5): Status=False always (no evaluator runs in v1),
-// reason NotConfigured when no target declares a statusPolicyRef and
-// EvaluatorDeferred when at least one does. Success is never fabricated; the
-// Condition is the durable explanation. LastTransitionTime is pinned to the
-// injected clock on status flips (T8 pointer-aliasing lesson: snapshot the
-// previous condition BY VALUE before SetStatusCondition mutates in place).
-func setStatusPolicyCondition(computed *imageflowv1alpha1.ImageSubscriptionStatus, policyRefs int, generation int64, now time.Time) {
+// setStatusPolicyCondition maintains the StatusPolicyEvaluated Condition
+// (ADR-005 §4/§5, ADR-013 D6). In v1.3 with the CUE evaluator active:
+//   - Status=True, Reason=Evaluated when all referenced policies evaluated OK;
+//   - Status=False, Reason=CompileError/EvalError/Timeout/InputTooLarge on failure;
+//   - Status=False, Reason=EvaluatorDeferred for refs without rolloutKey/healthKey;
+//   - Status=False, Reason=NotConfigured when no target declares a statusPolicyRef.
+//
+// LastTransitionTime is pinned to the injected clock on status flips (T8
+// pointer-aliasing lesson: snapshot the previous condition BY VALUE before
+// SetStatusCondition mutates in place).
+func setStatusPolicyCondition(computed *imageflowv1alpha1.ImageSubscriptionStatus, policyRefs int, evalResults []targetEvalResult, generation int64, now time.Time) {
 	reason := ReasonStatusPolicyNotConfigured
-	message := "No target declares a statusPolicyRef and v1 ships no CUE status policy evaluator (deferred to v1.1, ADR-005 §4/D-016): healthStatus stays honestly Unknown for every target and success is never fabricated. Rollout of built-in first-batch kinds is observed from native workload status (ADR-006); all other classes stay honestly Unknown."
+	status := metav1.ConditionFalse
+	message := "No target declares a statusPolicyRef: healthStatus stays honestly Unknown for every target and success is never fabricated. Rollout of built-in first-batch kinds is observed from native workload status (ADR-006)."
+
 	if policyRefs > 0 {
-		reason = ReasonStatusPolicyEvaluatorDeferred
-		message = fmt.Sprintf("%d target(s) declare a statusPolicyRef: v1 froze the Status Policy storage and I/O contract but defers the CUE evaluator to v1.1 (ADR-005 §4/D-016), so healthStatus stays honestly Unknown and success is never fabricated. Rollout of built-in first-batch kinds is still observed from native workload status (ADR-006).", policyRefs)
+		if len(evalResults) == 0 {
+			// All policyRefs lack rolloutKey/healthKey → legacy deferred behavior.
+			reason = ReasonStatusPolicyEvaluatorDeferred
+			message = fmt.Sprintf("%d target(s) declare a statusPolicyRef without rolloutKey/healthKey: the CUE evaluator is available (v1.3) but these refs use the legacy contract; healthStatus stays honestly Unknown. Add rolloutKey/healthKey to activate CUE evaluation (ADR-013 D3).", policyRefs)
+		} else {
+			// At least one target has CUE keys — check results.
+			allSuccess := true
+			var failClass cueeval.ErrorClass
+			var failReason string
+			var failMsg string
+			for _, er := range evalResults {
+				if !er.success {
+					allSuccess = false
+					failClass = er.errClass
+					failReason = er.errReason
+					failMsg = er.message
+					break
+				}
+			}
+			if allSuccess {
+				status = metav1.ConditionTrue
+				reason = ReasonStatusPolicyEvaluated
+				message = fmt.Sprintf("CUE status policy evaluation succeeded for %d target(s) (ADR-013). Rollout and health are determined by the configured policies.", len(evalResults))
+			} else {
+				// Map error class to condition reason (ADR-013 D6).
+				switch failClass {
+				case cueeval.CompileError:
+					reason = ReasonStatusPolicyCompileError
+				case cueeval.Timeout:
+					reason = ReasonStatusPolicyTimeout
+				default:
+					// EvalError covers InputTooLarge, SchemaValidationFailed, etc.
+					if failReason == "InputTooLarge" {
+						reason = ReasonStatusPolicyInputTooLarge
+					} else {
+						reason = ReasonStatusPolicyEvalError
+					}
+				}
+				message = fmt.Sprintf("CUE status policy evaluation failed (%s/%s): %s; rollout/health stay Unknown per ADR-005 §4.", failClass, failReason, authz.TruncateMessage(failMsg, 512))
+			}
+		}
 	}
+
 	desired := metav1.Condition{
 		Type:               ConditionTypeStatusPolicyEvaluated,
-		Status:             metav1.ConditionFalse,
+		Status:             status,
 		ObservedGeneration: generation,
 		Reason:             reason,
 		Message:            message,
@@ -698,7 +1018,7 @@ func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imagef
 		health = imageflowv1alpha1.HealthUnknown
 	}
 	return fmt.Sprintf(
-		"Rollout observation for %s: source %s %s/%s; old image %s; new image %s; stages — imageResolved: %s, imageApplied: %t, rollout: %s, health: %s. Determination: %s (v1 has no status policy evaluator, ADR-005 §4: health is never fabricated and never derived from rollout success).",
+		"Rollout observation for %s: source %s %s/%s; old image %s; new image %s; stages — imageResolved: %s, imageApplied: %t, rollout: %s, health: %s. Determination: %s (ADR-005 §4: health is never fabricated and never derived from rollout success).",
 		authz.FormatTarget(entry.TargetRef),
 		sub.Spec.Source.Kind, sub.Spec.Source.Namespace, sub.Spec.Source.Name,
 		oldImage, newImage, resolved, entry.ImageApplied, to, health,
@@ -787,6 +1107,32 @@ func (observerWorkloadStatusPredicate) UpdateFunc(e event.UpdateEvent) bool {
 	return true
 }
 
+// observerConfigMapPredicate filters ConfigMap events to the imageflow-system
+// namespace only (ADR-013 D9). Status policy ConfigMaps are restricted to this
+// namespace for security; watching other namespaces would be wasteful.
+type observerConfigMapPredicate struct {
+	predicate.Funcs
+}
+
+func (observerConfigMapPredicate) CreateFunc(e event.CreateEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) DeleteFunc(e event.DeleteEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) UpdateFunc(e event.UpdateEvent) bool {
+	if e.ObjectNew == nil {
+		return false
+	}
+	return e.ObjectNew.GetNamespace() == statusPolicySystemNamespace
+}
+
+func (observerConfigMapPredicate) GenericFunc(e event.GenericEvent) bool {
+	return e.Object.GetNamespace() == statusPolicySystemNamespace
+}
+
 // subsForWorkload maps a workload event to every subscription targeting it
 // (observer-side copy of the engine's mapping; the reconcilers are separate
 // types with separate caches of nothing).
@@ -832,6 +1178,46 @@ func (r *SubscriptionObserverReconciler) listSubscriptions(ctx context.Context) 
 		return nil, err
 	}
 	return subs.Items, nil
+}
+
+// subsForConfigMap maps a ConfigMap event to every subscription referencing it
+// via statusPolicyRef (T3, ADR-013 D5). On ConfigMap create/update/delete, it
+// invalidates the evaluator cache for the affected entry and enqueues all
+// subscriptions that reference this ConfigMap by name+namespace match.
+func (r *SubscriptionObserverReconciler) subsForConfigMap(ctx context.Context, obj client.Object) []ctrl.Request {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok {
+		return nil
+	}
+	// Invalidate evaluator cache for this ConfigMap (ADR-013 D5).
+	// The cache key uses resourceVersion + key hash; passing empty resourceVersion
+	// clears any cached entry regardless of version.
+	if r.evaluator != nil {
+		r.evaluator.InvalidateCache("", cm.Name)
+	}
+	subs, err := r.listSubscriptions(ctx)
+	if err != nil {
+		return nil
+	}
+	var requests []ctrl.Request
+	for i := range subs {
+		sub := &subs[i]
+		for j := range sub.Spec.Targets {
+			ref := sub.Spec.Targets[j].StatusPolicyRef
+			if ref == nil {
+				continue
+			}
+			// Match by ConfigMap name and namespace (statusPolicyRef.Namespace must be imageflow-system per ADR-013 D9).
+			if ref.Name == cm.Name && ref.Namespace == cm.Namespace {
+				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+					Namespace: sub.Namespace,
+					Name:      sub.Name,
+				}})
+				break // One enqueue per subscription is sufficient
+			}
+		}
+	}
+	return requests
 }
 
 // compile-time interface guards

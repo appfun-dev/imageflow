@@ -147,8 +147,9 @@ type TargetReference struct {
 }
 
 // StatusPolicyRef points at a CUE status policy stored in a ConfigMap (ADR-005 §4).
-// v1 freezes the storage/IO contract only; the evaluator lands in v1.1. Targets with
-// an unavailable policy report rollout/health as Unknown with an explicit condition.
+// v1 freezes the storage/IO contract only; the evaluator lands in v1.3 (ADR-013).
+// Targets with an unavailable or unconfigured policy report rollout/health as Unknown
+// with an explicit condition.
 type StatusPolicyRef struct {
 	// Name of the ConfigMap holding the policy.
 	// +kubebuilder:validation:Required
@@ -156,7 +157,7 @@ type StatusPolicyRef struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// Namespace of the ConfigMap.
+	// Namespace of the ConfigMap. Must be "imageflow-system" (ADR-013 D9).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -167,6 +168,22 @@ type StatusPolicyRef struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Key string `json:"key"`
+
+	// RolloutKey references the CUE expression within the policy document used
+	// to evaluate rollout status. Required when statusPolicyRef is set and the
+	// v1.3 evaluator is active. Omit to keep the legacy EvaluatorDeferred behavior.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	RolloutKey string `json:"rolloutKey,omitempty"`
+
+	// HealthKey references the CUE expression within the policy document used
+	// to evaluate health status. Required when statusPolicyRef is set and the
+	// v1.3 evaluator is active. Omit to keep the legacy EvaluatorDeferred behavior.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	HealthKey string `json:"healthKey,omitempty"`
 }
 
 // LocalSecretReference references a secret in the same namespace as the referring

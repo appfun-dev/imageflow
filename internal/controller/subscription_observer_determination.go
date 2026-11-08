@@ -453,17 +453,26 @@ func podOwnedByAny(refs []metav1.OwnerReference, uids map[types.UID]struct{}) bo
 
 // honestUnknownMessage explains, per ADR-005 §4/§5 and ADR-006, why a
 // non-observable target class stays Unknown instead of ever showing success.
+// In v1.3, the message distinguishes between "evaluator active but keys
+// missing" and "legacy deferred" (no rolloutKey/healthKey).
 func honestUnknownMessage(gvk schema.GroupVersionKind, target imageflowv1alpha1.SubscriptionTarget) string {
 	name := authz.FormatTarget(target.TargetRef)
 	if target.StatusPolicyRef != nil {
 		ref := target.StatusPolicyRef
-		return fmt.Sprintf("%s declares statusPolicyRef %s/%s key %q, but the v1 CUE status policy evaluator is deferred to v1.1 (ADR-005 §4, D-016): rollout and health stay honestly Unknown, surfaced by the StatusPolicyEvaluated=False Condition, and success is never fabricated. Native rollout observation still follows ADR-006 for first-batch built-in kinds located by container name.",
+		if ref.RolloutKey != "" || ref.HealthKey != "" {
+			// v1.3 evaluator is active with CUE keys; this path is reached
+			// only when evaluation failed (the caller sets evalErrClass).
+			return fmt.Sprintf("%s declares statusPolicyRef %s/%s with rolloutKey=%q healthKey=%q: CUE evaluation was attempted but the target is not natively observable; rollout stays Unknown until CUE evaluation succeeds (ADR-013).",
+				name, ref.Namespace, ref.Name, ref.RolloutKey, ref.HealthKey)
+		}
+		// Legacy: statusPolicyRef without CUE keys → deferred behavior.
+		return fmt.Sprintf("%s declares statusPolicyRef %s/%s key %q without rolloutKey/healthKey: the CUE evaluator is available (v1.3) but this ref uses the legacy contract (ADR-005 §4). Add rolloutKey/healthKey to activate evaluation. Rollout and health stay honestly Unknown.",
 			name, ref.Namespace, ref.Name, ref.Key)
 	}
 	if len(target.ImageFields) > 0 {
-		return fmt.Sprintf("%s is located by imageFields (%v): native rollout status cannot be attributed to arbitrary fields, and there is no usable Status Policy — the v1 CUE evaluator is deferred to v1.1 (ADR-005 §4/§5). The rollout stage stays honestly Unknown and success is never fabricated.",
+		return fmt.Sprintf("%s is located by imageFields (%v): native rollout status cannot be attributed to arbitrary fields, and no statusPolicyRef with rolloutKey/healthKey is configured. The rollout stage stays honestly Unknown and success is never fabricated.",
 			name, target.ImageFields)
 	}
-	return fmt.Sprintf("%s (%s) is outside the ADR-006 first batch of built-in observable kinds (apps/v1 Deployment, StatefulSet, DaemonSet located by container name) and has no usable Status Policy — the v1 CUE evaluator is deferred to v1.1 (ADR-005 §5): the rollout stage stays honestly Unknown and success is never fabricated.",
+	return fmt.Sprintf("%s (%s) is outside the ADR-006 first batch of built-in observable kinds (apps/v1 Deployment, StatefulSet, DaemonSet located by container name) and has no statusPolicyRef with rolloutKey/healthKey (ADR-005 §5): the rollout stage stays honestly Unknown and success is never fabricated.",
 		name, gvk.String())
 }

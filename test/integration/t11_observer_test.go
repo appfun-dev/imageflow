@@ -46,6 +46,7 @@ import (
 	"github.com/appfun-dev/imageflow/internal/clock"
 	"github.com/appfun-dev/imageflow/internal/config"
 	"github.com/appfun-dev/imageflow/internal/controller"
+	"github.com/appfun-dev/imageflow/internal/controller/cueeval"
 )
 
 // T11 named cases: the workload observer against a REAL API server.
@@ -229,7 +230,7 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 	t11iObserver := func(cfg config.Config) (*controller.SubscriptionObserverReconciler, *record.FakeRecorder) {
 		recorder := record.NewFakeRecorder(256)
 		return controller.NewSubscriptionObserverReconciler(
-			t11iIntercepted(), nil, recorder, t11iClock, cfg, nil), recorder
+			t11iIntercepted(), nil, recorder, t11iClock, cfg, nil, cueeval.NewEvaluator()), recorder
 	}
 
 	t11iEngine := func(cfg config.Config) (*controller.SubscriptionDeliveryReconciler, *record.FakeRecorder) {
@@ -965,7 +966,7 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(controller.ReasonStatusPolicyEvaluatorDeferred))
-		Expect(cond.Message).To(ContainSubstring("defers the CUE evaluator to v1.1"))
+		Expect(cond.Message).To(ContainSubstring("the CUE evaluator is available (v1.3)"))
 		events := t11iDrainEvents(rec)
 		Expect(t11iCountContaining(events, "rollout: Unknown")).To(Equal(1),
 			"the third-party transition has no target-side object in the cluster — sub-side only")

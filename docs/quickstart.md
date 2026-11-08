@@ -79,7 +79,7 @@ kubectl get validatingwebhookconfiguration | grep imageflow # webhook 已注册
 ## 5. 建立目录：创建 ImageStream
 
 目录（ImageStream/ImageArtifact）由平台团队维护在 `imageflow-system`；应用团队只读消费
-（见第 11 节 RBAC）。本例登记公共镜像 `registry.k8s.io/pause:3.9`：
+（见第 12 节 RBAC）。本例登记公共镜像 `registry.k8s.io/pause:3.9`：
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -223,7 +223,7 @@ kubectl -n quickstart-team get deployment web \
 kubectl -n quickstart-team get imagesubscription web-live -o json | \
   jq '.status.targets[0], .status.rolloutStatus'
 
-# 3) §12.9 投递审计：recentDeliveries（最多 5 条，最新在前；首条 oldImage="none recorded"）
+# 3) §13.9 投递审计：recentDeliveries（最多 5 条，最新在前；首条 oldImage="none recorded"）
 kubectl -n quickstart-team get imagesubscription web-live \
   -o jsonpath='{.status.recentDeliveries}' | jq
 
@@ -261,7 +261,7 @@ spec:
 ```
 
 控制器每 `intervalSeconds` 创建一次带 `imageflow.appfun.dev/import-source=scheduled` 标签的
-导入任务；外部 tag 指向的 digest 变化时自动登记（tag 不变、digest 变 ⇒ 真实镜像变化，§16 场景 17），
+导入任务；外部 tag 指向的 digest 变化时自动登记（tag 不变、digest 变 ⇒ 真实镜像变化，§17 场景 17），
 stream 上出现 `TagDriftDetected` 事件，订阅链自动把新 digest 投递到工作负载。
 
 > v1 限制：计划导入仅支持**匿名可拉取**的 Registry（tag 级没有 pullSecret 字段；
@@ -355,7 +355,160 @@ spec:
   订阅授权链保护（ADR-003）。
 - **决策背景**：ADR-012；完整 spec 见 `docs/spec/imageflow-v1.2-image-reference-format.md`。
 
-## 11. 团队 RBAC（目录消费 vs 平台管理）
+## 11. CUE 状态策略配置指南
+
+v1.3 实现了 CUE Status Evaluator（[ADR-013](../adr/ADR-013-cue-status-evaluator.md)），允许为第三方 Workload 配置自定义状态评估策略，替代 v1/v1.1/v1.2 中对 rollout/health 如实报告 `Unknown` 的行为（[ADR-005 §4](../adr/ADR-005-write-contract-cue-deferral.md)）。
+
+### 编写 CUE 策略
+
+CUE 策略是一个标准 CUE 文件，顶层定义输入 schema 和输出判定逻辑。以下示例为 Deployment 的 rollout 和 health 分别编写策略：
+
+```cue
+// deployment-rollout.cue
+// 输入 schema：控制器传入的 workload status 片段
+#Input: {
+    metadata: {
+        generation: int
+    }
+    spec: {
+        replicas: int
+    }
+    status: {
+        observedGeneration?: int
+        updatedReplicas?:      int
+        readyReplicas?:        int
+        availableReplicas?:    int
+        conditions?: [...{
+            type:   string
+            status: string
+        }]
+    }
+}
+
+// 输出：rollout 状态判定
+result: {
+    status:  string
+    reason:  string
+    message: string
+}
+
+// 判定逻辑
+_input: #Input
+
+result: {
+    if _input.status.observedGeneration != _input.metadata.generation {
+        status:  "Progressing"
+        reason:  "NewGeneration"
+        message: "Observed generation \(_input.status.observedGeneration) < desired \(_input.metadata.generation)"
+    }
+    if _input.status.updatedReplicas != _input.spec.replicas {
+        status:  "Progressing"
+        reason:  "UpdatingReplicas"
+        message: "\(_input.status.updatedReplicas)/\(_input.spec.replicas) replicas updated"
+    }
+    if _input.status.availableReplicas == _input.spec.replicas &&
+       _input.status.updatedReplicas == _input.spec.replicas &&
+       _input.status.observedGeneration == _input.metadata.generation {
+        status:  "Succeeded"
+        reason:  "AllAvailable"
+        message: "All replicas available and up to date"
+    }
+}
+```
+
+> **安全约束**：CUE 评估在沙箱中运行——禁止 `import`（除标准库）、无网络访问、无文件系统访问。单次评估最大 100ms，输入 JSON 最大 256KB。详见 [ADR-013 D2/D7/D8/D9](../adr/ADR-013-cue-status-evaluator.md)。
+
+### 部署为 ConfigMap
+
+策略通过 ConfigMap 部署到 `imageflow-system` namespace（**唯一允许的 namespace**，admission webhook 强制校验）：
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deployment-status-policy
+  namespace: imageflow-system
+data:
+  rollout.cue: |
+    // 上面的 deployment-rollout.cue 内容
+    #Input: { ... }
+    result: { ... }
+  health.cue: |
+    // health 策略（结构类似，判定 availableReplicas > 0 等）
+    #Input: { ... }
+    result: { ... }
+  test-cases.yaml: |
+    # 可选：预部署验证用例（见 docs/ops.md §11）
+    - input:
+        metadata: { generation: 1 }
+        spec: { replicas: 3 }
+        status: { observedGeneration: 1, updatedReplicas: 3, availableReplicas: 3 }
+      expected:
+        status: Succeeded
+        reason: AllAvailable
+EOF
+```
+
+### 引用策略：ImageSubscription statusPolicyRef
+
+在 ImageSubscription 中通过 `statusPolicyRef` 引用 ConfigMap 中的策略 key：
+
+```yaml
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageSubscription
+metadata:
+  name: web-live
+  namespace: quickstart-team
+spec:
+  source:
+    kind: ImageStreamTag
+    name: quickstart-api:stable
+    namespace: imageflow-system
+  targets:
+  - targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      namespace: quickstart-team
+      name: web
+    containerNames:
+    - web
+  statusPolicyRef:                          # v1.3 新增
+    name: deployment-status-policy          # ConfigMap 名称
+    namespace: imageflow-system             # 必须为 imageflow-system
+    rolloutKey: rollout.cue                 # data key → rollout 策略
+    healthKey: health.cue                   # data key → health 策略
+```
+
+字段说明：
+
+- `statusPolicyRef.name`：ConfigMap 名称；
+- `statusPolicyRef.namespace`：**必须**为 `imageflow-system`，其他 namespace 被 admission webhook 拒绝；
+- `statusPolicyRef.rolloutKey`：ConfigMap data 中 rollout 策略的 key；
+- `statusPolicyRef.healthKey`：ConfigMap data 中 health 策略的 key。
+
+### 完整工作示例
+
+将上述 ConfigMap 和 ImageSubscription 一起部署后，控制器自动 watch ConfigMap 变更并编译缓存策略。验证：
+
+```bash
+# 1) 订阅状态不再报告 Unknown
+kubectl -n quickstart-team get imagesubscription web-live \
+  -o jsonpath='{.status.targets[0].rolloutStatus}'; echo
+# 预期输出：Succeeded（而非 Unknown）
+
+# 2) StatusPolicyEvaluated condition = True
+kubectl -n quickstart-team get imagesubscription web-live \
+  -o jsonpath='{.status.conditions[?(@.type=="StatusPolicyEvaluated")]}'; echo
+
+# 3) 更新策略后自动生效（无需重启 controller）
+kubectl -n imageflow-system edit configmap deployment-status-policy
+# 修改后下一个 reconcile 周期自动使用新策略
+```
+
+> **向后兼容**：未设置 `statusPolicyRef` 的订阅保持 v1 行为（rollout 走原生观测，health 如实报告 `Unknown` + `StatusPolicyEvaluated=False/NotConfigured`）。已有订阅无需任何变更。
+
+## 12. 团队 RBAC（目录消费 vs 平台管理）
 
 - **应用团队**（只读浏览目录 + 自己 ns 内全权管理订阅/任务）：
 
@@ -375,7 +528,7 @@ spec:
   补授权后周期复核（`--sar-recheck-period`，默认 10m）自动翻转状态，无需重建订阅。
 - **平台团队**：`imageflow-system` 管理域 + stream 族全权（管理员自带）。
 
-## 12. 指标与运维入口
+## 13. 指标与运维入口
 
 v1 指标为**集群内明文** `:8080`（ADR-010 裁定，升级路径见 ADR）：
 
@@ -387,7 +540,7 @@ curl -s localhost:8080/metrics | grep '^imageflow_' | head
 指标清单与语义以 `docs/metrics-contract.md`（§T1–§T11）为准；全部 flags、Conditions 词汇表、
 导入失败码与排查路径见 `docs/ops.md`。
 
-## 13. Shipwright：构建成功 → 登记 → 投递（推送路径）
+## 14. Shipwright：构建成功 → 登记 → 投递（推送路径）
 
 ImageFlow 不做构建（复用 Shipwright，ADR-007：**永不推送、永不构建**）。「推送路径」= 构建产物
 已经推到 Registry 后，用 `ImageStreamMapping` 把 `(stream, tag, digest)` 登记进目录（T4），
@@ -471,7 +624,7 @@ EOF
 fi
 ```
 
-**两个阶段的结果分别报告**（§16 场景 16）：
+**两个阶段的结果分别报告**（§17 场景 16）：
 
 | 阶段 | 载体 | 成功 | 失败 |
 |---|---|---|---|
@@ -481,11 +634,11 @@ fi
 构建成功、登记失败时两者互不掩盖：BuildRun 仍是 Succeeded，Mapping 明确报告失败原因
 （如 `InvalidImageReference`、`StreamNotFound`），修好后可用同名任务重试或新建任务。
 
-## 14. Shipwright BuildRun → ImageFlow 自动登记（BuildRun Watcher）
+## 15. Shipwright BuildRun → ImageFlow 自动登记（BuildRun Watcher）
 
 v1.1 新增 **BuildRun Watcher**：一个 feature-gated 可选 controller，watch Shipwright
 BuildRun 对象，在其 Succeeded 且携带 digest 时**自动执行等价于 ImageStreamMapping 的
-登记逻辑**，消除第 13 节中 CI 流水线侧的胶水脚本。
+登记逻辑**，消除第 14 节中 CI 流水线侧的胶水脚本。
 
 > **BC-002**：ImageFlow **不执行构建**——仅观察 Shipwright BuildRun status 并登记其产物。
 > 构建能力完全由 Shipwright 提供。
@@ -548,11 +701,11 @@ kubectl -n quickstart-team get imagesubscription web-live \
   -o jsonpath='{.status.recentDeliveries}' | jq
 ```
 
-> 与第 13 节手动 Mapping 路径的区别：Watcher 路径无需 CI 胶水脚本，但要求
+> 与第 14 节手动 Mapping 路径的区别：Watcher 路径无需 CI 胶水脚本，但要求
 > `--enable-buildrun-watcher=true` + Shipwright CRD 存在。两条路径语义完全一致
 > （幂等、同 `(stream, tag, digest)` 重复 = no-op），可互换使用。
 
-## 15. 清理
+## 16. 清理
 
 ```bash
 make undeploy IMG=controller:quickstart    # 删除 config/default 部署
@@ -562,7 +715,7 @@ kind delete cluster --name quickstart
 git checkout config/manager/kustomization.yaml   # 还原 kustomize edit set image 的本地改动
 ```
 
-## 16. 常见问题速查
+## 17. 常见问题速查
 
 | 现象 | 第一步 |
 |---|---|
@@ -571,7 +724,7 @@ git checkout config/manager/kustomization.yaml   # 还原 kustomize edit set ima
 | 订阅 `Forbidden=True` | 创建者缺目标 ns 的 `update` 权限（ADR-003）；补 RoleBinding 后等一个 recheck 周期 |
 | 导入任务 `Complete=False/Failed` | reason 即 12 个稳定失败码之一；对照 `docs/ops.md` 排查表 |
 | 投递后 rollout 卡在 Progressing/Failed | `kubectl -n <target-ns> rollout status`；digest 不可拉取会如实 Failed（镜像字段仍是已应用的 digest） |
-| 指标为空 | 明文 `:8080` 仅集群内可达，用第 12 节 port-forward；ADR-010 |
+| 指标为空 | 明文 `:8080` 仅集群内可达，用第 13 节 port-forward；ADR-010 |
 
-更多：`docs/ops.md`（部署/flags/指标/Conditions/排查）、`docs/scenario-map.md`（§16 场景 ↔ 命名用例）、
+更多：`docs/ops.md`（部署/flags/指标/Conditions/排查）、`docs/scenario-map.md`（§17 场景 ↔ 命名用例）、
 `GLOSSARY.md`（领域词汇）、`docs/adr/`（决策记录）。
