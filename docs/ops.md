@@ -323,4 +323,70 @@ BuildRun 通过 `buildrun.imageflow.appfun.dev/target` 注解声明目标 stream
 - Admission：validating webhook 对带该注解的 BuildRun 执行 JSON unmarshal + 必填字段检查 + 值 RFC 1123 校验；失败返回明确 rejection message
 - 注解仅由用户/CI 设置在 BuildRun 上；Watcher 只读、不写回
 
-详见 `docs/quickstart.md` §13 示例。
+详见 `docs/quickstart.md` §14 示例。
+
+## 10. imageReferenceFormat：格式选择与 tag 漂移排查（v1.2）
+
+v1.2 新增 `ImageSubscription.spec.imageReferenceFormat` 枚举字段，允许按订阅级别选择写入
+目标 workload 镜像字段的引用格式。完整 YAML 示例见 `docs/quickstart.md` §10；本节聚焦
+运维侧的格式选择指南与 tag 漂移排查。
+
+### 格式选择指南
+
+| 格式 | 写入值 | 何时使用 | 注意事项 |
+|---|---|---|---|
+| `Digest`（默认） | `repo@sha256:<hex>` | 生产环境首选；需要精确版本锁定和不可变性 | v1 行为，已有订阅无需变更 |
+| `Tag` | `repo:tag` | 目标生态工具（CI/CD、扫描器、运维面板）仅识别 tag 引用时 | tag 漂移可通过 `resolvedDigest` 检测；`ImageApplied` 仍基于 digest 比较 |
+| `DigestWithTag` | `repo:tag@sha256:<hex>` | 同时需要人类可读性和 digest 确定性；OCI 标准复合格式 | Kubernetes 1.24+ 和主流运行时均支持 |
+
+**决策要点**：
+
+- **默认 Digest**：除非有明确的生态兼容需求，否则保持默认。Digest 提供最强的确定性保证。
+- **Tag 不是降级**：Tag 模式下 `ImageApplied` 仍基于 digest 比较（通过 `resolvedDigest`），
+  tag 漂移不会被静默忽略。选择 Tag 是为了兼容，不是为了放松一致性。
+- **DigestWithTag 是最佳折中**：如果不确定选哪个，且目标运行时支持 OCI 复合格式，
+  DigestWithTag 兼顾两者。
+- **spec 级粒度**：整个订阅统一格式，所有 target 共享。不支持 per-target 覆盖（YAGNI）。
+
+### Tag 漂移排查（使用 resolvedDigest）
+
+当 `imageReferenceFormat` 为 `Tag` 或 `DigestWithTag` 时，`status.targets[].resolvedDigest`
+字段记录投递时实际解析到的 digest。此字段是排查 tag 漂移的核心工具。
+
+#### 什么是 tag 漂移
+
+Tag 指向的 digest 发生变化（例如 `app:v1.2.0` 被重新推送指向新的 sha256），但 tag
+字符串不变。对于 format=Tag 的订阅，目标 workload 的镜像字段仍是同一个 tag 字符串，
+但实际运行的镜像已不同。
+
+#### 排查步骤
+
+| 步骤 | 命令 | 说明 |
+|---|---|---|
+| 1. 查看订阅状态中的 resolvedDigest | `kubectl get imagesubscription X -o jsonpath='{.status.targets[0].resolvedDigest}'` | format=Tag/DigestWithTag 时非空；format=Digest 时留空（digest 已在 desiredImage 中） |
+| 2. 对比目录中的当前 digest | `kubectl get imagestream Y -o jsonpath='{.status.tags[?(@.tag=="Z")].items[0].digest}'` | 目录事实源（AGG-001）；若与 resolvedDigest 不同，说明 tag 已漂移 |
+| 3. 检查投递审计 | `kubectl get imagesubscription X -o jsonpath='{.status.recentDeliveries}' \| jq` | recentDeliveries 记录每次投递的 oldImage/newImage；tag 漂移时 newImage 的 tag 不变但 resolvedDigest 变化 |
+| 4. 查看 TagDriftDetected 事件 | `kubectl get events --field-selector reason=TagDriftDetected` | 计划导入检测到外部 tag 指向新 digest 时自动发出（§5 事件清单） |
+| 5. 确认 ImageApplied 状态 | `kubectl get imagesubscription X -o jsonpath='{.status.targets[0].reason}'` | tag 漂移后若 digest 变化，控制器会重新投递；reason=`Applied` 表示新 digest 已写入 |
+
+#### resolvedDigest 语义
+
+- **填充条件**：仅在 `imageReferenceFormat=Tag` 或 `DigestWithTag` 时填充；
+  `format=Digest` 时留空（digest 已直接体现在 `desiredImage` 字段中）。
+- **数据来源**：delivery resolve 阶段从 ImageStreamTag 获取，零额外 registry 查询。
+- **Pattern**：`^[^@\s]+@sha256:[0-9a-f]{64}$`（与 desiredImage 相同）。
+- **用途**：`ImageApplied` 比较使用 `resolvedDigest`（当非空时）或 `desiredImage`
+  （当 resolvedDigest 为空时）。确保 tag 模式下仍能检测 digest 级别的变化。
+
+### Flags 与配置
+
+`imageReferenceFormat` 无独立 flag——它是 per-subscription 的 API 字段，由 mutating
+webhook 在创建/更新时自动填充默认值 `Digest`。相关 webhook 行为见 §1 部署形态和
+`internal/webhook/subscription_mutate.go`。
+
+### 向后兼容
+
+- 已有订阅省略 `imageReferenceFormat` 时，mutating webhook 在下次 update 时自动填充
+  `Digest`，行为与 v1 完全一致。
+- 升级 v1.2 不需要任何手动迁移。
+- 决策背景：ADR-012；完整 spec：`docs/spec/imageflow-v1.2-image-reference-format.md`。

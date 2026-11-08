@@ -311,3 +311,33 @@ BuildRun Watcher 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisions�
 | flag 关闭时 Watcher 不启动 | `--enable-buildrun-watcher=false`（默认），验证无 BuildRun informer 创建、无 reconcile 行为 |
 | 注解 admission 端到端校验 | 在真实集群中验证 webhook 对非法注解的拒绝行为 |
 | 自动登记后下游订阅投递 | BuildRun 自动登记 → ImageStream.status 更新 → 已有 ImageSubscription 自动投递到工作负载 |
+
+## imageReferenceFormat 测试矩阵（v1.2，T6）
+
+imageReferenceFormat 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisions。
+
+### envtest 单元/集成测试
+
+| 用例 | 断言 |
+|---|---|
+| Mutating defaulting：空 → Digest | 创建省略 `imageReferenceFormat` 的订阅后，`spec.imageReferenceFormat == "Digest"` |
+| Mutating defaulting：Update 时填充 | 已有对象 update 时若字段为空，自动填充 `Digest` |
+| Validating：非法枚举值被拒绝 | `imageReferenceFormat: Invalid` → admission rejection |
+| Delivery format=Digest：写入纯 digest 引用 | 目标镜像字段 = `repo@sha256:<hex>`；`resolvedDigest` 为空 |
+| Delivery format=Tag：写入 tag 引用 | 目标镜像字段 = `repo:tag`；`resolvedDigest` 非空且为有效 digest |
+| Delivery format=DigestWithTag：写入 OCI 复合格式 | 目标镜像字段 = `repo:tag@sha256:<hex>`；`resolvedDigest` 非空 |
+| resolvedDigest 填充条件 | format=Tag/DigestWithTag 时非空；format=Digest 时为空 |
+| ImageApplied 比较逻辑（Tag 模式） | tag 字符串相同但 resolvedDigest 变化 → 重新投递 |
+| Format 切换：Digest → Tag | 目标镜像字段从 digest 引用变为 tag 引用；resolvedDigest 开始填充 |
+| Format 切换：Tag → DigestWithTag | 目标镜像字段从 tag 引用变为复合格式 |
+| 向后兼容：v1 订阅无变更 | 省略字段的已有订阅行为与 v1 一致（Digest 格式） |
+
+### kind e2e 场景
+
+| 场景 | 描述 |
+|---|---|
+| 三种格式的真实 workload 写入验证 | 分别创建 Digest/Tag/DigestWithTag 订阅，验证 Deployment 镜像字段实际写入值 |
+| Tag 漂移可观测性 | format=Tag 时修改 ImageStream tag 指向新 digest，验证 resolvedDigest 更新、ImageApplied 重新投递 |
+| 升级兼容性 | v1 订阅（无 imageReferenceFormat 字段）在 v1.2 集群中继续以 Digest 格式工作 |
+| Mutating webhook defaulting 端到端 | 创建省略字段的订阅，验证 webhook 自动填充 Digest |
+| DigestWithTag 运行时兼容性 | 验证目标 workload 能正常拉取 OCI 复合格式引用的镜像 |
