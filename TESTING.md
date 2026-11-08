@@ -341,3 +341,66 @@ imageReferenceFormat 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisi
 | 升级兼容性 | v1 订阅（无 imageReferenceFormat 字段）在 v1.2 集群中继续以 Digest 格式工作 |
 | Mutating webhook defaulting 端到端 | 创建省略字段的订阅，验证 webhook 自动填充 Digest |
 | DigestWithTag 运行时兼容性 | 验证目标 workload 能正常拉取 OCI 复合格式引用的镜像 |
+
+## CUE Status Evaluator 测试矩阵（v1.3，T8）
+
+CUE Status Evaluator 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisions + [ADR-013](docs/adr/ADR-013-cue-status-evaluator.md)。
+
+### 单元测试（`internal/controller/cueeval/`）
+
+| 用例 | 文件 | 断言 |
+|---|---|---|
+| Happy path：合法策略 + 匹配输入 → Succeeded | `evaluator_test.go` TestHappyPath | `result.Status == "Succeeded"`，无 error |
+| CompileError：语法错误策略 → CompileError | `evaluator_test.go` TestCompileError | `EvaluationError.Class == CompileError` |
+| EvalError：输入不匹配 schema → EvalError | `evaluator_test.go` TestEvalError_InputMismatch | `EvaluationError.Class == EvalError`，message 含字段路径 |
+| Timeout：超 100ms 评估 → Timeout | `evaluator_test.go` TestTimeout | `EvaluationError.Class == Timeout` |
+| InputTooLarge：输入 JSON > 256KB → EvalError | `evaluator_test.go` TestInputSizeLimit | `EvaluationError.Reason == "InputTooLarge"` |
+| Sandbox：import 非标准库 → CompileError | `evaluator_test.go` TestSandboxImportRejection | `EvaluationError.Class == CompileError`，禁止外部 import |
+| Panic recovery：策略 panic → 不影响调用方 | `evaluator_test.go` TestPanicRecovery | 返回 error，goroutine 不崩溃 |
+| Health policy：独立 health 策略评估 | `evaluator_test.go` TestHealthPolicy | health 结果正确，与 rollout 解耦 |
+| Result fields：status/reason/message 完整输出 | `evaluator_test.go` TestResultFields | 三个字段均正确填充 |
+| Cache hit：相同 resourceVersion+key → 缓存命中 | `evaluator_test.go` TestCacheHit | 第二次评估复用编译结果 |
+| Clear cache：手动清除缓存 | `evaluator_test.go` TestClearCache | 清除后重新编译 |
+| Invalidate cache：resourceVersion 变更 → 缓存失效 | `evaluator_test.go` TestInvalidateCache | 新版本自动重新编译 |
+| Empty policy：空策略 → CompileError | `evaluator_test.go` TestEmptyPolicy | 明确错误，不默认成功 |
+| Complex input：嵌套对象 + 数组输入 | `evaluator_test.go` TestComplexInput | 复杂结构正确解析和评估 |
+| AsEvalError nil/wrong type：辅助函数边界 | `evaluator_test.go` TestAsEvalError* | nil 返回 false；非 EvaluationError 返回 false |
+| EvaluationError.Error()：格式化输出 | `evaluator_test.go` TestEvaluationErrorMessage | 格式 `Class: Reason - Message` |
+
+### Test Runner 单元测试（`internal/controller/cueeval/testrunner_test.go`）
+
+| 用例 | 断言 |
+|---|---|
+| All pass：全部测试用例通过 | `len(results) == N`，全部 `Passed == true` |
+| Some fail：部分用例失败 | 失败项 `Passed == false`，含 actual vs expected 差异 |
+| Wildcard status/reason：`"*"` 通配匹配 | 通配符正确跳过对应字段比较 |
+| Malformed YAML：非法 YAML → error | 返回解析错误，不 panic |
+| Empty YAML/array：空内容 → 零结果 | 返回空结果集，不报错 |
+| EvalError in test case：策略本身有错 | 测试结果标记为 failed，含 CompileError/EvalError 详情 |
+| Index tracking：结果索引与输入对应 | 每条结果的 index 与 test-cases.yaml 行号一致 |
+| Invalid policy + valid test cases：策略编译失败 | 所有测试用例标记为 failed，reason = CompileError |
+| Mixed pass/fail：混合结果 | 正确区分通过和失败的用例 |
+| Invalid structure：缺少 input/expected 字段 | 返回结构化错误 |
+
+### Envtest 集成测试（待建设）
+
+以下用例计划在后续 ticket 中落地于 `internal/controller/*_envtest_test.go`：
+
+| 用例 | 断言 |
+|---|---|
+| statusPolicyRef 引用 imageflow-system ConfigMap → 评估生效 | `StatusPolicyEvaluated=True`；rolloutStatus ≠ Unknown |
+| statusPolicyRef 引用非 imageflow-system namespace → admission 拒绝 | 创建 ImageSubscription 被 webhook 拒绝 |
+| ConfigMap 缺失 → Unknown + Condition | `StatusPolicyEvaluated=False`，reason 指明 ConfigMap 不存在 |
+| ConfigMap key 缺失 → Unknown + Condition | `StatusPolicyEvaluated=False`，reason 指明 key 不存在 |
+| ConfigMap 更新 → 缓存失效 + 新策略生效 | 修改 ConfigMap 后下一个 reconcile 使用新策略 |
+| CompileError 策略 → Condition Reason=CompileError | per-target rolloutStatus=Unknown + 明确错误信息 |
+| Timeout 策略 → Condition Reason=Timeout | 超 100ms 策略触发 Timeout condition |
+| InputTooLarge → Condition Reason=InputTooLarge | 大输入触发大小限制 |
+
+### 覆盖率要点
+
+- **编译缓存**：TestCacheHit / TestClearCache / TestInvalidateCache 覆盖缓存命中、清除、失效三条路径；
+- **超时**：TestTimeout 使用故意超时的策略验证 100ms 硬限；
+- **错误分类**：CompileError / EvalError / Timeout 三类各有独立用例，确保 Condition Reason 映射正确；
+- **沙箱安全**：TestSandboxImportRejection 验证 import 禁止；TestPanicRecovery 验证 goroutine 隔离；代码审查确认无网络/文件系统调用；
+- **测试 fixtures**：testrunner 测试覆盖 test-cases.yaml 的各种边界（空、畸形、通配、混合结果）。
