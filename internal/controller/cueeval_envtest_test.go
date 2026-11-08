@@ -227,13 +227,13 @@ func t7cCreateSubscriptionWithPolicy(t *testing.T, cl client.Client, ns, name st
 	})
 	// Seed target entry with Progressing (as delivery engine would).
 	sub.Status.Targets = []imageflowv1alpha1.TargetDeliveryStatus{{
-		TargetRef:      sub.Spec.Targets[0].TargetRef,
-		DesiredImage:   t7cDigestA,
-		ObservedImage:  t7cDigestA,
-		ImageApplied:   true,
-		RolloutStatus:  imageflowv1alpha1.RolloutProgressing,
-		HealthStatus:   imageflowv1alpha1.HealthUnknown,
-		Reason:         TargetReasonApplied,
+		TargetRef:          sub.Spec.Targets[0].TargetRef,
+		DesiredImage:       t7cDigestA,
+		ObservedImage:      t7cDigestA,
+		ImageApplied:       true,
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		HealthStatus:       imageflowv1alpha1.HealthUnknown,
+		Reason:             TargetReasonApplied,
 		LastTransitionTime: ptr.To(metav1.NewTime(t7cT0)),
 	}}
 	if err := cl.Status().Update(context.Background(), sub); err != nil {

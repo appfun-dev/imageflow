@@ -126,10 +126,10 @@ const (
 	ReasonStatusPolicyNotConfigured     = "NotConfigured"
 	ReasonStatusPolicyEvaluatorDeferred = "EvaluatorDeferred"
 	// v1.3 evaluator-active reasons (ADR-013 D6).
-	ReasonStatusPolicyEvaluated    = "Evaluated"
-	ReasonStatusPolicyCompileError = "CompileError"
-	ReasonStatusPolicyEvalError    = "EvalError"
-	ReasonStatusPolicyTimeout      = "Timeout"
+	ReasonStatusPolicyEvaluated     = "Evaluated"
+	ReasonStatusPolicyCompileError  = "CompileError"
+	ReasonStatusPolicyEvalError     = "EvalError"
+	ReasonStatusPolicyTimeout       = "Timeout"
 	ReasonStatusPolicyInputTooLarge = "InputTooLarge"
 )
 
