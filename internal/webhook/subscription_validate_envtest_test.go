@@ -33,7 +33,7 @@ const (
 
 // envtestSubscription builds an admissible ImageSubscription in the shared
 // envtest namespace with the given imageReferenceFormat.
-func envtestSubscription(name string, format imageflowv1alpha1.ImageReferenceFormat) *imageflowv1alpha1.ImageSubscription {
+func envtestValidateSubscription(name string, format imageflowv1alpha1.ImageReferenceFormat) *imageflowv1alpha1.ImageSubscription {
 	return &imageflowv1alpha1.ImageSubscription{
 		ObjectMeta: metav1.ObjectMeta{Namespace: envtestNS, Name: name},
 		Spec: imageflowv1alpha1.ImageSubscriptionSpec{
@@ -107,7 +107,7 @@ func TestValidateSubscriptionFormatAdmission(t *testing.T) {
 			{"sub-fmt-composite", imageflowv1alpha1.ImageReferenceFormatDigestWithTag},
 			{"sub-fmt-unset", ""},
 		} {
-			sub := envtestSubscription(tc.name, tc.format)
+			sub := envtestValidateSubscription(tc.name, tc.format)
 			if err := envtestClient.Create(ctx, sub); err != nil {
 				t.Fatalf("create with format %q must be admitted: %v", tc.format, err)
 			}

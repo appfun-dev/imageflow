@@ -75,7 +75,7 @@ func startBuildRunAdmissionEnv() (func(), error) {
 		BinaryAssetsDirectory: os.Getenv("KUBEBUILDER_ASSETS"),
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "test", "testdata", "thirdparty"),
-			// T2/T3: the subscription admission envtest suites create real
+			// T2/T3/T5: the subscription admission envtest suites create real
 			// ImageSubscriptions, so the generated ImageFlow CRDs are
 			// installed alongside the third-party BuildRun stand-in.
 			filepath.Join("..", "..", "config", "crd", "bases"),
