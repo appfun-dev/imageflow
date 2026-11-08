@@ -29,6 +29,7 @@ go.work
 # Local Go toolchain caches (agent sandboxes)
 .gocache/
 .gopath/
+.cache/
 
 # Allure reports
 allure-results/
