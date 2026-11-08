@@ -535,25 +535,38 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// keeps the persisted state (poll requeue covers reappearance).
 		return out
 	}
-	// Native rollout determination (ADR-006) runs regardless of CUE eval.
-	// For built-in kinds, native observation takes precedence for rollout;
-	// CUE supplements health only (ADR-006 + ADR-013 D3).
-	det := r.determineRollout(ctx, facts, target, *entry)
-	out.rollout = det.status
-	switch {
-	case det.status == entry.RolloutStatus:
-		// No verdict change: steady state. Reason/Message stay the engine's
-		// delivery-stage surface; the standing honest-Unknown explanation is
-		// the StatusPolicyEvaluated Condition (ADR-005 §4/§5).
-	case entry.RolloutStatus == "" && det.status == imageflowv1alpha1.RolloutUnknown:
-		// The engine initializes empty rolloutStatus to Unknown on its next
-		// pass with its own reason surface; the observer does not race it.
-	default:
-		out.transition = &rolloutTransition{
-			from: entry.RolloutStatus,
-			to:   det.status,
+	// Native rollout determination (ADR-006) runs for built-in kinds.
+	// However, if CUE evaluation already failed (evalErrClass set), native
+	// observation must NOT overwrite the rollout status — ADR-005 §4 requires
+	// all failures → Unknown. CUE supplements health; native handles rollout
+	// only when CUE has not already determined an error state.
+	if out.evalErrClass != "" {
+		// CUE failed: rollout stays Unknown, skip native override.
+		if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown && entry.RolloutStatus != "" {
+			out.transition = &rolloutTransition{
+				from: entry.RolloutStatus,
+				to:   imageflowv1alpha1.RolloutUnknown,
+			}
 		}
-		out.detMessage = det.message
+		out.rollout = imageflowv1alpha1.RolloutUnknown
+	} else {
+		det := r.determineRollout(ctx, facts, target, *entry)
+		out.rollout = det.status
+		switch {
+		case det.status == entry.RolloutStatus:
+			// No verdict change: steady state. Reason/Message stay the engine's
+			// delivery-stage surface; the standing honest-Unknown explanation is
+			// the StatusPolicyEvaluated Condition (ADR-005 §4/§5).
+		case entry.RolloutStatus == "" && det.status == imageflowv1alpha1.RolloutUnknown:
+			// The engine initializes empty rolloutStatus to Unknown on its next
+			// pass with its own reason surface; the observer does not race it.
+		default:
+			out.transition = &rolloutTransition{
+				from: entry.RolloutStatus,
+				to:   det.status,
+			}
+			out.detMessage = det.message
+		}
 	}
 	return out
 }
@@ -562,7 +575,8 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 // healthKey (T4, ADR-013 D3/D6). It fetches the ConfigMap, builds input from
 // the target workload's unstructured status, and writes results onto the
 // outcome. Errors are classified per ADR-013 D6; all failures → Unknown.
-func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(ctx context.Context, sub *imageflowv1alpha1.ImageSubscription, target imageflowv1alpha1.SubscriptionTarget, entry *imageflowv1alpha1.TargetDeliveryStatus, out *observerOutcome) {
+//nolint:unparam // sub reserved for future audit/logging; kept for API stability.
+func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(ctx context.Context, _ *imageflowv1alpha1.ImageSubscription, target imageflowv1alpha1.SubscriptionTarget, entry *imageflowv1alpha1.TargetDeliveryStatus, out *observerOutcome) {
 	ref := target.StatusPolicyRef
 	if ref == nil {
 		return
@@ -574,7 +588,7 @@ func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(ctx context.Conte
 	cmKey := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
 	if err := r.client.Get(ctx, cmKey, cm); err != nil {
 		errClass := cueeval.EvalError
-		errReason := "ConfigMapNotFound"
+		var errReason string
 		if apierrors.IsNotFound(err) {
 			errReason = "ConfigMapNotFound"
 		} else {

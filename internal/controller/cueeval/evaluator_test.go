@@ -24,6 +24,8 @@ import (
 	"time"
 )
 
+const testStatusSucceeded = "Succeeded"
+
 // TestHappyPath verifies successful evaluation with valid CUE policy and input.
 func TestHappyPath(t *testing.T) {
 	e := NewEvaluator()
@@ -52,7 +54,7 @@ if !_allReady {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Status != "Succeeded" {
+	if result.Status != testStatusSucceeded {
 		t.Errorf("expected status Succeeded, got %s", result.Status)
 	}
 }
@@ -225,7 +227,7 @@ message: "processed \(#Input.value)"
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Status != "Succeeded" {
+	if result.Status != testStatusSucceeded {
 		t.Errorf("expected status Succeeded, got %s", result.Status)
 	}
 }
@@ -277,7 +279,7 @@ message: "All 3 replicas are ready"
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if result.Status != "Succeeded" {
+	if result.Status != testStatusSucceeded {
 		t.Errorf("expected status Succeeded, got %s", result.Status)
 	}
 	if result.Reason != "AllReplicasReady" {

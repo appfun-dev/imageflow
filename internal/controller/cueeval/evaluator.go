@@ -337,6 +337,9 @@ func findSubstring(s, substr string) bool {
 }
 
 // validateImports checks that the compiled CUE value only uses stdlib imports.
+// Currently a no-op: CUE's compiler rejects unknown packages at compile time.
+//
+//nolint:unparam // error return reserved for future AST-based import validation.
 func (e *Evaluator) validateImports(v cue.Value) error {
 	// Walk the value tree looking for import specifications
 	// CUE's standard library packages are allowed; external packages are not

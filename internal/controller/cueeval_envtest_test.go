@@ -125,6 +125,7 @@ func t7cUpdatePolicyConfigMap(t *testing.T, cl client.Client, data map[string]st
 	}
 }
 
+//nolint:unparam // test helper with stable signature for readability.
 func t7cCreateStream(t *testing.T, cl client.Client, ns, name, digest string) {
 	t.Helper()
 	stream := &imageflowv1alpha1.ImageStream{
@@ -151,6 +152,7 @@ func t7cDigestPart(ref string) string {
 	return digest
 }
 
+//nolint:unparam // test helper with stable signature for readability.
 func t7cCreateDeployment(t *testing.T, cl client.Client, ns, name, image string) {
 	t.Helper()
 	deploy := &appsv1.Deployment{
@@ -307,17 +309,6 @@ const t7cSchemaMismatchPolicy = `
 #Input: {
 	requiredField: string
 }
-status: "Succeeded"
-`
-
-// Slow policy that should trigger timeout (>100ms).
-// Note: CUE doesn't have sleep, so we simulate with a complex computation
-// that exceeds the timeout. In practice, this test verifies the timeout path
-// exists; actual timeout behavior depends on CUE evaluation complexity.
-const t7cSlowPolicy = `
-#Input: {}
-// This policy intentionally uses nested comprehensions to consume time.
-// In practice, simple policies evaluate well under 100ms.
 status: "Succeeded"
 `
 
