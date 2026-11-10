@@ -1,9 +1,9 @@
-# ADR-010：v1 指标暴露形态 —— 明文 HTTP :8080，仅集群内可达
+# ADR-010：指标暴露形态 —— HTTPS :8443 + authn/authz（v1.4 起默认）
 
-- 状态：Accepted
-- 日期：2026-10-26
-- 决策人：项目负责人（T12 裁决，orchestrator ruling 1）
-- 关联：`docs/metrics-contract.md`；ADR-001（单一 manager/webhook 部署形态）；T1 延期记录 commit `b7ef789`（fix(T1): align e2e metrics spec with plaintext http :8080 posture，「Secure metrics (cert-manager + authn/authz) is deferred to T12 deployment hardening」）；`config/default/kustomization.yaml`（T3 注释：metrics 证书保持关闭，暴露形态属 T12 决策）；`config/network-policy/allow-metrics-traffic.yaml`
+- 状态：Amended
+- 日期：2026-10-26（原始）；2026-11-09（v1.4 修订）
+- 决策人：项目负责人（T12 裁决，orchestrator ruling 1；v1.4 grill Q1-Q7）
+- 关联：`docs/metrics-contract.md`；ADR-001（单一 manager/webhook 部署形态）；T1 延期记录 commit `b7ef789`；`config/default/kustomization.yaml`；`config/network-policy/allow-metrics-traffic.yaml`；`docs/spec/imageflow-v1.4-secure-metrics.md`
 
 ## 背景
 
@@ -11,39 +11,62 @@ kubebuilder 脚手架默认以「安全指标」形态交付：`--metrics-secure
 
 ## 决策
 
-**v1 指标暴露 = 明文 HTTP :8080，仅集群内可达**（无 NodePort/Ingress/LoadBalancer 暴露路径），并满足以下配套要求：
+### v1.4 修订（grill Q1-Q7）
 
-1. **暴露面收敛**：指标只经 ClusterIP Service `imageflow-controller-manager-metrics-service` 提供；`config/network-policy/allow-metrics-traffic.yaml` 作为**可选加固**（opt-in overlay，不进 default 构建）交付，端口与明文形态对齐为 8080，激活方式（uncomment + 给监控 ns 打 `metrics=enabled` 标签）写入运维文档。默认不开启：NetworkPolicy 默认开启会在监控命名空间未打标签的集群上**静默阻断抓取**。
-2. **数据面无敏感内容**：`docs/metrics-contract.md` 冻结了全部指标的封闭标签词表（snake_case 枚举，全项目 ≤ 约 90 条序列）；指标不含凭据、不含租户/用户数据、不含无界基数标签。明文暴露的信息量 = 指标名 + 计数/直方图。
-3. **升级路径完整落档**：`docs/ops.md` §Metrics 给出切换到安全形态的精确步骤（见下），未来切换无需考古。
-4. 本 ADR 关闭 T1 的延期记录（commit `b7ef789`）。
+**v1.4 起，指标暴露默认 = HTTPS :8443 + controller-runtime authn/authz + cert-manager 证书，仅集群内可达**。具体决策：
 
-**升级路径**（v1.1+ 若需要 authn/authz 指标端点）：
+1. **范围**：仅 Metrics 端点安全化。Webhook cert-manager 依赖不动（Q1=A）。
+2. **认证机制**：controller-runtime 内建 authn/authz（`--metrics-secure=true`），TokenReview + SubjectAccessReview。不使用 kube-rbac-proxy sidecar（Q2=A）。
+3. **NetworkPolicy**：默认启用，纳入 default kustomization 构建。监控命名空间须打 `metrics=enabled` 标签。端口 8443（Q3=B）。
+4. **默认姿态**：安全形态替换明文为默认。明文降级为 legacy，通过注释保留在 default kustomization.yaml 中供按需切换（Q4=A, Q6=B）。
+5. **Metrics Certificate**：独立 cert-manager Certificate，DNS = `controller-manager-metrics-service.system.svc(.cluster.local)`，Secret = `metrics-server-cert`。不复用 webhook serving-cert（Q7=A）。
+6. **e2e 测试**：双泳道并行 — 安全主泳道（HTTPS + SA token）+ 明文降级泳道（HTTP :8080）（Q5=B）。
+7. **args/0 遮蔽陷阱消除**：基座 manager.yaml args 直接改为 `:8443 --metrics-secure=true --metrics-cert-path=...`，不再依赖 patch insert 覆盖。
 
-1. `config/manager/manager.yaml`：`--metrics-bind-address=:8443`、`--metrics-secure=true`、追加 `--metrics-cert-path=/tmp/k8s-metrics-server/metrics-certs`（**注意**：脚手架的 `manager_metrics_patch.yaml` 把 `:8443` 插在 args/0，Go flag 解析后值覆盖先值——必须同时改掉基座 args 中的 `:8080`，否则 :8080 生效、patch 无效）。
-2. `config/default/kustomization.yaml`：取消注释 metrics-certs 两段 replacements；启用 `manager_metrics_patch.yaml` 与 `cert_metrics_manager_patch.yaml` 补丁。
-3. `config/certmanager/`：新增 metrics Certificate（DNS 名指向 metrics Service），Secret `metrics-server-cert`。
-4. `metrics_auth_role*` / `metrics_reader_role` 已随 default 部署；抓取方（如 Prometheus）以 ServiceAccount token 走 HTTPS 抓取，并持有 `metrics-reader` 授权。
-5. e2e 主泳道指标用例改为 token 认证的 https 抓取；NetworkPolicy 端口改回 8443。
+### v1 原始决策（历史参考）
+
+v1 指标暴露 = 明文 HTTP :8080，仅集群内可达。NetworkPolicy opt-in。安全形态构件就绪但未启用。该姿态在 v1.4 被上述修订取代。
+
+**降级路径**（v1.4+ 若需回退到明文）：
+
+1. `config/manager/manager.yaml`：改回 `--metrics-bind-address=:8080 --metrics-secure=false`，移除 `--metrics-cert-path`。
+2. `config/default/kustomization.yaml`：注释掉 `manager_metrics_patch.yaml`、`cert_metrics_manager_patch.yaml`、metrics-certs replacements。
+3. NetworkPolicy 端口改回 8080。
+4. e2e 明文泳道验证降级正确性。
 
 ## 备选方案
 
-- **B. 立即启用安全指标（kube-rbac-proxy 或 controller-runtime authn/authz + cert-manager 证书）** —— 被否：需要重写**绿灯中的跨泳道** e2e 主泳道指标用例（脚手架泳道文件），为每次抓取增加 TokenReview/SAR 开销与证书运维面，而换来的保护对象是「不含任何敏感数据的封闭词表指标」；在 v1 单组织受信租户模型（设计文档 Q2）下收益/成本不成比例。构件保留在仓库中，随时可按上述路径启用。
+- **B. kube-rbac-proxy sidecar** —— 被否（v1 原始 + v1.4 确认）：controller-runtime v0.15+ 已内建 authn/authz，sidecar 增加资源开销且属旧方案。
+- **C. Webhook + Metrics 同时去 cert-manager** —— 被否（v1.4 Q1）：webhook 去 cert-manager 是独立议题，混入会膨胀范围。
+- **D. NetworkPolicy 保持 opt-in** —— 被否（v1.4 Q3）：安全形态目标是收紧暴露面，authn/authz 已兜底，NetworkPolicy 默认启用是纵深防御。
+- **E. 复用 webhook serving-cert** —— 被否（v1.4 Q7）：独立证书隔离故障域，避免 DNS 不匹配时互相影响。
 
 ## 理由
 
-- 威胁模型：v1 部署在单组织受信集群内；指标端点不经任何集群外路径暴露；能读到 :8080 的主体本就已具备集群内网络位置，其可从指标获得的信息（控制器名、reconcile 计数、封闭词表 reason 标签）不构成凭据、隐私或有价值的侦察增量。
-- 明文形态使监控接入零摩擦（任何 Prometheus/agent 直接抓取），符合 v1「半天跑通」的 quickstart 目标。
-- 安全形态的全部脚手架已就绪且被本 ADR 的升级路径精确锚定——「延后」不等于「欠账」。
+- v1 明文是临时姿态，"延后不等于欠账"（v1 原始理由）。v1.4 兑现该承诺。
+- 安全形态全部脚手架已就绪，切换成本极低（配置变更，非代码变更）。
+- cert-manager 已是 webhook 的前置依赖，不引入新的集群前提条件。
+- args/0 遮蔽陷阱通过修改基座 args 彻底消除。
+- 双泳道 e2e 确保安全形态和降级路径都被持续验证。
 
 ## 影响
 
-- `config/manager/manager.yaml` 显式携带 `--metrics-bind-address=:8080 --metrics-secure=false` 及全部 ImageFlow 行为旗标（部署清单 = 旗标面唯一部署事实源）。
-- `config/network-policy/allow-metrics-traffic.yaml` 端口 8443→8080，头部注释写明 opt-in 激活步骤与安全形态联动改法。
-- `docs/ops.md` §Metrics 承载理由、NetworkPolicy 指南与升级路径。
-- e2e 主泳道明文指标用例维持不变（不触碰绿灯跨泳道文件）。
-- `docs/metrics-contract.md` 不变（T12 不新增指标）。
+- `config/manager/manager.yaml`：基座 args 改为 `:8443 --metrics-secure=true --metrics-cert-path=...`。
+- `config/default/kustomization.yaml`：启用 metrics patches + replacements + NetworkPolicy。
+- `config/certmanager/`：新增 metrics Certificate。
+- `config/network-policy/allow-metrics-traffic.yaml`：端口 8080→8443，从 opt-in 变为 default。
+- `config/default/metrics_service.yaml`：target port 8080→8443。
+- `test/e2e/e2e_test.go`：主泳道改为 HTTPS + token 抓取；新增明文降级泳道。
+- `docs/ops.md` §Metrics：更新默认姿态描述，降级路径替代原升级路径。
+- `docs/metrics-contract.md` 不变（v1.4 不新增指标）。
+
+## 修订记录
+
+| 日期 | 版本 | 变更 |
+|------|------|------|
+| 2026-10-26 | v1 | 初始决策：明文 HTTP :8080，安全形态延期 |
+| 2026-11-09 | v1.4 | 安全形态替换为默认；NetworkPolicy 默认启用；args/0 陷阱消除；双泳道 e2e |
 
 ## 未解决问题
 
-- v1.1+ 是否默认切换到安全指标形态（届时按升级路径执行并修订本 ADR 状态）。
+- 无。v1.4 修订关闭了 v1 的未解决问题（"v1.1+ 是否默认切换到安全指标形态"）。
