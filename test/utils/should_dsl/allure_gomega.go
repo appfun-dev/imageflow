@@ -45,7 +45,8 @@ func (t *allureTB) Fatalf(format string, args ...interface{}) {
 	if ok {
 		msg = fmt.Sprintf("%s:%d: %s", file, line, msg)
 	}
-	t.ctx.FailNow(msg)
+	// allure.Context.Fatalf accepts format string; FailNow() takes no args
+	t.ctx.Fatalf("%s", msg)
 }
 
 // newG creates a per-call Gomega instance bound to the given Allure context.
