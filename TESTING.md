@@ -256,6 +256,24 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 - [ ] 表格驱动测试已使用 `allure.WithParameter` 外显参数。
 - [ ] 关键步骤已使用 `a.StepParameter` / `a.StepDescription` 补充说明。
 
+## Allure 导入约定
+
+Allure gotest 包采用**匿名导入**（`.`），使标注函数可直接调用：
+
+```go
+// ✅ 默认：匿名导入
+import . "github.com/allure-framework/allure-go/commons/gotest"
+```
+
+仅当与其他包的函数名冲突时，才使用别名导入：
+
+```go
+// ✅ 仅当存在命名冲突时：别名导入
+import agt "github.com/allure-framework/allure-go/commons/gotest"
+```
+
+> **原则**：优先匿名导入；别名应简短且有语义（如 `agt` 表示 allure gotest）。详见 [CODING_STANDARDS.md](CODING_STANDARDS.md)。
+
 ## 依赖与版本
 
 ```text
