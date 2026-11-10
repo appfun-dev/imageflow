@@ -56,6 +56,7 @@ xerj def --prefix ref-controller-runtime <符号名>
 |---------|-----------|---------|
 | 涉及特性开发的代码实现 | `/ub-mode` — provider `kimi-coding`，model `k3`，reasoning `max` | `subagent("/ub-mode\n" + task, { provider: "kimi-coding", model: "k3" })`；首行 `/ub-mode` 激活精简原则人设 |
 | TDD、纯测试子任务：单元测试、集成测试、验收测试 | 🎯 Kent Beck·极限编程专家 — provider `kimi-coding`，model `k3`，reasoning `max` | 优先 `wf_run_node`/`summon_expert`（支持 thinking 参数）；若仅可用 `subagent_fork`，见下方工具限制说明 |
+| Code Review：代码审查、PR 审查、变更评审 | 🔍 代码审查工程师 — provider `kimi-coding`，model `k3`，reasoning `max` | `subagent("@代码审查工程师\n" + task, { provider: "kimi-coding", model: "k3" })`；首行 `@代码审查工程师` 激活审查人设 |
 | 默认（无匹配） | 继承父会话模型 | `subagent(task)` 不覆盖参数 |
 
 ### ⚠️ 工具限制：reasoning 参数透传
