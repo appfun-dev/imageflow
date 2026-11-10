@@ -32,7 +32,11 @@ package controller
 //     because the v1 CUE status policy evaluator is deferred to v1.1
 //     (ADR-005 §4/§5). The subscription carries an explicit
 //     StatusPolicyEvaluated=False Condition for that contract;
-//   - healthStatus is ALWAYS Unknown in v1 (no evaluator): imageApplied=true
+//   - healthStatus is derived from pod-level container signals for
+//     first-batch built-in kinds once their rollout has Succeeded (spec v1.5
+//     D1/D2, gated on rollout completion); targets with a
+//     statusPolicyRef.healthKey keep the v1.3 CUE evaluator path (spec v1.5
+//     D4), and every other class stays honestly Unknown: imageApplied=true
 //     or rollout=Succeeded never implies health (ADR-005 §3);
 //   - a workload whose pod template no longer references the desired image
 //     is Unknown, not Succeeded/Failed: native status would describe a
@@ -371,15 +375,19 @@ type observerOutcome struct {
 	// rollout is the determined-or-persisted rollout status after this pass
 	// (drives record healing and the poll requeue).
 	rollout imageflowv1alpha1.RolloutStatus
-	// health is the CUE-evaluated health status (T4, ADR-013). Empty means
-	// no health evaluation was performed (evaluator deferred or not configured).
+	// health is the determined health status of this pass: CUE-evaluated for
+	// targets with a statusPolicyRef.healthKey (T4, ADR-013) or natively
+	// derived from pod-level container signals for first-batch kinds
+	// (spec v1.5 D1/D4). Empty means no health evaluation was performed
+	// (evaluator deferred or not configured).
 	health imageflowv1alpha1.HealthStatus
 	// transition is non-nil when the persisted entry's rolloutStatus must
 	// move; it is applied only when the fresh state still matches `from`
 	// (stale plans are dropped and re-planned on the next trigger).
 	transition *rolloutTransition
 	// healthTransition is non-nil when the persisted entry's healthStatus
-	// must move as a result of CUE evaluation (T4).
+	// must move — from CUE evaluation (T4) or from native pod-level health
+	// determination (spec v1.5 D1).
 	healthTransition *healthTransition
 	// detMessage is the determination detail (native status summary or the
 	// honest-Unknown contract text) carried on the planned Event. The
@@ -566,6 +574,23 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 				to:   det.status,
 			}
 			out.detMessage = det.message
+		}
+		// Native health determination (spec v1.5 D1/D2/D4/D7): gated on this
+		// pass's rollout verdict and derived from pod-level container signals
+		// over the shared listWorkloadPods result (D5 — no duplicate API
+		// call). Skipped when a statusPolicyRef.healthKey is configured: D4
+		// keeps the v1.3 CUE evaluator path authoritative for those targets
+		// (evaluateTargetWithCUE above already planned their health
+		// transition, v1.3 behavior unchanged).
+		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
+			hdet := r.determineHealth(ctx, facts, *entry, out.rollout)
+			out.health = hdet.status
+			if entry.HealthStatus != hdet.status {
+				out.healthTransition = &healthTransition{
+					from: entry.HealthStatus,
+					to:   hdet.status,
+				}
+			}
 		}
 	}
 	return out
@@ -820,11 +845,13 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 			result: observerResultLabel(out.transition.to),
 		})
 		// Health sample per rollout transition. With T4 CUE evaluation,
-		// health may be determined by the evaluator; otherwise it stays
-		// Unknown (ADR-005 §4).
+		// health may be determined by the evaluator; for first-batch kinds
+		// it is natively derived from pod signals (spec v1.5 D1); otherwise
+		// it stays Unknown (ADR-005 §4).
 		transition.healthSamples = append(transition.healthSamples, observerHealthLabel(entry.HealthStatus))
 	}
-	// Apply health transitions from CUE evaluation (T4, ADR-013 D3).
+	// Apply health transitions (CUE evaluation, T4/ADR-013 D3; native health
+	// determination, spec v1.5 D1).
 	for i := range outcomes {
 		out := &outcomes[i]
 		if out.healthTransition == nil {

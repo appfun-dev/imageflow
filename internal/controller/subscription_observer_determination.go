@@ -391,6 +391,43 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 	}
 }
 
+// determineHealth applies the Health-stage determination order (spec v1.5
+// D2/D7/D1), symmetric with determineRollout. The caller (observeTarget)
+// invokes it only for observable first-batch kinds whose CUE evaluation did
+// not fail, and never for targets with a statusPolicyRef.healthKey — spec
+// v1.5 D4 keeps the v1.3 CUE evaluator path authoritative for those targets.
+//
+// Decision order (first match wins):
+//
+//  1. rollout ≠ Succeeded ⇒ Unknown with the rollout gate message (spec v1.5
+//     D2/D7): while a rollout is Progressing pods may legitimately be
+//     starting, and after a Failed rollout the image never fully deployed —
+//     health is assessed only for a successfully rolled-out image;
+//  2. rollout Succeeded ⇒ scanPodsForHealth over the shared listWorkloadPods
+//     result (spec v1.5 D1/D3/D5): one pod list per workload per reconcile
+//     pass, never a duplicate API call.
+//
+// A pod-list failure degrades to Unknown (spec v1.5 D3): the observer never
+// fabricates health it could not observe.
+func (r *SubscriptionObserverReconciler) determineHealth(ctx context.Context, facts workloadFacts, entry imageflowv1alpha1.TargetDeliveryStatus, rollout imageflowv1alpha1.RolloutStatus) healthDetermination {
+	if rollout != imageflowv1alpha1.RolloutSucceeded {
+		return healthDetermination{
+			status:  imageflowv1alpha1.HealthUnknown,
+			message: fmt.Sprintf("health evaluation gated on rollout completion (current: %s)", rollout),
+		}
+	}
+	pods, err := r.listWorkloadPods(ctx, facts)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("workload observer health pod list failed; health stays Unknown",
+			"workload", facts.kind, "namespace", facts.namespace, "error", err)
+		return healthDetermination{
+			status:  imageflowv1alpha1.HealthUnknown,
+			message: fmt.Sprintf("pod list failed for %s in namespace %s: %v", facts.kind, facts.namespace, err),
+		}
+	}
+	return scanPodsForHealth(ctx, pods, entry.DesiredImage)
+}
+
 // listWorkloadPods lists the pods owned by this workload, filtered and
 // sorted by name. Ownership is exact: StatefulSet/DaemonSet pods carry the
 // workload UID as controller owner; Deployment pods are owned by ReplicaSets
