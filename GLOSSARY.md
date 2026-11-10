@@ -90,7 +90,10 @@ ImageFlow 自定义的受限 JSON-like 路径语法（`imageFields[]` 条目）�
 _Avoid_: JSONPath、fieldPath（不加限定时）
 
 **Workload Observer**:
-读取原生 status、判断 rollout 进展的观察组件；不执行发布，不改写期望镜像。
+读取原生 status、判断 rollout 进展与容器健康状态的观察组件；不执行发布，不改写期望镜像。v1.5 起为 first-batch kinds 提供 native health determination（基于 pod container readiness + restart count），仅在 rollout Succeeded 后评估，CUE healthKey 优先。
+
+**Native Health Determination**:
+Workload Observer 对 first-batch kinds（Deployment/StatefulSet/DaemonSet）的容器级健康推导：基于 pod containerStatus.Ready 与 RestartCount，仅在 rollout = Succeeded 时评估，未配置 CUE healthKey 时自动启用。区别于 CUE Status Evaluator 通过 statusPolicyRef.healthKey 提供的自定义健康评估。
 
 **CUE Status Evaluator**:
 执行外部配置的 CUE 状态策略的逻辑组件；不是 KubeVela Definition 的原生运行时。
