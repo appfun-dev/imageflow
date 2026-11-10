@@ -278,21 +278,33 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 
 ## Allure 导入约定
 
-Allure gotest 包采用**匿名导入**（`.`），使标注函数可直接调用：
+### gotest 包
+
+Allure gotest 包采用**匿名导入 + 别名导入并存**：
 
 ```go
-// ✅ 默认：匿名导入
-import . "github.com/allure-framework/allure-go/commons/gotest"
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"      // 匿名：With* 函数直接使用
+    agt "github.com/allure-framework/allure-go/commons/gotest"    // 别名：agt.Test, agt.Context
+)
 ```
 
-仅当与其他包的函数名冲突时，才使用别名导入：
+- `agt.Test(...)` 替代 `allure.Test(...)`
+- `agt.Context` 替代 `allure.Context`
+- `With*(...)` 函数通过匿名导入直接使用
 
-```go
-// ✅ 仅当存在命名冲突时：别名导入
-import agt "github.com/allure-framework/allure-go/commons/gotest"
-```
+### testify 包优先级
 
-> **原则**：优先匿名导入；别名应简短且有语义（如 `agt` 表示 allure gotest）。详见 [CODING_STANDARDS.md](CODING_STANDARDS.md)。
+优先使用 Allure 封装的 testify 包，仅在必要时回退到原生 stretchr/testify：
+
+| 优先级 | 包路径 | 使用场景 |
+|--------|--------|----------|
+| 1️⃣ | `github.com/allure-framework/allure-go/testify/assert` | 已导入 allure 时首选 |
+| 1️⃣ | `github.com/allure-framework/allure-go/testify/require` | 已导入 allure 时首选 |
+| 2️⃣ | `github.com/stretchr/testify/assert` | allure 版本缺少所需函数，或未导入 allure 时 |
+| 2️⃣ | `github.com/stretchr/testify/require` | allure 版本缺少所需函数，或未导入 allure 时 |
+
+> **判断流程**：已导入 allure → 用 `allure-go/testify`；所需函数缺失 → 回退 `stretchr/testify`（别名避免冲突）；未导入 allure → 直接用 `stretchr/testify`。详见 [CODING_STANDARDS.md](CODING_STANDARDS.md)。
 
 ## 依赖与版本
 
@@ -301,7 +313,7 @@ require (
     github.com/allure-framework/allure-go/commons/gotest <version-with-testify>
     github.com/allure-framework/allure-go/testify/assert
     github.com/allure-framework/allure-go/testify/require
-    github.com/stretchr/testify
+    github.com/stretchr/testify  // ← 仅当 allure 版本缺少所需函数时作为回退
 )
 ```
 

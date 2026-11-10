@@ -54,19 +54,61 @@
 
 ## Allure 测试导入约定
 
-**规则**：TESTING.md 中的包 allure 采用匿名导入，仅在存在重复时增加别名导入。
+### gotest 包导入
+
+**规则**：Allure gotest 包采用匿名导入 + 别名导入并存。
 
 ```go
-// ✅ 默认：匿名导入
-import . "github.com/allure-framework/allure-go/commons/gotest"
-
-// ✅ 仅当存在命名冲突时：别名导入
-import agt "github.com/allure-framework/allure-go/commons/gotest"
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"      // 匿名：With* 函数直接使用
+    agt "github.com/allure-framework/allure-go/commons/gotest"    // 别名：agt.Test, agt.Context
+)
 ```
 
-- 优先使用匿名导入（`.`），使 Allure 标注函数可直接调用
-- 仅当与其他包的函数名冲突时，才使用别名导入
-- 别名应简短且有语义（如 `agt` 表示 allure gotest）
+- `agt.Test(...)` 替代 `allure.Test(...)`
+- `agt.Context` 替代 `allure.Context`
+- `With*(...)` 函数通过匿名导入直接使用（如 `WithAllureID`, `WithLabel`）
+
+### testify 包导入优先级
+
+**规则**：优先使用 Allure 封装的 testify 包，仅在必要时回退到原生 stretchr/testify。
+
+| 优先级 | 包路径 | 使用场景 |
+|--------|--------|----------|
+| 1️⃣ | `github.com/allure-framework/allure-go/testify/assert` | 已导入 allure 包时首选 |
+| 1️⃣ | `github.com/allure-framework/allure-go/testify/require` | 已导入 allure 包时首选 |
+| 2️⃣ | `github.com/stretchr/testify/assert` | allure 版本缺少所需函数，或未导入 allure 时 |
+| 2️⃣ | `github.com/stretchr/testify/require` | allure 版本缺少所需函数，或未导入 allure 时 |
+
+**示例**：
+```go
+// ✅ 场景 1：已导入 allure，优先用 allure 封装的 testify
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+    "github.com/allure-framework/allure-go/testify/assert"
+    "github.com/allure-framework/allure-go/testify/require"
+)
+
+// ✅ 场景 2：allure 版本缺少某函数，回退到 stretchr（别名避免冲突）
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+    "github.com/allure-framework/allure-go/testify/assert"
+    strequire "github.com/stretchr/testify/require"  // ← 别名，仅当 allure require 缺少所需函数时
+)
+
+// ✅ 场景 3：未导入 allure 包，直接用 stretchr
+import (
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+)
+```
+
+**判断流程**：
+1. 测试文件已导入 allure gotest 包？→ 用 `allure-go/testify/assert` 或 `require`
+2. 所需函数在 allure 版本中不存在？→ 回退 `stretchr/testify`（别名导入避免冲突）
+3. 未导入 allure 包？→ 直接用 `stretchr/testify`
 
 ## 引用
 
