@@ -69,6 +69,16 @@ type rolloutDetermination struct {
 	message string
 }
 
+// healthDetermination is the observer's honest Health-stage verdict for one
+// target entry, symmetric with rolloutDetermination: rolloutStatus and
+// healthStatus are independent fields of the ADR-005 §3 Outcome Stages model,
+// so the Health stage carries its own status/message pair and is never
+// derived from rollout success.
+type healthDetermination struct {
+	status  imageflowv1alpha1.HealthStatus
+	message string
+}
+
 // workloadFacts carries the ADR-006 observation fields extracted from a FRESH
 // read of one built-in workload, normalized across the three kinds.
 type workloadFacts struct {
@@ -381,18 +391,20 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 	}
 }
 
-// scanPodsForImageFailure looks for a pod of this workload that is stuck
-// STARTING the desired image (ErrImagePull family). Ownership is exact:
-// StatefulSet/DaemonSet pods carry the workload UID as controller owner;
-// Deployment pods are owned by ReplicaSets owned by the Deployment, so the
-// scan walks the two-hop owner chain. Pods are visited in name order for a
-// deterministic verdict when several fail at once.
-func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Context, facts workloadFacts, desiredImage string) (podName, containerName, waitingReason, waitingMessage string, err error) {
+// listWorkloadPods lists the pods owned by this workload, filtered and
+// sorted by name. Ownership is exact: StatefulSet/DaemonSet pods carry the
+// workload UID as controller owner; Deployment pods are owned by ReplicaSets
+// owned by the Deployment, so the scan walks the two-hop owner chain. The
+// list is fetched ONCE per workload and shared by rollout and health
+// determination within a single reconcile pass (ADR-005 §3, spec v1.5 D5),
+// avoiding duplicate API calls. Pods are returned in name order for a
+// deterministic verdict when several match at once.
+func (r *SubscriptionObserverReconciler) listWorkloadPods(ctx context.Context, facts workloadFacts) ([]*corev1.Pod, error) {
 	ownerUIDs := map[types.UID]struct{}{}
 	if facts.kind == observerKindDeployment {
 		var rsList appsv1.ReplicaSetList
 		if err := r.client.List(ctx, &rsList, client.InNamespace(facts.namespace)); err != nil {
-			return "", "", "", "", err
+			return nil, err
 		}
 		for i := range rsList.Items {
 			rs := &rsList.Items[i]
@@ -401,7 +413,7 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 			}
 		}
 		if len(ownerUIDs) == 0 {
-			return "", "", "", "", nil
+			return nil, nil
 		}
 	} else {
 		ownerUIDs[facts.uid] = struct{}{}
@@ -409,7 +421,7 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 
 	var podList corev1.PodList
 	if err := r.client.List(ctx, &podList, client.InNamespace(facts.namespace)); err != nil {
-		return "", "", "", "", err
+		return nil, err
 	}
 	pods := make([]*corev1.Pod, 0, len(podList.Items))
 	for i := range podList.Items {
@@ -419,6 +431,19 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 		}
 	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
+	return pods, nil
+}
+
+// scanPodsForImageFailure looks for a pod of this workload that is stuck
+// STARTING the desired image (ErrImagePull family). Pods come from
+// listWorkloadPods (shared with health determination); the scan itself stays
+// rollout-specific: CrashLoopBackOff is deliberately EXCLUDED here (a
+// running-then-crashing container is the Health stage's domain, ADR-005 §4).
+func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Context, facts workloadFacts, desiredImage string) (podName, containerName, waitingReason, waitingMessage string, err error) {
+	pods, err := r.listWorkloadPods(ctx, facts)
+	if err != nil {
+		return "", "", "", "", err
+	}
 	for _, pod := range pods {
 		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
 		for _, cs := range statuses {
