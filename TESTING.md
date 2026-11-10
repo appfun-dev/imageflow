@@ -404,3 +404,31 @@ CUE Status Evaluator 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisi
 - **错误分类**：CompileError / EvalError / Timeout 三类各有独立用例，确保 Condition Reason 映射正确；
 - **沙箱安全**：TestSandboxImportRejection 验证 import 禁止；TestPanicRecovery 验证 goroutine 隔离；代码审查确认无网络/文件系统调用；
 - **测试 fixtures**：testrunner 测试覆盖 test-cases.yaml 的各种边界（空、畸形、通配、混合结果）。
+
+## Native Health Determination 测试矩阵（v1.5，T5）
+
+### 单元测试（`internal/controller/subscription_observer_test.go`）
+
+Native health determination 的 verdict 逻辑通过现有 rollout 测试间接覆盖（rollout gate 确保 health 仅在 Succeeded 后评估），CUE 优先级通过 envtest 覆盖。Spec 规划的专用测试待后续 ticket 落地：
+
+| 计划用例 | 断言 | 状态 |
+|---|---|---|
+| `TestObserverDetermineDeploymentHealthStates` | Deployment verdict matrix（Healthy/Unhealthy/Unknown） | 待实现 |
+| `TestObserverDetermineStatefulSetHealthStates` | StatefulSet verdict matrix | 待实现 |
+| `TestObserverDetermineDaemonSetHealthStates` | DaemonSet verdict matrix | 待实现 |
+| `TestObserverHealthRolloutGateBlocksEvaluation` | rollout ≠ Succeeded → health Unknown，scanPodsForHealth 不被调用 | 待实现 |
+| `TestObserverHealthCUEPriorityOverNative` | healthKey 存在时 CUE evaluator 优先，native 不运行 | 待实现 |
+
+### Envtest 集成测试（`internal/controller/cueeval_envtest_test.go`）
+
+- CUE health evaluation happy path：`TestCUEEvalEnvtestHappyPath` — healthKey 配置时 CUE 评估产出 HealthStatus=Healthy
+- Backward compatibility：无 rolloutKey/healthKey 时保持 deferred，HealthStatus=Unknown
+
+Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -skip 'Envtest'`
+
+### 覆盖率要点
+
+- **Rollout gate**：现有 `TestObserverDetermine{Deployment,StatefulSet,DaemonSet}RolloutStates` 验证 rollout 状态判定，health gate 复用同一机制；
+- **CUE priority**：envtest `TestCUEEvalEnvtestHappyPath` 验证 healthKey 存在时 CUE 评估生效；
+- **Pod-level signals**：`scanPodsForHealth` 的 container Ready + RestartCount 逻辑待专用单元测试覆盖；
+- **Worst-case aggregation**：多 pod 场景的最差聚合待专用测试覆盖。

@@ -924,7 +924,7 @@ func healInFlightRecords(computed *imageflowv1alpha1.ImageSubscriptionStatus, ou
 func setStatusPolicyCondition(computed *imageflowv1alpha1.ImageSubscriptionStatus, policyRefs int, evalResults []targetEvalResult, generation int64, now time.Time) {
 	reason := ReasonStatusPolicyNotConfigured
 	status := metav1.ConditionFalse
-	message := "No target declares a statusPolicyRef: healthStatus stays honestly Unknown for every target and success is never fabricated. Rollout of built-in first-batch kinds is observed from native workload status (ADR-006)."
+	message := "No target declares a statusPolicyRef: rollout of built-in first-batch kinds is observed from native workload status (ADR-006); native health determination (v1.5, ADR-013 §v1.5) evaluates pod container readiness and restart counts after rollout Succeeded. Non-first-batch kinds stay honestly Unknown."
 
 	if policyRefs > 0 {
 		if len(evalResults) == 0 {
