@@ -240,6 +240,60 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 }
 ```
 
+### should_dsl + AExpect/AEventually（推荐）
+
+使用 `test/utils/should_dsl` 封装的 Gomega 原语，断言失败自动绑定 Allure Context：
+
+```go
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+    . "github.com/appfun-dev/imageflow/test/utils/should_dsl"
+)
+
+func TestFakeClockAdvancesDeterministically(t *testing.T) {
+    agt.Test(t, "Fake clock advances deterministically",
+        WithAllureID("CLOCK-001"),
+        WithTMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
+        WithLabel("userstory", "US-INFRA-1"),
+        WithLabel("scenario", "deterministic time advancement"),
+        WithEpic("Infrastructure: Test Seams"),
+        WithFeature("ADR-009 Testing Strategy"),
+        WithStory("US-INFRA-1"),
+        WithParentSuite("unit"),
+        WithSuite("Clock"),
+        func(a *agt.Context) {
+            start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+            clk := NewFake(start)
+
+            a.Step("Verify initial time equals start", func(ctx interface{}) error {
+                AExpect(a, clk.Now()).Should(Equal(start))
+                return nil
+            })
+
+            a.Step("Advance by 5 minutes", func(ctx interface{}) error {
+                clk.Advance(5 * time.Minute)
+                want := start.Add(5 * time.Minute)
+                AExpect(a, clk.Now()).Should(Equal(want))
+                return nil
+            })
+
+            // Async assertion with Eventually
+            a.Step("Verify Since computes elapsed duration", func(ctx interface{}) error {
+                before := clk.Now()
+                clk.Advance(time.Hour)
+                AEventually(a, func() bool {
+                    return clk.Since(before) >= time.Hour
+                }).WithTimeout(1*time.Second).Should(BeTrue())
+                return nil
+            })
+        },
+    )
+}
+```
+
+> **完整范例**：见 [`internal/clock/clock_test.go`](internal/clock/clock_test.go)。该文件包含三个测试用例，覆盖同步断言、异步断言和并发安全场景，是后续测试改进的参考样本。
+
 ## 命名约定
 
 | 对象 | 约定 | 示例 |
