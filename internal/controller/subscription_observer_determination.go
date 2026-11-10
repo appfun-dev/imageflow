@@ -458,6 +458,98 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 	return "", "", "", "", nil
 }
 
+// scanPodsForHealth derives the Health-stage verdict from pod-level
+// container signals (spec v1.5 D1/D3): readiness and restartCount of every
+// container running the desired image. Pods come from listWorkloadPods,
+// shared with rollout determination within one reconcile pass (spec v1.5
+// D5). The caller gates invocation on rollout = Succeeded (spec v1.5 D2);
+// this function only judges what the pods report.
+//
+// Verdict rules (worst-case wins across all pods, spec v1.5 D3):
+//
+//  1. no container matches the desired image ⇒ Unknown "no pods found for
+//     workload" — the pods say nothing about THIS image;
+//  2. all matching containers Ready AND restartCount == 0 ⇒ Healthy "all
+//     containers ready";
+//  3. all matching containers Ready AND some restartCount > 0 ⇒ Healthy
+//     "containers recovered after N restarts" (self-healed);
+//  4. any matching container not Ready AND restartCount > 0 ⇒ Unhealthy,
+//     naming the failing container, its pod and the restart count (crash
+//     loop — CrashLoopBackOff is a HEALTH signal, deliberately included
+//     here although rollout determination excludes it, ADR-005 §4);
+//  5. any matching container not Ready AND restartCount == 0 ⇒ Unknown
+//     "container X not ready, awaiting initial startup" — a transient
+//     state with no restart signal yet; the observer never fabricates
+//     failure before the kubelet reports one.
+//
+// The function is pure: it reads the given pod list and never touches the
+// API server, so it is testable independently of the reconcile loop.
+func scanPodsForHealth(ctx context.Context, pods []*corev1.Pod, desiredImage string) healthDetermination {
+	_ = ctx // kept for symmetry with the rollout scan and future diagnostics
+	matched := 0
+	totalRestarts := int32(0)
+	// transient records the first not-ready container with no restarts yet
+	// (rule 5); pods are name-sorted by listWorkloadPods, so the first hit
+	// is deterministic.
+	var transientPod, transientContainer string
+	for _, pod := range pods {
+		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			if cs.Image != desiredImage {
+				continue
+			}
+			matched++
+			totalRestarts += cs.RestartCount
+			if !cs.Ready && cs.RestartCount > 0 {
+				// Unhealthy is the worst case (spec v1.5 D3 aggregation:
+				// Unhealthy > Unknown > Healthy) — first hit wins.
+				reason := ""
+				if cs.State.Waiting != nil {
+					reason = cs.State.Waiting.Reason
+				} else if cs.State.Terminated != nil {
+					reason = cs.State.Terminated.Reason
+				}
+				detail := ""
+				if reason != "" {
+					detail = fmt.Sprintf(" (%s)", reason)
+				}
+				return healthDetermination{
+					status: imageflowv1alpha1.HealthUnhealthy,
+					message: fmt.Sprintf("container %q in pod %s is not ready after %d restarts%s",
+						cs.Name, pod.Name, cs.RestartCount, detail),
+				}
+			}
+			if !cs.Ready && transientContainer == "" {
+				transientPod = pod.Name
+				transientContainer = cs.Name
+			}
+		}
+	}
+	if matched == 0 {
+		return healthDetermination{
+			status:  imageflowv1alpha1.HealthUnknown,
+			message: "no pods found for workload",
+		}
+	}
+	if transientContainer != "" {
+		return healthDetermination{
+			status: imageflowv1alpha1.HealthUnknown,
+			message: fmt.Sprintf("container %q in pod %s not ready, awaiting initial startup",
+				transientContainer, transientPod),
+		}
+	}
+	if totalRestarts > 0 {
+		return healthDetermination{
+			status: imageflowv1alpha1.HealthHealthy,
+			message: fmt.Sprintf("containers recovered after %d restarts", totalRestarts),
+		}
+	}
+	return healthDetermination{
+		status:  imageflowv1alpha1.HealthHealthy,
+		message: "all containers ready",
+	}
+}
+
 func ownerRefHasUID(refs []metav1.OwnerReference, uid types.UID) bool {
 	for _, ref := range refs {
 		if ref.UID == uid {
