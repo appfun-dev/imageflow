@@ -4,6 +4,8 @@ ImageFlow 仓库的 Agent 配置文件。
 
 ## 基础交互规范
 
+以中文为主要交互语言，保留核心技术领域词汇。
+
 ### 格莱斯合作原则（Communication Protocol）
 
 Agent 交互须遵循格莱斯合作原则的四大准则（Quantity、Quality、Relation、Manner），以及冲突处理优先级和持续协作规范。详见 `docs/agents/grices-cooperative-principle.md`。
@@ -52,8 +54,8 @@ xerj def --prefix ref-controller-runtime <符号名>
 
 | 触发条件 | 专家 / 模型 | 调用方式 |
 |---------|-----------|---------|
-| TDD、纯测试子任务：单元测试、集成测试、验收测试 | 🎯 Kent Beck·极限编程专家 — provider `kimi-coding`，model `k3`，reasoning `max` | 优先 `wf_run_node`/`summon_expert`（支持 thinking 参数）；若仅可用 `subagent_fork`，见下方工具限制说明 |
 | 涉及特性开发的代码实现 | `/ub-mode` — provider `kimi-coding`，model `k3`，reasoning `max` | `subagent("/ub-mode\n" + task, { provider: "kimi-coding", model: "k3" })`；首行 `/ub-mode` 激活精简原则人设 |
+| TDD、纯测试子任务：单元测试、集成测试、验收测试 | 🎯 Kent Beck·极限编程专家 — provider `kimi-coding`，model `k3`，reasoning `max` | 优先 `wf_run_node`/`summon_expert`（支持 thinking 参数）；若仅可用 `subagent_fork`，见下方工具限制说明 |
 | 默认（无匹配） | 继承父会话模型 | `subagent(task)` 不覆盖参数 |
 
 ### ⚠️ 工具限制：reasoning 参数透传
@@ -71,13 +73,36 @@ xerj def --prefix ref-controller-runtime <符号名>
 - 子 Agent 必须在返回消息中包含 `runtime-check` 段，列出实际 provider/model/reasoning，以便父级验证
 - 若子 Agent 报告的运行时与路由表不一致，父级应记录偏差并在任务结果中标注
 
+### 路由回显（Route Echo）
+
+主 Agent / 编排会话在派发子 Agent **之前**，必须将即将生效的路由决策回显到当前会话，使人类和下游 Agent 可见。回显格式为单行表格摘要，包含任务标识、命中触发条件、目标专家/模型、调用方式四项。
+
+**回显时机：**
+
+| 触发场景 | 行为 |
+|---------|------|
+| 执行 `to-tickets` 命令 | 对所有待派发任务运行路由预检，回显每个任务的路由分类结果；若用户随后修改了任务描述或约束，重新运行预检并再次回显 |
+| 执行 `implement`、`implement-spec`、`tdd`、`code-review` 等实现/审查命令前 | 在实际派发前，回显该命令即将使用的路由信息（命中行 + 目标模型 + 调用方式） |
+| 其他 Matt 技能族入口 | 沿用现有 Step 0 路由分类流程，分类完成后回显结果再继续 |
+
+**回显示例：**
+```
+🔀 路由预检：
+| 任务 | 命中触发 | 目标 | 调用方式 |
+|------|---------|------|---------|
+| 实现用户注册接口 | 涉及特性开发的代码实现 | `/ub-mode` · kimi-coding/k3/max | subagent(provider, model) |
+| 编写注册接口单元测试 | TDD、纯测试子任务 | 🎯 Kent Beck · kimi-coding/k3/max | wf_run_node(thinking=max) |
+```
+
+回显是**只读告知**，不阻塞执行；用户可在回显后通过 `@专家名` 或 `切换模型` 覆盖。
+
 ### 预派发规则（强制 — 在技能步骤之前执行）
 
 此规则是**执行门控**，不是建议。在进入任何 Matt 技能族工作流（`dispatching-parallel-agents`、`subagent-driven-development` 或任何子 Agent 委派）之前，必须作为 Step 0 运行：
 
 **Step 0 — 路由分类（在技能执行步骤 1 之前运行）：**
 1. 对每个候选任务，检查上方路由表。
-2. 若任何任务命中非默认触发器 → 立即在当前层级调用 `subagent("@专家名\n" + task, { provider, model })`，使用路由表中指定的模型。task 首行必须为 `@专家名` 以激活专家人设。不要为这些任务继续进入技能的执行步骤。
+2. 若任何任务命中非默认触发器 → 先按「路由回显」规则输出分类结果，再立即在当前层级调用 `subagent("@专家名\n" + task, { provider, model })`，使用路由表中指定的模型。task 首行必须为 `@专家名` 以激活专家人设。不要为这些任务继续进入技能的执行步骤。
 3. 仅未命中任何触发器的任务（落入默认）→ 按技能的正常 `subagent(task)` 流程派发，不覆盖 provider/model。
 
 路由任务使用带显式 `provider`/`model` 参数的 `subagent()` — task 文本中的 `@专家名` 前缀激活人设。绝不能用父模型静默内联处理路由任务。
