@@ -558,7 +558,18 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		}
 		out.rollout = imageflowv1alpha1.RolloutUnknown
 	} else {
-		det := r.determineRollout(ctx, facts, target, *entry)
+		// Spec v1.5 D5: the pod list is fetched ONCE per workload per
+		// reconcile pass and shared by rollout and health determination —
+		// never a duplicate API call. A list failure degrades honestly:
+		// rollout continues on native status only (no pod-level signal) and
+		// health stays Unknown via the no-matching-container rule (D3).
+		pods, err := r.listWorkloadPods(ctx, facts)
+		if err != nil {
+			log.FromContext(ctx).V(1).Info("workload observer pod list failed; rollout continues on native status only and health stays Unknown",
+				"workload", facts.kind, "namespace", facts.namespace, "error", err)
+			pods = nil
+		}
+		det := determineRollout(facts, target, *entry, pods)
 		out.rollout = det.status
 		switch {
 		case det.status == entry.RolloutStatus:
@@ -577,18 +588,18 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		}
 		// Native health determination (spec v1.5 D1/D2/D4/D7): gated on this
 		// pass's rollout verdict and derived from pod-level container signals
-		// over the shared listWorkloadPods result (D5 — no duplicate API
-		// call). Skipped when a statusPolicyRef.healthKey is configured: D4
-		// keeps the v1.3 CUE evaluator path authoritative for those targets
+		// over the pod list fetched once above (D5 — no duplicate API call).
+		// Skipped when a statusPolicyRef.healthKey is configured: D4 keeps
+		// the v1.3 CUE evaluator path authoritative for those targets
 		// (evaluateTargetWithCUE above already planned their health
 		// transition, v1.3 behavior unchanged).
 		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
-			hdet := r.determineHealth(ctx, facts, *entry, out.rollout)
-			out.health = hdet.status
-			if entry.HealthStatus != hdet.status {
+			health := determineHealth(out.rollout, pods, entry.DesiredImage)
+			out.health = health
+			if entry.HealthStatus != health {
 				out.healthTransition = &healthTransition{
 					from: entry.HealthStatus,
-					to:   hdet.status,
+					to:   health,
 				}
 			}
 		}

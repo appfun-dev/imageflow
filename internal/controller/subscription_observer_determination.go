@@ -39,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/authz"
@@ -69,15 +68,17 @@ type rolloutDetermination struct {
 	message string
 }
 
-// healthDetermination is the observer's honest Health-stage verdict for one
-// target entry, symmetric with rolloutDetermination: rolloutStatus and
-// healthStatus are independent fields of the ADR-005 §3 Outcome Stages model,
-// so the Health stage carries its own status/message pair and is never
-// derived from rollout success.
-type healthDetermination struct {
-	status  imageflowv1alpha1.HealthStatus
-	message string
-}
+// The Health-stage verdict is a bare HealthStatus, deliberately NOT a
+// status/message pair like rolloutDetermination: ADR-005 §7.5 froze the
+// per-target status model (no healthReason/healthMessage fields), so a
+// computed health message had no persistence surface and was dead code.
+// The WHY of a health verdict travels on the rollout transition Events and
+// the StatusPolicyEvaluated Condition instead.
+//
+// TODO(v1.5 follow-up): persisting a per-target health reason/message
+// requires new API fields on TargetDeliveryStatus, which needs an ADR-005
+// amendment cycle; tracked separately. Spec v1.5 D6 message formats apply
+// once that surface exists.
 
 // workloadFacts carries the ADR-006 observation fields extracted from a FRESH
 // read of one built-in workload, normalized across the three kinds.
@@ -337,8 +338,13 @@ func (f workloadFacts) successSummary() string {
 
 // determineRollout applies the documented determination order to fresh
 // workload facts. entry.DesiredImage is the image whose rollout is being
-// judged; the verdict always describes THAT image and nothing else.
-func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, facts workloadFacts, target imageflowv1alpha1.SubscriptionTarget, entry imageflowv1alpha1.TargetDeliveryStatus) rolloutDetermination {
+// judged; the verdict always describes THAT image and nothing else. pods is
+// the workload's pod list fetched ONCE by the caller (observeTarget) and
+// shared with health determination within the same reconcile pass (spec
+// v1.5 D5); a nil slice (list failure) simply yields no pod-level signal.
+// The function is pure: it reads the given facts and pods and never touches
+// the API server.
+func determineRollout(facts workloadFacts, target imageflowv1alpha1.SubscriptionTarget, entry imageflowv1alpha1.TargetDeliveryStatus, pods []*corev1.Pod) rolloutDetermination {
 	name := authz.FormatTarget(target.TargetRef)
 	holds, missing, current := specHoldsDesired(facts.template, target.ContainerNames, entry.DesiredImage)
 	if len(missing) > 0 {
@@ -371,11 +377,7 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 			message: fmt.Sprintf("rollout of %s succeeded per native %s status: %s; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)", entry.DesiredImage, facts.kind, facts.successSummary()),
 		}
 	}
-	podName, containerName, waitingReason, waitingMessage, err := r.scanPodsForImageFailure(ctx, facts, entry.DesiredImage)
-	if err != nil {
-		log.FromContext(ctx).V(1).Info("workload observer pod scan failed; determination continues on native status only",
-			"target", name, "error", err)
-	} else if podName != "" {
+	if podName, containerName, waitingReason, waitingMessage := scanPodsForImageFailure(pods, entry.DesiredImage); podName != "" {
 		detail := waitingMessage
 		if detail == "" {
 			detail = "no message reported by the kubelet"
@@ -399,33 +401,23 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 //
 // Decision order (first match wins):
 //
-//  1. rollout ≠ Succeeded ⇒ Unknown with the rollout gate message (spec v1.5
-//     D2/D7): while a rollout is Progressing pods may legitimately be
-//     starting, and after a Failed rollout the image never fully deployed —
-//     health is assessed only for a successfully rolled-out image;
-//  2. rollout Succeeded ⇒ scanPodsForHealth over the shared listWorkloadPods
-//     result (spec v1.5 D1/D3/D5): one pod list per workload per reconcile
-//     pass, never a duplicate API call.
+//  1. rollout ≠ Succeeded ⇒ Unknown (spec v1.5 D2/D7): while a rollout is
+//     Progressing pods may legitimately be starting, and after a Failed
+//     rollout the image never fully deployed — health is assessed only for
+//     a successfully rolled-out image;
+//  2. rollout Succeeded ⇒ scanPodsForHealth over the pod list fetched once
+//     and shared with rollout determination (spec v1.5 D1/D3/D5): one pod
+//     list per workload per reconcile pass, never a duplicate API call.
 //
-// A pod-list failure degrades to Unknown (spec v1.5 D3): the observer never
-// fabricates health it could not observe.
-func (r *SubscriptionObserverReconciler) determineHealth(ctx context.Context, facts workloadFacts, entry imageflowv1alpha1.TargetDeliveryStatus, rollout imageflowv1alpha1.RolloutStatus) healthDetermination {
+// A nil pod slice (list failure at the shared fetch) degrades to Unknown
+// (spec v1.5 D3): the observer never fabricates health it could not
+// observe. The function is pure and returns only the status — see the
+// package-level note on why the Health stage carries no message.
+func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
 	if rollout != imageflowv1alpha1.RolloutSucceeded {
-		return healthDetermination{
-			status:  imageflowv1alpha1.HealthUnknown,
-			message: fmt.Sprintf("health evaluation gated on rollout completion (current: %s)", rollout),
-		}
+		return imageflowv1alpha1.HealthUnknown
 	}
-	pods, err := r.listWorkloadPods(ctx, facts)
-	if err != nil {
-		log.FromContext(ctx).V(1).Info("workload observer health pod list failed; health stays Unknown",
-			"workload", facts.kind, "namespace", facts.namespace, "error", err)
-		return healthDetermination{
-			status:  imageflowv1alpha1.HealthUnknown,
-			message: fmt.Sprintf("pod list failed for %s in namespace %s: %v", facts.kind, facts.namespace, err),
-		}
-	}
-	return scanPodsForHealth(ctx, pods, entry.DesiredImage)
+	return scanPodsForHealth(pods, desiredImage)
 }
 
 // listWorkloadPods lists the pods owned by this workload, filtered and
@@ -471,120 +463,86 @@ func (r *SubscriptionObserverReconciler) listWorkloadPods(ctx context.Context, f
 	return pods, nil
 }
 
+// allContainerStatuses returns the init and regular container statuses of a
+// pod as one slice — both pod scans judge every container that could run
+// the image, regardless of where it sits in the pod lifecycle.
+func allContainerStatuses(pod *corev1.Pod) []corev1.ContainerStatus {
+	statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	return statuses
+}
+
 // scanPodsForImageFailure looks for a pod of this workload that is stuck
-// STARTING the desired image (ErrImagePull family). Pods come from
-// listWorkloadPods (shared with health determination); the scan itself stays
+// STARTING the desired image (ErrImagePull family). Pods come from the
+// single listWorkloadPods fetch the caller shared between rollout and
+// health determination (spec v1.5 D5); the scan itself stays
 // rollout-specific: CrashLoopBackOff is deliberately EXCLUDED here (a
 // running-then-crashing container is the Health stage's domain, ADR-005 §4).
-func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Context, facts workloadFacts, desiredImage string) (podName, containerName, waitingReason, waitingMessage string, err error) {
-	pods, err := r.listWorkloadPods(ctx, facts)
-	if err != nil {
-		return "", "", "", "", err
-	}
+// The function is pure: it reads the given pod list and never touches the
+// API server.
+func scanPodsForImageFailure(pods []*corev1.Pod, desiredImage string) (podName, containerName, waitingReason, waitingMessage string) {
 	for _, pod := range pods {
-		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-		for _, cs := range statuses {
+		for _, cs := range allContainerStatuses(pod) {
 			if cs.Image != desiredImage || cs.State.Waiting == nil {
 				continue
 			}
 			if _, failed := observerPodImageFailureReasons[cs.State.Waiting.Reason]; failed {
-				return pod.Name, cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message, nil
+				return pod.Name, cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message
 			}
 		}
 	}
-	return "", "", "", "", nil
+	return "", "", "", ""
 }
 
 // scanPodsForHealth derives the Health-stage verdict from pod-level
 // container signals (spec v1.5 D1/D3): readiness and restartCount of every
-// container running the desired image. Pods come from listWorkloadPods,
-// shared with rollout determination within one reconcile pass (spec v1.5
-// D5). The caller gates invocation on rollout = Succeeded (spec v1.5 D2);
-// this function only judges what the pods report.
+// container running the desired image. Pods come from the single
+// listWorkloadPods fetch shared with rollout determination within one
+// reconcile pass (spec v1.5 D5). The caller gates invocation on rollout =
+// Succeeded (spec v1.5 D2); this function only judges what the pods report.
 //
 // Verdict rules (worst-case wins across all pods, spec v1.5 D3):
 //
-//  1. no container matches the desired image ⇒ Unknown "no pods found for
-//     workload" — the pods say nothing about THIS image;
-//  2. all matching containers Ready AND restartCount == 0 ⇒ Healthy "all
-//     containers ready";
-//  3. all matching containers Ready AND some restartCount > 0 ⇒ Healthy
-//     "containers recovered after N restarts" (self-healed);
-//  4. any matching container not Ready AND restartCount > 0 ⇒ Unhealthy,
-//     naming the failing container, its pod and the restart count (crash
-//     loop — CrashLoopBackOff is a HEALTH signal, deliberately included
-//     here although rollout determination excludes it, ADR-005 §4);
-//  5. any matching container not Ready AND restartCount == 0 ⇒ Unknown
-//     "container X not ready, awaiting initial startup" — a transient
-//     state with no restart signal yet; the observer never fabricates
-//     failure before the kubelet reports one.
+//  1. no container matches the desired image ⇒ Unknown — the pods say
+//     nothing about THIS image;
+//  2. every matching container Ready ⇒ Healthy — a restartCount > 0 on a
+//     Ready container is self-healed and still Healthy;
+//  3. any matching container not Ready AND restartCount > 0 ⇒ Unhealthy
+//     (crash loop — CrashLoopBackOff is a HEALTH signal, deliberately
+//     included here although rollout determination excludes it,
+//     ADR-005 §4);
+//  4. any matching container not Ready AND restartCount == 0 ⇒ Unhealthy
+//     (spec v1.5 D3 row 4). Rationale: the caller only invokes this scan
+//     when rollout = Succeeded (D2), i.e. the desired image is fully rolled
+//     out — yet this container never became ready. That is a failed
+//     deployment, not a startup transient: "awaiting initial startup" has
+//     no honest window behind a Succeeded rollout, because the rollout
+//     verdict itself asserts that startup already finished.
 //
-// The function is pure: it reads the given pod list and never touches the
-// API server, so it is testable independently of the reconcile loop.
-func scanPodsForHealth(ctx context.Context, pods []*corev1.Pod, desiredImage string) healthDetermination {
-	_ = ctx // kept for symmetry with the rollout scan and future diagnostics
-	matched := 0
-	totalRestarts := int32(0)
-	// transient records the first not-ready container with no restarts yet
-	// (rule 5); pods are name-sorted by listWorkloadPods, so the first hit
-	// is deterministic.
-	var transientPod, transientContainer string
+// Rules 3 and 4 share one outcome (Unhealthy) and worst-case wins, so the
+// first not-ready container decides the verdict. The function is pure: it
+// reads the given pod list and never touches the API server, so it is
+// testable independently of the reconcile loop.
+func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
+	matched := false
 	for _, pod := range pods {
-		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-		for _, cs := range statuses {
+		for _, cs := range allContainerStatuses(pod) {
 			if cs.Image != desiredImage {
 				continue
 			}
-			matched++
-			totalRestarts += cs.RestartCount
-			if !cs.Ready && cs.RestartCount > 0 {
-				// Unhealthy is the worst case (spec v1.5 D3 aggregation:
-				// Unhealthy > Unknown > Healthy) — first hit wins.
-				reason := ""
-				if cs.State.Waiting != nil {
-					reason = cs.State.Waiting.Reason
-				} else if cs.State.Terminated != nil {
-					reason = cs.State.Terminated.Reason
-				}
-				detail := ""
-				if reason != "" {
-					detail = fmt.Sprintf(" (%s)", reason)
-				}
-				return healthDetermination{
-					status: imageflowv1alpha1.HealthUnhealthy,
-					message: fmt.Sprintf("container %q in pod %s is not ready after %d restarts%s",
-						cs.Name, pod.Name, cs.RestartCount, detail),
-				}
-			}
-			if !cs.Ready && transientContainer == "" {
-				transientPod = pod.Name
-				transientContainer = cs.Name
+			matched = true
+			if !cs.Ready {
+				// Rules 3 and 4 are both Unhealthy and worst-case wins, so
+				// the first not-ready container decides the verdict.
+				return imageflowv1alpha1.HealthUnhealthy
 			}
 		}
 	}
-	if matched == 0 {
-		return healthDetermination{
-			status:  imageflowv1alpha1.HealthUnknown,
-			message: "no pods found for workload",
-		}
+	if !matched {
+		return imageflowv1alpha1.HealthUnknown
 	}
-	if transientContainer != "" {
-		return healthDetermination{
-			status: imageflowv1alpha1.HealthUnknown,
-			message: fmt.Sprintf("container %q in pod %s not ready, awaiting initial startup",
-				transientContainer, transientPod),
-		}
-	}
-	if totalRestarts > 0 {
-		return healthDetermination{
-			status: imageflowv1alpha1.HealthHealthy,
-			message: fmt.Sprintf("containers recovered after %d restarts", totalRestarts),
-		}
-	}
-	return healthDetermination{
-		status:  imageflowv1alpha1.HealthHealthy,
-		message: "all containers ready",
-	}
+	return imageflowv1alpha1.HealthHealthy
 }
 
 func ownerRefHasUID(refs []metav1.OwnerReference, uid types.UID) bool {
