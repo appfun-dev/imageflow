@@ -83,20 +83,25 @@ allure generate allure-results -o allure-report
 ### 单元测试
 
 ```go
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+)
+
 func (s *FieldPathSuite) TestAcceptsContainerNameFilter() {
-    allure.Test(s.T(), "imageFields 路径接受 [name=app] 单层过滤",
-        allure.WithAllureID("IF-101"),
-        allure.WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
-        allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-        allure.WithLabel("userstory", "US-3"),
-        allure.WithLabel("scenario", "合法路径通过校验"),
-        allure.WithEpic("Phase 1: API and minimal image model"),
-        allure.WithFeature("ADR-005 imageFields write contract"),
-        allure.WithStory("US-3"),
-        allure.WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-005-write-contract-cue-deferral.md", "ADR-005", "docs"),
-        allure.WithParentSuite("unit"),
-        allure.WithSuite("FieldPath"),
-        func(a *allure.Context) {
+    agt.Test(s.T(), "imageFields 路径接受 [name=app] 单层过滤",
+        WithAllureID("IF-101"),
+        WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+        WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        WithLabel("userstory", "US-3"),
+        WithLabel("scenario", "合法路径通过校验"),
+        WithEpic("Phase 1: API and minimal image model"),
+        WithFeature("ADR-005 imageFields write contract"),
+        WithStory("US-3"),
+        WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-005-write-contract-cue-deferral.md", "ADR-005", "docs"),
+        WithParentSuite("unit"),
+        WithSuite("FieldPath"),
+        func(a *agt.Context) {
             err := subscription.ValidateImageFieldPath(".spec.template.spec.containers[name=app].image")
             require.NoError(a, err)
         },
@@ -107,20 +112,25 @@ func (s *FieldPathSuite) TestAcceptsContainerNameFilter() {
 ### 集成 / e2e 测试（必须带描述）
 
 ```go
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+)
+
 func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
-    allure.Test(s.T(), "订阅创建者缺少 target update 权限时拒绝写入",
-        allure.WithAllureID("IF-102"),
-        allure.WithTMS("IF-102", "https://github.com/appfun-dev/imageflow/issues/102"),
-        allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-        allure.WithLabel("userstory", "US-5"),
-        allure.WithLabel("scenario", "RBAC 不足时报告 Forbidden"),
-        allure.WithEpic("Phase 1: API and minimal image model"),
-        allure.WithFeature("ADR-003 cross-namespace authorization"),
-        allure.WithStory("US-5"),
-        allure.WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-003-subscription-authorization.md", "ADR-003", "docs"),
-        allure.WithParentSuite("integration"),
-        allure.WithSuite("SubscriptionAuthorization"),
-        allure.WithDescription(`
+    agt.Test(s.T(), "订阅创建者缺少 target update 权限时拒绝写入",
+        WithAllureID("IF-102"),
+        WithTMS("IF-102", "https://github.com/appfun-dev/imageflow/issues/102"),
+        WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        WithLabel("userstory", "US-5"),
+        WithLabel("scenario", "RBAC 不足时报告 Forbidden"),
+        WithEpic("Phase 1: API and minimal image model"),
+        WithFeature("ADR-003 cross-namespace authorization"),
+        WithStory("US-5"),
+        WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-003-subscription-authorization.md", "ADR-003", "docs"),
+        WithParentSuite("integration"),
+        WithSuite("SubscriptionAuthorization"),
+        WithDescription(`
 验证：当 ImageSubscription 的创建者没有被授权更新目标 workload 时，
 控制器应通过 SubjectAccessReview 识别并在该目标上产生 Forbidden Condition，
 且不对目标做任何字段写入。
@@ -134,7 +144,7 @@ func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
 - subscription.status.targets[] 中对应项为 Forbidden
 - Deployment image 字段未被修改
         `),
-        func(a *allure.Context) {
+        func(a *agt.Context) {
             a.Step("创建只读 ServiceAccount 与 ImageSubscription", func(ctx context.Context) error {
                 // ...
                 return nil
@@ -152,6 +162,11 @@ func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
 ### 表格驱动 + 参数外显
 
 ```go
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+)
+
 func (s *FieldPathSuite) TestValidateImageFieldPath() {
     cases := []struct {
         name    string
@@ -165,20 +180,20 @@ func (s *FieldPathSuite) TestValidateImageFieldPath() {
 
     for _, tc := range cases {
         s.Run(tc.name, func() {
-            allure.Test(s.T(), tc.name,
-                allure.WithAllureID("IF-101"),
-                allure.WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
-                allure.WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-                allure.WithLabel("userstory", "US-3"),
-                allure.WithLabel("scenario", "imageFields 路径文法矩阵"),
-                allure.WithParameter("path", tc.path),
-                allure.WithParameter("wantErr", tc.wantErr),
-                allure.WithEpic("Phase 1: API and minimal image model"),
-                allure.WithFeature("ADR-005 imageFields write contract"),
-                allure.WithStory("US-3"),
-                allure.WithParentSuite("unit"),
-                allure.WithSuite("FieldPath"),
-                func(a *allure.Context) {
+            agt.Test(s.T(), tc.name,
+                WithAllureID("IF-101"),
+                WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+                WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+                WithLabel("userstory", "US-3"),
+                WithLabel("scenario", "imageFields 路径文法矩阵"),
+                WithParameter("path", tc.path),
+                WithParameter("wantErr", tc.wantErr),
+                WithEpic("Phase 1: API and minimal image model"),
+                WithFeature("ADR-005 imageFields write contract"),
+                WithStory("US-3"),
+                WithParentSuite("unit"),
+                WithSuite("FieldPath"),
+                func(a *agt.Context) {
                     err := subscription.ValidateImageFieldPath(tc.path)
                     if tc.wantErr {
                         require.Error(a, err)
@@ -195,10 +210,15 @@ func (s *FieldPathSuite) TestValidateImageFieldPath() {
 ### 复杂步骤 + 步骤参数
 
 ```go
+import (
+    . "github.com/allure-framework/allure-go/commons/gotest"
+    agt "github.com/allure-framework/allure-go/commons/gotest"
+)
+
 func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
-    allure.Test(s.T(), "rollout 中到达新 tag 时旧投递记为 Superseded",
+    agt.Test(s.T(), "rollout 中到达新 tag 时旧投递记为 Superseded",
         // ... metadata omitted for brevity
-        func(a *allure.Context) {
+        func(a *agt.Context) {
             a.Step("写入第一个 tag 并观察 ImageApplied", func(ctx context.Context) error {
                 a.StepParameter("firstTag", "v1.0.0")
                 a.StepParameter("firstDigest", "sha256:aaa...")
@@ -234,9 +254,9 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 
 ## 描述与参数外显规则
 
-- **Integration / E2E 测试**：必须携带 `allure.WithDescription` 或 `allure.WithDescriptionHTML`。
+- **Integration / E2E 测试**：必须携带 `WithDescription` 或 `WithDescriptionHTML`（匿名导入）。
 - **HTML 描述触发条件**：描述含表格、列表、代码块或多行结构化内容时使用 `WithDescriptionHTML`。
-- **表格驱动测试**：通过 `allure.WithParameter(name, value)` 外显参数；测试显示名保持稳定。
+- **表格驱动测试**：通过 `WithParameter(name, value)` 外显参数；测试显示名保持稳定。
 - **步骤参数/说明**：关键步骤使用 `a.StepParameter` / `a.StepDescription` 补充。
 
 ## 可追溯性 checklist
@@ -245,15 +265,15 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 
 - [ ] 测试位于 `test/unit/`、`test/integration/`、`test/e2e/` 或生产代码同包 `_test.go`。
 - [ ] 使用 `testify/suite` 组织；suite 结构体名以 `Suite` 结尾。
-- [ ] 测试方法内调用 `allure.Test(s.T(), ...)`。
-- [ ] `allure.WithAllureID("IF-<id>")` 与 `allure.WithTMS("IF-<id>", url)` 指向同一测试用例 issue。
-- [ ] `allure.WithTMS("SPEC-<id>", url)` 指向标题以 `Spec:` 开头的 GitHub issue。
-- [ ] `allure.WithLabel("userstory", "US-<Seq>")` 已标注。
-- [ ] `allure.WithLabel("scenario", "<场景名>")` 已填写。
+- [ ] 测试方法内调用 `agt.Test(s.T(), ...)`（别名导入）。
+- [ ] `WithAllureID("IF-<id>")` 与 `WithTMS("IF-<id>", url)` 指向同一测试用例 issue（匿名导入）。
+- [ ] `WithTMS("SPEC-<id>", url)` 指向标题以 `Spec:` 开头的 GitHub issue。
+- [ ] `WithLabel("userstory", "US-<Seq>")` 已标注。
+- [ ] `WithLabel("scenario", "<场景名>")` 已填写。
 - [ ] `Epic` / `Feature` / `Story` 已按层级映射填写。
 - [ ] `ParentSuite` = `unit|integration|e2e`；`Suite` = 结构体名去掉 `Suite` 后缀。
 - [ ] Integration / E2E 测试已携带 `WithDescription` 或 `WithDescriptionHTML`。
-- [ ] 表格驱动测试已使用 `allure.WithParameter` 外显参数。
+- [ ] 表格驱动测试已使用 `WithParameter` 外显参数。
 - [ ] 关键步骤已使用 `a.StepParameter` / `a.StepDescription` 补充说明。
 
 ## Allure 导入约定
