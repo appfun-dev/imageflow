@@ -1,13 +1,117 @@
+// Package clock provides test seams for time-dependent code.
+//
+// This file contains Allure-annotated unit tests serving as the canonical
+// example for ImageFlow testing conventions. See TESTING.md for the full
+// annotation schema and CODING_STANDARDS.md for coding standards.
 package clock
 
 import (
 	"testing"
 	"time"
 
-	. "github.com/allure-framework/allure-go/commons/gotest"
 	agt "github.com/allure-framework/allure-go/commons/gotest"
+
+	. "github.com/allure-framework/allure-go/commons/gotest"
 	. "github.com/appfun-dev/imageflow/test/utils/should_dsl"
 )
+
+// ─── Allure Metadata (Code-as-Documentation) ────────────────────────────────
+//
+// Test metadata is extracted to package-level variables following the
+// "code-as-documentation" pattern. Each variable groups traceability,
+// hierarchy, documentation links, suite classification, and description
+// for one test case. Test functions reference these via spread operator.
+//
+// Naming convention: <Domain><ID> (e.g., clockDeterministicOpts).
+// See TESTING.md §可追溯性 schema for field semantics.
+
+// clockDeterministicOpts holds Allure metadata for TestFakeClockAdvancesDeterministically.
+// Verifies Fake clock provides deterministic time control for unit tests.
+var clockDeterministicOpts = []agt.Option{
+	// Traceability
+	WithAllureID("CLOCK-001"),
+	WithTMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
+	WithLabel("userstory", "US-INFRA-1"),
+	WithLabel("scenario", "deterministic time advancement"),
+	WithLabel("component", "clock"),
+	WithLabel("layer", "unit"),
+	// Hierarchy
+	WithEpic("Infrastructure: Test Seams"),
+	WithFeature("ADR-009 Testing Strategy"),
+	WithStory("US-INFRA-1"),
+	// Documentation Links
+	WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-009-testing-strategy.md", "ADR-009", "docs"),
+	WithLink("https://github.com/appfun-dev/imageflow/blob/main/TESTING.md", "TESTING.md", "docs"),
+	// Suite Classification
+	WithParentSuite("unit"),
+	WithSuite("Clock"),
+	// Description
+	WithDescription(`Verifies that Fake clock provides deterministic time control for unit tests.
+
+Test cases:
+1. Initial time equals construction parameter
+2. Advance() correctly increments internal time
+3. Since() computes elapsed duration from a reference point
+
+This is a foundational test seam used throughout ImageFlow to avoid
+flaky time-dependent tests. Production code uses Real clock; tests
+inject Fake for deterministic behavior.`),
+}
+
+// clockConcurrencyOpts holds Allure metadata for TestFakeClockConcurrencySafety.
+// Verifies Fake clock's RWMutex protects concurrent Now()/Advance() calls.
+var clockConcurrencyOpts = []agt.Option{
+	// Traceability
+	WithAllureID("CLOCK-002"),
+	WithTMS("CLOCK-002", "https://github.com/appfun-dev/imageflow/issues/CLOCK-002"),
+	WithLabel("userstory", "US-INFRA-1"),
+	WithLabel("scenario", "concurrent access safety"),
+	WithLabel("component", "clock"),
+	WithLabel("layer", "unit"),
+	// Hierarchy
+	WithEpic("Infrastructure: Test Seams"),
+	WithFeature("ADR-009 Testing Strategy"),
+	WithStory("US-INFRA-1"),
+	// Suite Classification
+	WithParentSuite("unit"),
+	WithSuite("Clock"),
+	// Description
+	WithDescription(`Verifies that Fake clock's RWMutex protects concurrent Now()/Advance() calls.
+
+Spawns 10 reader goroutines and 10 writer goroutines, each performing 100
+iterations simultaneously. After all goroutines complete, verifies that
+the final time reflects all concurrent advances without data races.
+
+Run with -race flag to detect race conditions:
+  go test -race ./internal/clock/...`),
+}
+
+// clockRealOpts holds Allure metadata for TestRealClockReturnsSystemTime.
+// Verifies Real clock correctly delegates to system time functions.
+var clockRealOpts = []agt.Option{
+	// Traceability
+	WithAllureID("CLOCK-003"),
+	WithTMS("CLOCK-003", "https://github.com/appfun-dev/imageflow/issues/CLOCK-003"),
+	WithLabel("userstory", "US-INFRA-1"),
+	WithLabel("scenario", "real clock delegation"),
+	WithLabel("component", "clock"),
+	WithLabel("layer", "unit"),
+	// Hierarchy
+	WithEpic("Infrastructure: Test Seams"),
+	WithFeature("ADR-009 Testing Strategy"),
+	WithStory("US-INFRA-1"),
+	// Suite Classification
+	WithParentSuite("unit"),
+	WithSuite("Clock"),
+	// Description
+	WithDescription(`Verifies that Real clock correctly delegates to time.Now() and time.Since().
+
+Now() must return a time within the call window [before, after].
+Since() must return at least the elapsed duration; uses Eventually to
+account for potential clock drift in CI environments.`),
+}
+
+// ─── Test Functions ─────────────────────────────────────────────────────────
 
 // TestFakeClockAdvancesDeterministically verifies Fake clock provides
 // deterministic time advancement for unit tests.
@@ -46,39 +150,21 @@ func TestFakeClockAdvancesDeterministically(t *testing.T) {
 					"Since must return exactly the advanced duration")
 			})
 		},
-		// ─── Traceability ──────────────────────────────────────────
-		WithAllureID("CLOCK-001"),
-		WithTMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
-		WithLabel("userstory", "US-INFRA-1"),
-		WithLabel("scenario", "deterministic time advancement"),
-		WithLabel("component", "clock"),
-		WithLabel("layer", "unit"),
-		// ─── Hierarchy ─────────────────────────────────────────────
-		WithEpic("Infrastructure: Test Seams"),
-		WithFeature("ADR-009 Testing Strategy"),
-		WithStory("US-INFRA-1"),
-		// ─── Documentation Links ───────────────────────────────────
-		WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-009-testing-strategy.md", "ADR-009", "docs"),
-		WithLink("https://github.com/appfun-dev/imageflow/blob/main/TESTING.md", "TESTING.md", "docs"),
-		// ─── Suite Classification ──────────────────────────────────
-		WithParentSuite("unit"),
-		WithSuite("Clock"),
-		// ─── Description ───────────────────────────────────────────
-		WithDescription(`Verifies that Fake clock provides deterministic time control for unit tests.
-
-Test cases:
-1. Initial time equals construction parameter
-2. Advance() correctly increments internal time
-3. Since() computes elapsed duration from a reference point
-
-This is a foundational test seam used throughout ImageFlow to avoid
-flaky time-dependent tests. Production code uses Real clock; tests
-inject Fake for deterministic behavior.`),
+		clockDeterministicOpts...,
 	)
 }
 
 // TestFakeClockConcurrencySafety verifies Fake clock is safe for concurrent access.
+//
+// Spawns multiple goroutines performing simultaneous reads (Now/Since) and
+// writes (Advance) to ensure no data races occur under contention.
 func TestFakeClockConcurrencySafety(t *testing.T) {
+	const (
+		goroutineCount = 10
+		iterations     = 100
+		advancePerIter = time.Millisecond
+	)
+
 	agt.Test(t, "Fake clock is safe for concurrent read/write",
 		func(a *agt.Context) {
 			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -87,10 +173,9 @@ func TestFakeClockConcurrencySafety(t *testing.T) {
 			a.Step("Spawn concurrent readers and writers", func(ctx *agt.Context) {
 				ctx.StepDescription("10 goroutines read, 10 goroutines write simultaneously")
 				done := make(chan struct{})
-				const iterations = 100
 
-				// Concurrent readers
-				for i := 0; i < 10; i++ {
+				// Concurrent readers: exercise Now() and Since() under contention
+				for i := 0; i < goroutineCount; i++ {
 					go func() {
 						for j := 0; j < iterations; j++ {
 							_ = clk.Now()
@@ -100,56 +185,46 @@ func TestFakeClockConcurrencySafety(t *testing.T) {
 					}()
 				}
 
-				// Concurrent writers
-				for i := 0; i < 10; i++ {
+				// Concurrent writers: exercise Advance() under contention
+				for i := 0; i < goroutineCount; i++ {
 					go func() {
 						for j := 0; j < iterations; j++ {
-							clk.Advance(time.Millisecond)
+							clk.Advance(advancePerIter)
 						}
 						done <- struct{}{}
 					}()
 				}
 
-				// Wait for all goroutines
-				for i := 0; i < 20; i++ {
+				// Wait for all goroutines to complete
+				for i := 0; i < goroutineCount*2; i++ {
 					<-done
 				}
 			})
 
-			a.Step("Verify final time is consistent", func(ctx *agt.Context) {
+			a.Step("Verify final time reflects all advances", func(ctx *agt.Context) {
+				expected := start.Add(goroutineCount * iterations * advancePerIter)
 				ctx.StepDescription("After 10 writers × 100ms each, time should advance by 1 second")
-				expected := start.Add(10 * 100 * time.Millisecond)
 				AExpect(a, clk.Now()).Should(BeTemporally(">=", expected),
 					"final time must reflect all concurrent advances")
 			})
 		},
-		WithAllureID("CLOCK-002"),
-		WithTMS("CLOCK-002", "https://github.com/appfun-dev/imageflow/issues/CLOCK-002"),
-		WithLabel("userstory", "US-INFRA-1"),
-		WithLabel("scenario", "concurrent access safety"),
-		WithLabel("component", "clock"),
-		WithLabel("layer", "unit"),
-		WithEpic("Infrastructure: Test Seams"),
-		WithFeature("ADR-009 Testing Strategy"),
-		WithStory("US-INFRA-1"),
-		WithParentSuite("unit"),
-		WithSuite("Clock"),
-		WithDescription(`Verifies that Fake clock's RWMutex protects concurrent Now()/Advance() calls.
-Spawns multiple goroutines performing simultaneous reads and writes to ensure
-no data races occur under contention.`),
+		clockConcurrencyOpts...,
 	)
 }
 
 // TestRealClockReturnsSystemTime verifies Real clock delegates to system time.
+//
+// Uses Eventually for Since() assertion to account for potential clock drift
+// in CI environments where system time may not be perfectly monotonic.
 func TestRealClockReturnsSystemTime(t *testing.T) {
 	agt.Test(t, "Real clock returns system time",
 		func(a *agt.Context) {
-			real := Real{}
+			realClk := Real{}
 
 			a.Step("Now() returns time within acceptable window", func(ctx *agt.Context) {
-				ctx.StepDescription("Real.Now() should be within 1 second of time.Now()")
+				ctx.StepDescription("Real.Now() should be within [before, after] of time.Now()")
 				before := time.Now()
-				got := real.Now()
+				got := realClk.Now()
 				after := time.Now()
 
 				AExpect(a, got).Should(BeTemporally(">=", before),
@@ -159,26 +234,14 @@ func TestRealClockReturnsSystemTime(t *testing.T) {
 			})
 
 			a.Step("Since() computes elapsed duration", func(ctx *agt.Context) {
-				ctx.StepDescription("Real.Since() should return positive duration for past time")
+				ctx.StepDescription("Real.Since() should return at least the elapsed duration")
 				past := time.Now().Add(-100 * time.Millisecond)
 				AEventually(a, func() bool {
-					return real.Since(past) >= 100*time.Millisecond
-				}).WithTimeout(1 * time.Second).Should(BeTrue(),
+					return realClk.Since(past) >= 100*time.Millisecond
+				}).WithTimeout(1*time.Second).Should(BeTrue(),
 					"Since must return at least the elapsed duration")
 			})
 		},
-		WithAllureID("CLOCK-003"),
-		WithTMS("CLOCK-003", "https://github.com/appfun-dev/imageflow/issues/CLOCK-003"),
-		WithLabel("userstory", "US-INFRA-1"),
-		WithLabel("scenario", "real clock delegation"),
-		WithLabel("component", "clock"),
-		WithLabel("layer", "unit"),
-		WithEpic("Infrastructure: Test Seams"),
-		WithFeature("ADR-009 Testing Strategy"),
-		WithStory("US-INFRA-1"),
-		WithParentSuite("unit"),
-		WithSuite("Clock"),
-		WithDescription(`Verifies that Real clock correctly delegates to time.Now() and time.Since().
-Uses Eventually to account for potential clock drift in CI environments.`),
+		clockRealOpts...,
 	)
 }
