@@ -83,7 +83,7 @@ inject Fake for deterministic behavior.`),
 
 			a.Step("Verify initial time equals start", func(ctx *agt.Context) {
 				ctx.StepDescription("Now() should return exactly the construction parameter")
-				AExpect(a, clk.Now()).Should(Equal(start),
+				AExpect(a, clk.Now()).Should(BeTemporally("==", start),
 					"initial time must equal construction parameter")
 			})
 
@@ -91,7 +91,7 @@ inject Fake for deterministic behavior.`),
 				ctx.StepDescription("Advance adds duration to internal time")
 				clk.Advance(advanceDuration)
 				want := start.Add(advanceDuration)
-				AExpect(a, clk.Now()).Should(Equal(want),
+				AExpect(a, clk.Now()).Should(BeTemporally("==", want),
 					"time after Advance must equal start+duration")
 			})
 
@@ -99,6 +99,7 @@ inject Fake for deterministic behavior.`),
 				ctx.StepDescription("Since returns duration between reference and current time")
 				before := clk.Now()
 				clk.Advance(sinceTestAdvance)
+				//nolint:ginkgolinter // time.Duration is a value type, not a pointer
 				AExpect(a, clk.Since(before)).Should(Equal(sinceTestAdvance),
 					"Since must return exactly the advanced duration")
 			})
