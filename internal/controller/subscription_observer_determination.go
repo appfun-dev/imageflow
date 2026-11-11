@@ -497,7 +497,22 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 // (spec v1.5 D3): the observer never fabricates health it could not
 // observe. The function is pure and returns only the status — see the
 // package-level note on why the Health stage carries no message.
-func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
+func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string, kind string) imageflowv1alpha1.HealthStatus {
+	// Job/CronJob health (T7, spec v1.6): completion-based — derived directly
+	// from the rollout verdict. No pod-scan is performed for batch workloads:
+	// the Job's completion result IS the health signal. A completed Job is
+	// Healthy, a failed Job is Unhealthy, and anything else is Unknown.
+	if kind == observerKindJob || kind == observerKindCronJob {
+		switch rollout {
+		case imageflowv1alpha1.RolloutSucceeded:
+			return imageflowv1alpha1.HealthHealthy
+		case imageflowv1alpha1.RolloutFailed:
+			return imageflowv1alpha1.HealthUnhealthy
+		default:
+			return imageflowv1alpha1.HealthUnknown
+		}
+	}
+	// Deployment/STS/DS: pod-scan based health (existing logic unchanged).
 	if rollout != imageflowv1alpha1.RolloutSucceeded {
 		return imageflowv1alpha1.HealthUnknown
 	}

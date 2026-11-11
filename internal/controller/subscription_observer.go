@@ -594,7 +594,7 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// (evaluateTargetWithCUE above already planned their health
 		// transition, v1.3 behavior unchanged).
 		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
-			health := determineHealth(out.rollout, pods, entry.DesiredImage)
+			health := determineHealth(out.rollout, pods, entry.DesiredImage, facts.kind)
 			out.health = health
 			if entry.HealthStatus != health {
 				out.healthTransition = &healthTransition{

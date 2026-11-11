@@ -979,7 +979,7 @@ func TestObserverDetermineDeploymentHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDeployment); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1044,7 +1044,7 @@ func TestObserverDetermineStatefulSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindStatefulSet); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1109,7 +1109,7 @@ func TestObserverDetermineDaemonSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDaemonSet); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1144,7 +1144,7 @@ func TestObserverHealthRolloutGateBlocksEvaluation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(tc.rollout, pods, t11uRefA); got != imageflowv1alpha1.HealthUnknown {
+			if got := determineHealth(tc.rollout, pods, t11uRefA, observerKindDeployment); got != imageflowv1alpha1.HealthUnknown {
 				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got)
 			}
 		})
@@ -2368,6 +2368,93 @@ func TestObserverDetermineJobCompletionStates(t *testing.T) {
 			}
 			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
 				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T7 (spec v1.6): completion-based health for Job/CronJob — health is derived
+// directly from rollout status, no pod-scan invoked.
+// ---------------------------------------------------------------------------
+
+func TestObserverDetermineJobHealthFromCompletion(t *testing.T) {
+	cases := []struct {
+		name    string
+		rollout imageflowv1alpha1.RolloutStatus
+		want    imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name:    "healthy when rollout succeeded",
+			rollout: imageflowv1alpha1.RolloutSucceeded,
+			want:    imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name:    "unhealthy when rollout failed",
+			rollout: imageflowv1alpha1.RolloutFailed,
+			want:    imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name:    "unknown when rollout progressing",
+			rollout: imageflowv1alpha1.RolloutProgressing,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+		{
+			name:    "unknown when rollout unknown",
+			rollout: imageflowv1alpha1.RolloutUnknown,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// For Job kind, determineHealth must NOT call scanPodsForHealth.
+			// We pass nil pods to prove no pod-scan occurs (it would panic on
+			// nil dereference if scanPodsForHealth were invoked).
+			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindJob)
+			if got != tc.want {
+				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
+					tc.rollout, observerKindJob, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestObserverDetermineCronJobHealthFromCompletion(t *testing.T) {
+	// CronJob health delegates to the same completion-based logic as Job.
+	// The observer treats CronJob identically to Job for health determination:
+	// health IS the completion result, no separate pod-level check needed.
+	cases := []struct {
+		name    string
+		rollout imageflowv1alpha1.RolloutStatus
+		want    imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name:    "healthy when rollout succeeded",
+			rollout: imageflowv1alpha1.RolloutSucceeded,
+			want:    imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name:    "unhealthy when rollout failed",
+			rollout: imageflowv1alpha1.RolloutFailed,
+			want:    imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name:    "unknown when rollout progressing",
+			rollout: imageflowv1alpha1.RolloutProgressing,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+		{
+			name:    "unknown when rollout unknown",
+			rollout: imageflowv1alpha1.RolloutUnknown,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindCronJob)
+			if got != tc.want {
+				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
+					tc.rollout, observerKindCronJob, got, tc.want)
 			}
 		})
 	}
