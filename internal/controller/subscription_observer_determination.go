@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -39,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/authz"
@@ -68,6 +68,18 @@ type rolloutDetermination struct {
 	status  imageflowv1alpha1.RolloutStatus
 	message string
 }
+
+// The Health-stage verdict is a bare HealthStatus, deliberately NOT a
+// status/message pair like rolloutDetermination: ADR-005 §7.5 froze the
+// per-target status model (no healthReason/healthMessage fields), so a
+// computed health message had no persistence surface and was dead code.
+// The WHY of a health verdict travels on the rollout transition Events and
+// the StatusPolicyEvaluated Condition instead.
+//
+// TODO(v1.5 follow-up): persisting a per-target health reason/message
+// requires new API fields on TargetDeliveryStatus, which needs an ADR-005
+// amendment cycle; tracked separately. Spec v1.5 D6 message formats apply
+// once that surface exists.
 
 // workloadFacts carries the ADR-006 observation fields extracted from a FRESH
 // read of one built-in workload, normalized across the three kinds.
@@ -327,8 +339,13 @@ func (f workloadFacts) successSummary() string {
 
 // determineRollout applies the documented determination order to fresh
 // workload facts. entry.DesiredImage is the image whose rollout is being
-// judged; the verdict always describes THAT image and nothing else.
-func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, facts workloadFacts, target imageflowv1alpha1.SubscriptionTarget, entry imageflowv1alpha1.TargetDeliveryStatus) rolloutDetermination {
+// judged; the verdict always describes THAT image and nothing else. pods is
+// the workload's pod list fetched ONCE by the caller (observeTarget) and
+// shared with health determination within the same reconcile pass (spec
+// v1.5 D5); a nil slice (list failure) simply yields no pod-level signal.
+// The function is pure: it reads the given facts and pods and never touches
+// the API server.
+func determineRollout(facts workloadFacts, target imageflowv1alpha1.SubscriptionTarget, entry imageflowv1alpha1.TargetDeliveryStatus, pods []*corev1.Pod) rolloutDetermination {
 	name := authz.FormatTarget(target.TargetRef)
 	holds, missing, current := specHoldsDesired(facts.template, target.ContainerNames, entry.DesiredImage)
 	if len(missing) > 0 {
@@ -361,11 +378,7 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 			message: fmt.Sprintf("rollout of %s succeeded per native %s status: %s; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)", entry.DesiredImage, facts.kind, facts.successSummary()),
 		}
 	}
-	podName, containerName, waitingReason, waitingMessage, err := r.scanPodsForImageFailure(ctx, facts, entry.DesiredImage)
-	if err != nil {
-		log.FromContext(ctx).V(1).Info("workload observer pod scan failed; determination continues on native status only",
-			"target", name, "error", err)
-	} else if podName != "" {
+	if podName, containerName, waitingReason, waitingMessage := scanPodsForImageFailure(pods, entry.DesiredImage); podName != "" {
 		detail := waitingMessage
 		if detail == "" {
 			detail = "no message reported by the kubelet"
@@ -381,18 +394,47 @@ func (r *SubscriptionObserverReconciler) determineRollout(ctx context.Context, f
 	}
 }
 
-// scanPodsForImageFailure looks for a pod of this workload that is stuck
-// STARTING the desired image (ErrImagePull family). Ownership is exact:
-// StatefulSet/DaemonSet pods carry the workload UID as controller owner;
-// Deployment pods are owned by ReplicaSets owned by the Deployment, so the
-// scan walks the two-hop owner chain. Pods are visited in name order for a
-// deterministic verdict when several fail at once.
-func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Context, facts workloadFacts, desiredImage string) (podName, containerName, waitingReason, waitingMessage string, err error) {
+// determineHealth applies the Health-stage determination order (spec v1.5
+// D2/D7/D1), symmetric with determineRollout. The caller (observeTarget)
+// invokes it only for observable first-batch kinds whose CUE evaluation did
+// not fail, and never for targets with a statusPolicyRef.healthKey — spec
+// v1.5 D4 keeps the v1.3 CUE evaluator path authoritative for those targets.
+//
+// Decision order (first match wins):
+//
+//  1. rollout ≠ Succeeded ⇒ Unknown (spec v1.5 D2/D7): while a rollout is
+//     Progressing pods may legitimately be starting, and after a Failed
+//     rollout the image never fully deployed — health is assessed only for
+//     a successfully rolled-out image;
+//  2. rollout Succeeded ⇒ scanPodsForHealth over the pod list fetched once
+//     and shared with rollout determination (spec v1.5 D1/D3/D5): one pod
+//     list per workload per reconcile pass, never a duplicate API call.
+//
+// A nil pod slice (list failure at the shared fetch) degrades to Unknown
+// (spec v1.5 D3): the observer never fabricates health it could not
+// observe. The function is pure and returns only the status — see the
+// package-level note on why the Health stage carries no message.
+func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
+	if rollout != imageflowv1alpha1.RolloutSucceeded {
+		return imageflowv1alpha1.HealthUnknown
+	}
+	return scanPodsForHealth(pods, desiredImage)
+}
+
+// listWorkloadPods lists the pods owned by this workload, filtered and
+// sorted by name. Ownership is exact: StatefulSet/DaemonSet pods carry the
+// workload UID as controller owner; Deployment pods are owned by ReplicaSets
+// owned by the Deployment, so the scan walks the two-hop owner chain. The
+// list is fetched ONCE per workload and shared by rollout and health
+// determination within a single reconcile pass (ADR-005 §3, spec v1.5 D5),
+// avoiding duplicate API calls. Pods are returned in name order for a
+// deterministic verdict when several match at once.
+func (r *SubscriptionObserverReconciler) listWorkloadPods(ctx context.Context, facts workloadFacts) ([]*corev1.Pod, error) {
 	ownerUIDs := map[types.UID]struct{}{}
 	if facts.kind == observerKindDeployment {
 		var rsList appsv1.ReplicaSetList
 		if err := r.client.List(ctx, &rsList, client.InNamespace(facts.namespace)); err != nil {
-			return "", "", "", "", err
+			return nil, err
 		}
 		for i := range rsList.Items {
 			rs := &rsList.Items[i]
@@ -401,7 +443,7 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 			}
 		}
 		if len(ownerUIDs) == 0 {
-			return "", "", "", "", nil
+			return nil, nil
 		}
 	} else {
 		ownerUIDs[facts.uid] = struct{}{}
@@ -409,7 +451,7 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 
 	var podList corev1.PodList
 	if err := r.client.List(ctx, &podList, client.InNamespace(facts.namespace)); err != nil {
-		return "", "", "", "", err
+		return nil, err
 	}
 	pods := make([]*corev1.Pod, 0, len(podList.Items))
 	for i := range podList.Items {
@@ -419,18 +461,120 @@ func (r *SubscriptionObserverReconciler) scanPodsForImageFailure(ctx context.Con
 		}
 	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
+	return pods, nil
+}
+
+// allContainerStatuses returns the init and regular container statuses of a
+// pod as one slice — both pod scans judge every container that could run
+// the image, regardless of where it sits in the pod lifecycle.
+func allContainerStatuses(pod *corev1.Pod) []corev1.ContainerStatus {
+	statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	return statuses
+}
+
+// scanPodsForImageFailure looks for a pod of this workload that is stuck
+// STARTING the desired image (ErrImagePull family). Pods come from the
+// single listWorkloadPods fetch the caller shared between rollout and
+// health determination (spec v1.5 D5); the scan itself stays
+// rollout-specific: CrashLoopBackOff is deliberately EXCLUDED here (a
+// running-then-crashing container is the Health stage's domain, ADR-005 §4).
+// The function is pure: it reads the given pod list and never touches the
+// API server.
+func scanPodsForImageFailure(pods []*corev1.Pod, desiredImage string) (podName, containerName, waitingReason, waitingMessage string) {
 	for _, pod := range pods {
-		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-		for _, cs := range statuses {
-			if cs.Image != desiredImage || cs.State.Waiting == nil {
+		for _, cs := range allContainerStatuses(pod) {
+			if !containerImageMatches(cs, desiredImage) || cs.State.Waiting == nil {
 				continue
 			}
 			if _, failed := observerPodImageFailureReasons[cs.State.Waiting.Reason]; failed {
-				return pod.Name, cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message, nil
+				return pod.Name, cs.Name, cs.State.Waiting.Reason, cs.State.Waiting.Message
 			}
 		}
 	}
-	return "", "", "", "", nil
+	return "", "", "", ""
+}
+
+// scanPodsForHealth derives the Health-stage verdict from pod-level
+// container signals (spec v1.5 D1/D3): readiness and restartCount of every
+// container running the desired image. Pods come from the single
+// listWorkloadPods fetch shared with rollout determination within one
+// reconcile pass (spec v1.5 D5). The caller gates invocation on rollout =
+// Succeeded (spec v1.5 D2); this function only judges what the pods report.
+//
+// Verdict rules (worst-case wins across all pods, spec v1.5 D3):
+//
+//  1. no container matches the desired image ⇒ Unknown — the pods say
+//     nothing about THIS image;
+//  2. every matching container Ready ⇒ Healthy — a restartCount > 0 on a
+//     Ready container is self-healed and still Healthy;
+//  3. any matching container not Ready AND restartCount > 0 ⇒ Unhealthy
+//     (crash loop — CrashLoopBackOff is a HEALTH signal, deliberately
+//     included here although rollout determination excludes it,
+//     ADR-005 §4);
+//  4. any matching container not Ready AND restartCount == 0 ⇒ Unhealthy
+//     (spec v1.5 D3 row 4). Rationale: the caller only invokes this scan
+//     when rollout = Succeeded (D2), i.e. the desired image is fully rolled
+//     out — yet this container never became ready. That is a failed
+//     deployment, not a startup transient: "awaiting initial startup" has
+//     no honest window behind a Succeeded rollout, because the rollout
+//     verdict itself asserts that startup already finished.
+//
+// Rules 3 and 4 share one outcome (Unhealthy) and worst-case wins, so the
+// first not-ready container decides the verdict. The function is pure: it
+// reads the given pod list and never touches the API server, so it is
+// testable independently of the reconcile loop.
+// containerImageMatches checks whether a container status refers to the
+// desired image. Kubernetes may report the image in cs.Image (user-specified
+// reference, possibly tag or digest format) or cs.ImageID (runtime-resolved
+// ID, typically "docker-pullable://repo@sha256:..." or "repo@sha256:...").
+// The comparison extracts the digest portion when both sides carry one,
+// falling back to exact string match otherwise. This handles the common
+// case where the desired image is a digest reference but the pod was
+// originally created with a tag that resolved to the same digest.
+func containerImageMatches(cs corev1.ContainerStatus, desiredImage string) bool {
+	if cs.Image == desiredImage {
+		return true
+	}
+	// Try digest-based comparison: extract sha256 from both sides.
+	_, desiredDigest, desiredErr := SplitDigestReference(desiredImage)
+	if desiredErr == nil && desiredDigest != "" {
+		// Check cs.Image for embedded digest.
+		if _, imgDigest, imgErr := SplitDigestReference(cs.Image); imgErr == nil && imgDigest == desiredDigest {
+			return true
+		}
+		// Check cs.ImageID (may have "docker-pullable://" prefix).
+		imageID := cs.ImageID
+		if idx := strings.Index(imageID, "://"); idx >= 0 {
+			imageID = imageID[idx+3:]
+		}
+		if _, idDigest, idErr := SplitDigestReference(imageID); idErr == nil && idDigest == desiredDigest {
+			return true
+		}
+	}
+	return false
+}
+
+func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
+	matched := false
+	for _, pod := range pods {
+		for _, cs := range allContainerStatuses(pod) {
+			if !containerImageMatches(cs, desiredImage) {
+				continue
+			}
+			matched = true
+			if !cs.Ready {
+				// Rules 3 and 4 are both Unhealthy and worst-case wins, so
+				// the first not-ready container decides the verdict.
+				return imageflowv1alpha1.HealthUnhealthy
+			}
+		}
+	}
+	if !matched {
+		return imageflowv1alpha1.HealthUnknown
+	}
+	return imageflowv1alpha1.HealthHealthy
 }
 
 func ownerRefHasUID(refs []metav1.OwnerReference, uid types.UID) bool {

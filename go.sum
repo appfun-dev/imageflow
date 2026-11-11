@@ -4,6 +4,8 @@ cuelabs.dev/go/oci/ociregistry v0.0.0-20241125120445-2c00c104c6e1 h1:mRwydyTyhtR
 cuelabs.dev/go/oci/ociregistry v0.0.0-20241125120445-2c00c104c6e1/go.mod h1:5A4xfTzHTXfeVJBU6RAUf+QrlfTCW+017q/QiW+sMLg=
 cuelang.org/go v0.12.0 h1:q4W5I+RtDIA27rslQyyt6sWkXX0YS9qm43+U1/3e0kU=
 cuelang.org/go v0.12.0/go.mod h1:B4+kjvGGQnbkz+GuAv1dq/R308gTkp0sO28FdMrJ2Kw=
+github.com/allure-framework/allure-go/commons v1.3.1 h1:Oj5pxx6LO24mj7H+SwsxwtGGvJc7FKFjWz7pU6CV9Og=
+github.com/allure-framework/allure-go/commons v1.3.1/go.mod h1:h+DnKOe9nlqqZFi18LjWq6UVfj3uno5z8itU7+sysAE=
 github.com/antlr4-go/antlr/v4 v4.13.0 h1:lxCg3LAv+EUK6t1i0y1V6/SLeUi0eKEKdhQAlS8TVTI=
 github.com/antlr4-go/antlr/v4 v4.13.0/go.mod h1:pfChB/xh/Unjila75QW7+VU4TSnWnnk9UTnmpPaOR2g=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=

@@ -32,7 +32,11 @@ package controller
 //     because the v1 CUE status policy evaluator is deferred to v1.1
 //     (ADR-005 §4/§5). The subscription carries an explicit
 //     StatusPolicyEvaluated=False Condition for that contract;
-//   - healthStatus is ALWAYS Unknown in v1 (no evaluator): imageApplied=true
+//   - healthStatus is derived from pod-level container signals for
+//     first-batch built-in kinds once their rollout has Succeeded (spec v1.5
+//     D1/D2, gated on rollout completion); targets with a
+//     statusPolicyRef.healthKey keep the v1.3 CUE evaluator path (spec v1.5
+//     D4), and every other class stays honestly Unknown: imageApplied=true
 //     or rollout=Succeeded never implies health (ADR-005 §3);
 //   - a workload whose pod template no longer references the desired image
 //     is Unknown, not Succeeded/Failed: native status would describe a
@@ -371,15 +375,19 @@ type observerOutcome struct {
 	// rollout is the determined-or-persisted rollout status after this pass
 	// (drives record healing and the poll requeue).
 	rollout imageflowv1alpha1.RolloutStatus
-	// health is the CUE-evaluated health status (T4, ADR-013). Empty means
-	// no health evaluation was performed (evaluator deferred or not configured).
+	// health is the determined health status of this pass: CUE-evaluated for
+	// targets with a statusPolicyRef.healthKey (T4, ADR-013) or natively
+	// derived from pod-level container signals for first-batch kinds
+	// (spec v1.5 D1/D4). Empty means no health evaluation was performed
+	// (evaluator deferred or not configured).
 	health imageflowv1alpha1.HealthStatus
 	// transition is non-nil when the persisted entry's rolloutStatus must
 	// move; it is applied only when the fresh state still matches `from`
 	// (stale plans are dropped and re-planned on the next trigger).
 	transition *rolloutTransition
 	// healthTransition is non-nil when the persisted entry's healthStatus
-	// must move as a result of CUE evaluation (T4).
+	// must move — from CUE evaluation (T4) or from native pod-level health
+	// determination (spec v1.5 D1).
 	healthTransition *healthTransition
 	// detMessage is the determination detail (native status summary or the
 	// honest-Unknown contract text) carried on the planned Event. The
@@ -550,7 +558,18 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		}
 		out.rollout = imageflowv1alpha1.RolloutUnknown
 	} else {
-		det := r.determineRollout(ctx, facts, target, *entry)
+		// Spec v1.5 D5: the pod list is fetched ONCE per workload per
+		// reconcile pass and shared by rollout and health determination —
+		// never a duplicate API call. A list failure degrades honestly:
+		// rollout continues on native status only (no pod-level signal) and
+		// health stays Unknown via the no-matching-container rule (D3).
+		pods, err := r.listWorkloadPods(ctx, facts)
+		if err != nil {
+			log.FromContext(ctx).V(1).Info("workload observer pod list failed; rollout continues on native status only and health stays Unknown",
+				"workload", facts.kind, "namespace", facts.namespace, "error", err)
+			pods = nil
+		}
+		det := determineRollout(facts, target, *entry, pods)
 		out.rollout = det.status
 		switch {
 		case det.status == entry.RolloutStatus:
@@ -566,6 +585,23 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 				to:   det.status,
 			}
 			out.detMessage = det.message
+		}
+		// Native health determination (spec v1.5 D1/D2/D4/D7): gated on this
+		// pass's rollout verdict and derived from pod-level container signals
+		// over the pod list fetched once above (D5 — no duplicate API call).
+		// Skipped when a statusPolicyRef.healthKey is configured: D4 keeps
+		// the v1.3 CUE evaluator path authoritative for those targets
+		// (evaluateTargetWithCUE above already planned their health
+		// transition, v1.3 behavior unchanged).
+		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
+			health := determineHealth(out.rollout, pods, entry.DesiredImage)
+			out.health = health
+			if entry.HealthStatus != health {
+				out.healthTransition = &healthTransition{
+					from: entry.HealthStatus,
+					to:   health,
+				}
+			}
 		}
 	}
 	return out
@@ -809,10 +845,14 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 		entry.RolloutStatus = out.transition.to
 		entry.LastTransitionTime = ptrTime(now)
 		rec := attributedRecord(computed.RecentDeliveries, *entry)
+		// Pass out.health (current reconcile pass verdict) to the audit
+		// message, NOT entry.HealthStatus which is stale. The health
+		// transition is applied later but the event must reflect the
+		// current determination (spec v1.5 D1/D3).
 		transition.events = append(transition.events, observerPlannedEvent{
 			eventType: observerEventType(out.transition.to),
 			reason:    observerEventReason(out.transition.to),
-			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to, out.detMessage), 1024),
+			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to, out.detMessage, out.health), 1024),
 			ref:       out.ref,
 		})
 		transition.rolloutSamples = append(transition.rolloutSamples, observerMetricSample{
@@ -820,11 +860,13 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 			result: observerResultLabel(out.transition.to),
 		})
 		// Health sample per rollout transition. With T4 CUE evaluation,
-		// health may be determined by the evaluator; otherwise it stays
-		// Unknown (ADR-005 §4).
+		// health may be determined by the evaluator; for first-batch kinds
+		// it is natively derived from pod signals (spec v1.5 D1); otherwise
+		// it stays Unknown (ADR-005 §4).
 		transition.healthSamples = append(transition.healthSamples, observerHealthLabel(entry.HealthStatus))
 	}
-	// Apply health transitions from CUE evaluation (T4, ADR-013 D3).
+	// Apply health transitions (CUE evaluation, T4/ADR-013 D3; native health
+	// determination, spec v1.5 D1).
 	for i := range outcomes {
 		out := &outcomes[i]
 		if out.healthTransition == nil {
@@ -897,7 +939,7 @@ func healInFlightRecords(computed *imageflowv1alpha1.ImageSubscriptionStatus, ou
 func setStatusPolicyCondition(computed *imageflowv1alpha1.ImageSubscriptionStatus, policyRefs int, evalResults []targetEvalResult, generation int64, now time.Time) {
 	reason := ReasonStatusPolicyNotConfigured
 	status := metav1.ConditionFalse
-	message := "No target declares a statusPolicyRef: healthStatus stays honestly Unknown for every target and success is never fabricated. Rollout of built-in first-batch kinds is observed from native workload status (ADR-006)."
+	message := "No target declares a statusPolicyRef: rollout of built-in first-batch kinds is observed from native workload status (ADR-006); native health determination (v1.5, ADR-013 §v1.5) evaluates pod container readiness and restart counts after rollout Succeeded. Non-first-batch kinds stay honestly Unknown."
 
 	if policyRefs > 0 {
 		if len(evalResults) == 0 {
@@ -1000,7 +1042,10 @@ func (r *SubscriptionObserverReconciler) freshTargetObject(ctx context.Context, 
 // rollout stage reached its verdict — with the standing note that health is
 // never derived from rollout success (ADR-005 §3). The Event is the
 // observer's WHY surface: per-target Reason/Message remain engine-owned.
-func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus, detail string) string {
+// health is the CURRENT health verdict for this reconcile pass (may be
+// out.health which includes native determination), NOT entry.HealthStatus
+// which is the persisted value from the previous pass.
+func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus, detail string, health imageflowv1alpha1.HealthStatus) string {
 	oldImage := auditImageNoneRecorded
 	newImage := entry.DesiredImage
 	if rec != nil {
@@ -1013,7 +1058,6 @@ func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imagef
 	if _, digest, err := SplitDigestReference(entry.DesiredImage); err == nil {
 		resolved = "digest " + digest
 	}
-	health := entry.HealthStatus
 	if health == "" {
 		health = imageflowv1alpha1.HealthUnknown
 	}

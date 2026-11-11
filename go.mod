@@ -1,9 +1,10 @@
 module github.com/appfun-dev/imageflow
 
-go 1.24.0
+go 1.25.0
 
 require (
 	cuelang.org/go v0.12.0
+	github.com/allure-framework/allure-go/commons v1.3.1
 	github.com/go-logr/logr v1.4.2
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1

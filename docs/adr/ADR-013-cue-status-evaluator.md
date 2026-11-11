@@ -1,6 +1,6 @@
 # ADR-013：CUE Status Evaluator 实现（v1.3）
 
-- 状态：Accepted
+- 状态：Amended
 - 日期：2026-11-09
 - 决策人：项目负责人（v1.3 grill Wave A Q1-Q3、Wave B Q4-Q6、Wave C Q7-Q9）
 - 关联：ADR-005 §4（合约冻结）；`docs/spec/imageflow-v1.3-cue-status-evaluator.md`
@@ -50,3 +50,19 @@ ADR-005 §4 冻结了 CUE Status Evaluator 的存储（ConfigMap + statusPolicyR
 | 日期 | 变更 | 理由 |
 |------|------|------|
 | 2026-11-09 | 初始版本，Accepted | v1.3 grill Wave A/B/C 决策 |
+| 2026-11-10 | Amended：v1.5 Native Health Determination | v1.5 native health determination for first-batch kinds；CUE healthKey 保留优先级 |
+
+### v1.5 — Native Health Determination (2026-11-10)
+
+**Status**: Amended
+
+Native health determination implemented for first-batch workload kinds (Deployment, StatefulSet, DaemonSet). Health is evaluated from pod container readiness and restart counts when rollout has succeeded and no CUE healthKey is configured. CUE health evaluation retains priority when healthKey is present (backward compatible with v1.3).
+
+Key decisions:
+- Pod-level signals only: container Ready status + RestartCount (spec D1)
+- Rollout gate: health evaluated only after rollout Succeeded (spec D2/D7)
+- Worst-case aggregation across pods (spec D3)
+- CUE healthKey priority over native (spec D4)
+- Shared pod list with rollout determination (spec D5)
+
+See: docs/spec/imageflow-v1.5-native-health-determination.md

@@ -520,3 +520,29 @@ CUE 评估在严格沙箱中运行（[ADR-013 D2/D9](adr/ADR-013-cue-status-eval
 - 架构决策：[ADR-013](adr/ADR-013-cue-status-evaluator.md)（CUE Status Evaluator 实现）
 - 合约冻结：[ADR-005 §4](adr/ADR-005-write-contract-cue-deferral.md)（CUE evaluator 合约规范）
 - 完整 Spec：`docs/spec/imageflow-v1.3-cue-status-evaluator.md`
+
+## 12. Health Determination（v1.5）
+
+Starting with v1.5, ImageFlow performs native health determination for first-batch workload kinds (Deployment, StatefulSet, DaemonSet) based on pod container readiness and restart counts.
+
+### How it works
+
+- Health is evaluated only after rollout reaches `Succeeded` status
+- All containers ready with zero restarts → **Healthy**
+- Containers recovered after restarts → **Healthy** (self-healed)
+- Container not ready with restarts > 0 → **Unhealthy** (crash loop)
+- No pods found → **Unknown**
+
+### CUE priority
+
+If a target has a `healthKey` configured in its CUE status policy, the CUE evaluator is used instead of native health determination. This preserves backward compatibility with v1.3 behavior.
+
+### Limitations
+
+- Non-first-batch workload kinds (Job, CronJob, etc.) remain Unknown without a CUE healthKey
+- Health is gated on rollout completion; during rollout, health stays Unknown
+
+### 相关文档
+
+- 架构决策：[ADR-013 §v1.5](adr/ADR-013-cue-status-evaluator.md#v15--native-health-determination-2026-11-10)（Native Health Determination amendment）
+- 完整 Spec：`docs/spec/imageflow-v1.5-native-health-determination.md`

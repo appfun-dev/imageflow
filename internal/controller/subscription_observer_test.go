@@ -55,6 +55,7 @@ import (
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/clock"
 	"github.com/appfun-dev/imageflow/internal/config"
+	"github.com/appfun-dev/imageflow/internal/controller/cueeval"
 )
 
 const (
@@ -389,6 +390,34 @@ func t11uPod(owner metav1.OwnerReference, statuses ...corev1.ContainerStatus) *c
 	}
 }
 
+// t11uHealthStatus builds a container status for the health-stage tests:
+// readiness + restart count + an optional waiting reason (the crash-loop
+// signal scanPodsForHealth judges Unhealthy).
+func t11uHealthStatus(image string, ready bool, restarts int32, waitingReason string) corev1.ContainerStatus {
+	cs := corev1.ContainerStatus{
+		Name:         t11uContainer,
+		Image:        image,
+		Ready:        ready,
+		RestartCount: restarts,
+	}
+	if waitingReason != "" {
+		cs.State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: waitingReason}}
+	}
+	return cs
+}
+
+// t11uHealthPod is t11uPod with an explicit name: health fixtures seed
+// several pods per workload, so the shared t11uPodName constant cannot
+// distinguish them (worst-case aggregation picks the first by name order).
+func t11uHealthPod(name string, owner metav1.OwnerReference, statuses ...corev1.ContainerStatus) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: name, OwnerReferences: []metav1.OwnerReference{owner},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: statuses},
+	}
+}
+
 func t11uReplicaSet() *appsv1.ReplicaSet {
 	return &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -607,7 +636,11 @@ func TestObserverDetermineDeploymentRolloutStates(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
 			}
-			det := f.reconciler.determineRollout(t11uCtx, facts, tc.target, tc.entry)
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
 			if det.status != tc.want {
 				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
 			}
@@ -663,7 +696,11 @@ func TestObserverDetermineStatefulSetRolloutStates(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
 			}
-			det := f.reconciler.determineRollout(t11uCtx, facts, target, t11uSeededEntry(target.TargetRef, t11uRefA))
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, target, t11uSeededEntry(target.TargetRef, t11uRefA), pods)
 			if det.status != tc.want {
 				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
 			}
@@ -716,7 +753,11 @@ func TestObserverDetermineDaemonSetRolloutStates(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
 			}
-			det := f.reconciler.determineRollout(t11uCtx, facts, target, t11uSeededEntry(target.TargetRef, t11uRefA))
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, target, t11uSeededEntry(target.TargetRef, t11uRefA), pods)
 			if det.status != tc.want {
 				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
 			}
@@ -834,7 +875,11 @@ func TestObserverPodImageFailureMarksRolloutFailed(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
 			}
-			det := f.reconciler.determineRollout(t11uCtx, facts, tc.target, t11uSeededEntry(tc.target.TargetRef, t11uRefA))
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, t11uSeededEntry(tc.target.TargetRef, t11uRefA), pods)
 			if det.status != tc.want {
 				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
 			}
@@ -845,6 +890,338 @@ func TestObserverPodImageFailureMarksRolloutFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// T4 (spec v1.5): native health determination — per-kind verdict matrix,
+// the rollout gate, and CUE priority over the native scan.
+// ---------------------------------------------------------------------------
+
+func TestObserverDetermineDeploymentHealthStates(t *testing.T) {
+	rsOwner := t11uOwnerRef("ReplicaSet", t11uRSName, t11uRSUID)
+	cases := []struct {
+		name string
+		objs []client.Object
+		want imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name: "healthy when every container is ready with zero restarts",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefA, true, 0, "")),
+			},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "healthy when ready containers recovered after restarts",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefA, true, 3, "")),
+			},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "unhealthy when a container is not ready after restarts",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefA, false, 5, "CrashLoopBackOff")),
+			},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			// Spec v1.5 D3 row 4: a not-ready container with zero restarts
+			// behind a Succeeded rollout is Unhealthy — the rollout verdict
+			// asserts startup already finished, so "awaiting initial
+			// startup" has no honest window and the deployment failed to
+			// come up (scanPodsForHealth rule 4).
+			name: "unhealthy when a not-ready container has no restarts after a succeeded rollout",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefA, false, 0, "")),
+			},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name: "worst case wins across pods of the same workload",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefA, true, 0, "")),
+				t11uHealthPod("t11u-pod-b", rsOwner, t11uHealthStatus(t11uRefA, false, 2, "CrashLoopBackOff")),
+			},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name: "unknown when no pods are found for the workload",
+			objs: []client.Object{t11uReplicaSet()},
+			want: imageflowv1alpha1.HealthUnknown,
+		},
+		{
+			name: "a pod running a foreign image says nothing about this delivery",
+			objs: []client.Object{
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", rsOwner, t11uHealthStatus(t11uRefB, true, 0, "")),
+			},
+			want: imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := append([]client.Object{t11uDeploySucceeded()}, tc.objs...)
+			f := newT11uFixture(t, config.Config{}, objs...)
+			target := t11uContainerTarget(t11uDeployRef())
+			gvk := appsv1.SchemeGroupVersion.WithKind(kindDeployment)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestObserverDetermineStatefulSetHealthStates(t *testing.T) {
+	stsOwner := t11uOwnerRef(kindStatefulSet, t11uSTSName, t11uSTSUID)
+	stsSucceeded := func() *appsv1.StatefulSet {
+		return t11uStatefulSet(t11uRefA, appsv1.StatefulSetStatus{
+			ObservedGeneration: 2, Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2,
+			CurrentRevision: "r2", UpdateRevision: "r2",
+		})
+	}
+	cases := []struct {
+		name string
+		pods []*corev1.Pod
+		want imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name: "healthy when every container is ready with zero restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", stsOwner, t11uHealthStatus(t11uRefA, true, 0, ""))},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "healthy when ready containers recovered after restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", stsOwner, t11uHealthStatus(t11uRefA, true, 4, ""))},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "unhealthy when a container is not ready after restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", stsOwner, t11uHealthStatus(t11uRefA, false, 7, "CrashLoopBackOff"))},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			// Spec v1.5 D3 row 4, same as the Deployment table: Unhealthy,
+			// not a startup transient, behind a Succeeded rollout.
+			name: "unhealthy when a not-ready container has no restarts after a succeeded rollout",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", stsOwner, t11uHealthStatus(t11uRefA, false, 0, ""))},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name: "unknown when no pods are found for the workload",
+			pods: nil,
+			want: imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{stsSucceeded()}
+			for _, pod := range tc.pods {
+				objs = append(objs, pod)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			target := t11uContainerTarget(t11uSTSRef())
+			gvk := appsv1.SchemeGroupVersion.WithKind(kindStatefulSet)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestObserverDetermineDaemonSetHealthStates(t *testing.T) {
+	dsOwner := t11uOwnerRef(kindDaemonSet, t11uDSName, t11uDSUID)
+	dsSucceeded := func() *appsv1.DaemonSet {
+		return t11uDaemonSet(t11uRefA, appsv1.DaemonSetStatus{
+			ObservedGeneration: 5, DesiredNumberScheduled: 2, CurrentNumberScheduled: 2,
+			UpdatedNumberScheduled: 2, NumberAvailable: 2, NumberReady: 2,
+		})
+	}
+	cases := []struct {
+		name string
+		pods []*corev1.Pod
+		want imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name: "healthy when every container is ready with zero restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", dsOwner, t11uHealthStatus(t11uRefA, true, 0, ""))},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "healthy when ready containers recovered after restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", dsOwner, t11uHealthStatus(t11uRefA, true, 2, ""))},
+			want: imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name: "unhealthy when a container is not ready after restarts",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", dsOwner, t11uHealthStatus(t11uRefA, false, 9, "CrashLoopBackOff"))},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			// Spec v1.5 D3 row 4, same as the Deployment table: Unhealthy,
+			// not a startup transient, behind a Succeeded rollout.
+			name: "unhealthy when a not-ready container has no restarts after a succeeded rollout",
+			pods: []*corev1.Pod{t11uHealthPod("t11u-pod-a", dsOwner, t11uHealthStatus(t11uRefA, false, 0, ""))},
+			want: imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name: "unknown when no pods are found for the workload",
+			pods: nil,
+			want: imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{dsSucceeded()}
+			for _, pod := range tc.pods {
+				objs = append(objs, pod)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			target := t11uContainerTarget(t11uDSRef())
+			gvk := appsv1.SchemeGroupVersion.WithKind(kindDaemonSet)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestObserverHealthRolloutGateBlocksEvaluation(t *testing.T) {
+	cases := []struct {
+		name    string
+		rollout imageflowv1alpha1.RolloutStatus
+	}{
+		{"progressing", imageflowv1alpha1.RolloutProgressing},
+		{"failed", imageflowv1alpha1.RolloutFailed},
+		{"unknown", imageflowv1alpha1.RolloutUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Seed a pod that WOULD be Healthy if scanned: the gate verdict
+			// proves scanPodsForHealth never ran (spec v1.5 D2/D7).
+			f := newT11uFixture(t, config.Config{},
+				t11uDeploySucceeded(),
+				t11uReplicaSet(),
+				t11uHealthPod("t11u-pod-a", t11uOwnerRef("ReplicaSet", t11uRSName, t11uRSUID),
+					t11uHealthStatus(t11uRefA, true, 0, "")))
+			target := t11uContainerTarget(t11uDeployRef())
+			gvk := appsv1.SchemeGroupVersion.WithKind(kindDeployment)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			if got := determineHealth(tc.rollout, pods, t11uRefA); got != imageflowv1alpha1.HealthUnknown {
+				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got)
+			}
+		})
+	}
+}
+
+func TestObserverHealthCUEPriorityOverNative(t *testing.T) {
+	// The seeded pod would make the NATIVE verdict Healthy ("all containers
+	// ready"); the CUE policy reports Unhealthy. Spec v1.5 D4: a configured
+	// statusPolicyRef.healthKey keeps the v1.3 CUE evaluator authoritative.
+	policyRef := func() *imageflowv1alpha1.StatusPolicyRef {
+		return &imageflowv1alpha1.StatusPolicyRef{
+			Namespace: t11uNamespace, Name: "t11u-policy", HealthKey: "health.cue",
+		}
+	}
+	policyCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: t11uNamespace, Name: "t11u-policy"},
+		Data:       map[string]string{"health.cue": `status: "Unhealthy"`},
+	}
+	healthyPod := t11uHealthPod("t11u-pod-a", t11uOwnerRef("ReplicaSet", t11uRSName, t11uRSUID),
+		t11uHealthStatus(t11uRefA, true, 0, ""))
+	mkTarget := func() imageflowv1alpha1.SubscriptionTarget {
+		target := t11uContainerTarget(t11uDeployRef())
+		target.StatusPolicyRef = policyRef()
+		return target
+	}
+	mkSub := func(target imageflowv1alpha1.SubscriptionTarget) *imageflowv1alpha1.ImageSubscription {
+		return t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{t11uSeededEntry(t11uDeployRef(), t11uRefA)},
+			RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+			ObservedGeneration: 1,
+		})
+	}
+
+	t.Run("healthKey routes health to the CUE evaluator and skips the native scan", func(t *testing.T) {
+		f := newT11uFixture(t, config.Config{}, t11uDeploySucceeded(), t11uReplicaSet(), healthyPod, policyCM)
+		f.reconciler = NewSubscriptionObserverReconciler(f.client, nil, f.recorder, f.clock, f.cfg, f.metrics, cueeval.NewEvaluator())
+		target := mkTarget()
+		out := f.reconciler.observeTarget(t11uCtx, mkSub(target), target)
+		if out == nil {
+			t.Fatal("observeTarget returned nil, want a planned outcome")
+		}
+		if out.evalErrClass != "" {
+			t.Fatalf("CUE evaluation failed: %s/%s", out.evalErrClass, out.evalErrReason)
+		}
+		if out.health != imageflowv1alpha1.HealthUnhealthy {
+			t.Fatalf("health = %q, want Unhealthy from CUE (native pods would say Healthy)", out.health)
+		}
+		if out.healthTransition == nil ||
+			out.healthTransition.from != imageflowv1alpha1.HealthUnknown ||
+			out.healthTransition.to != imageflowv1alpha1.HealthUnhealthy {
+			t.Fatalf("healthTransition = %+v, want Unknown -> Unhealthy", out.healthTransition)
+		}
+		// No rolloutKey is configured: rollout still comes from the native
+		// ADR-006 observation — CUE supplements health, it does not replace.
+		if out.rollout != imageflowv1alpha1.RolloutSucceeded {
+			t.Fatalf("rollout = %q, want Succeeded from native observation", out.rollout)
+		}
+	})
+
+	t.Run("healthKey skips the native scan even when the evaluator is deferred", func(t *testing.T) {
+		// nil evaluator (fixture default): CUE cannot run, yet the native
+		// health scan is still skipped — the healthKey gate in observeTarget
+		// does not depend on evaluator availability.
+		f := newT11uFixture(t, config.Config{}, t11uDeploySucceeded(), t11uReplicaSet(), healthyPod)
+		target := mkTarget()
+		out := f.reconciler.observeTarget(t11uCtx, mkSub(target), target)
+		if out == nil {
+			t.Fatal("observeTarget returned nil, want a planned outcome")
+		}
+		if out.health != "" || out.healthTransition != nil {
+			t.Fatalf("health = %q transition %+v: the native scan ran despite healthKey", out.health, out.healthTransition)
+		}
+		if out.rollout != imageflowv1alpha1.RolloutSucceeded {
+			t.Fatalf("rollout = %q, want Succeeded from native observation", out.rollout)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
