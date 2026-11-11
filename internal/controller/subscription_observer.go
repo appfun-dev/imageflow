@@ -845,10 +845,14 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 		entry.RolloutStatus = out.transition.to
 		entry.LastTransitionTime = ptrTime(now)
 		rec := attributedRecord(computed.RecentDeliveries, *entry)
+		// Pass out.health (current reconcile pass verdict) to the audit
+		// message, NOT entry.HealthStatus which is stale. The health
+		// transition is applied later but the event must reflect the
+		// current determination (spec v1.5 D1/D3).
 		transition.events = append(transition.events, observerPlannedEvent{
 			eventType: observerEventType(out.transition.to),
 			reason:    observerEventReason(out.transition.to),
-			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to, out.detMessage), 1024),
+			message:   authz.TruncateMessage(observerAuditMessage(fresh, *entry, rec, out.transition.to, out.detMessage, out.health), 1024),
 			ref:       out.ref,
 		})
 		transition.rolloutSamples = append(transition.rolloutSamples, observerMetricSample{
@@ -1038,7 +1042,10 @@ func (r *SubscriptionObserverReconciler) freshTargetObject(ctx context.Context, 
 // rollout stage reached its verdict — with the standing note that health is
 // never derived from rollout success (ADR-005 §3). The Event is the
 // observer's WHY surface: per-target Reason/Message remain engine-owned.
-func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus, detail string) string {
+// health is the CURRENT health verdict for this reconcile pass (may be
+// out.health which includes native determination), NOT entry.HealthStatus
+// which is the persisted value from the previous pass.
+func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imageflowv1alpha1.TargetDeliveryStatus, rec *imageflowv1alpha1.DeliveryResult, to imageflowv1alpha1.RolloutStatus, detail string, health imageflowv1alpha1.HealthStatus) string {
 	oldImage := auditImageNoneRecorded
 	newImage := entry.DesiredImage
 	if rec != nil {
@@ -1051,7 +1058,6 @@ func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imagef
 	if _, digest, err := SplitDigestReference(entry.DesiredImage); err == nil {
 		resolved = "digest " + digest
 	}
-	health := entry.HealthStatus
 	if health == "" {
 		health = imageflowv1alpha1.HealthUnknown
 	}

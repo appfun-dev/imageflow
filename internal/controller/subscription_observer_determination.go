@@ -560,9 +560,6 @@ func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha
 	matched := false
 	for _, pod := range pods {
 		for _, cs := range allContainerStatuses(pod) {
-			// DEBUG: log what we're comparing to diagnose E2E failures
-			fmt.Printf("DEBUG scanPodsForHealth: pod=%s container=%s cs.Image=%q cs.ImageID=%q desiredImage=%q matches=%v\n",
-				pod.Name, cs.Name, cs.Image, cs.ImageID, desiredImage, containerImageMatches(cs, desiredImage))
 			if !containerImageMatches(cs, desiredImage) {
 				continue
 			}
