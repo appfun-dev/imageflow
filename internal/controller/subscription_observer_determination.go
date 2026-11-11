@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -484,7 +485,7 @@ func allContainerStatuses(pod *corev1.Pod) []corev1.ContainerStatus {
 func scanPodsForImageFailure(pods []*corev1.Pod, desiredImage string) (podName, containerName, waitingReason, waitingMessage string) {
 	for _, pod := range pods {
 		for _, cs := range allContainerStatuses(pod) {
-			if cs.Image != desiredImage || cs.State.Waiting == nil {
+			if !containerImageMatches(cs, desiredImage) || cs.State.Waiting == nil {
 				continue
 			}
 			if _, failed := observerPodImageFailureReasons[cs.State.Waiting.Reason]; failed {
@@ -524,11 +525,42 @@ func scanPodsForImageFailure(pods []*corev1.Pod, desiredImage string) (podName, 
 // first not-ready container decides the verdict. The function is pure: it
 // reads the given pod list and never touches the API server, so it is
 // testable independently of the reconcile loop.
+// containerImageMatches checks whether a container status refers to the
+// desired image. Kubernetes may report the image in cs.Image (user-specified
+// reference, possibly tag or digest format) or cs.ImageID (runtime-resolved
+// ID, typically "docker-pullable://repo@sha256:..." or "repo@sha256:...").
+// The comparison extracts the digest portion when both sides carry one,
+// falling back to exact string match otherwise. This handles the common
+// case where the desired image is a digest reference but the pod was
+// originally created with a tag that resolved to the same digest.
+func containerImageMatches(cs corev1.ContainerStatus, desiredImage string) bool {
+	if cs.Image == desiredImage {
+		return true
+	}
+	// Try digest-based comparison: extract sha256 from both sides.
+	_, desiredDigest, desiredErr := SplitDigestReference(desiredImage)
+	if desiredErr == nil && desiredDigest != "" {
+		// Check cs.Image for embedded digest.
+		if _, imgDigest, imgErr := SplitDigestReference(cs.Image); imgErr == nil && imgDigest == desiredDigest {
+			return true
+		}
+		// Check cs.ImageID (may have "docker-pullable://" prefix).
+		imageID := cs.ImageID
+		if idx := strings.Index(imageID, "://"); idx >= 0 {
+			imageID = imageID[idx+3:]
+		}
+		if _, idDigest, idErr := SplitDigestReference(imageID); idErr == nil && idDigest == desiredDigest {
+			return true
+		}
+	}
+	return false
+}
+
 func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
 	matched := false
 	for _, pod := range pods {
 		for _, cs := range allContainerStatuses(pod) {
-			if cs.Image != desiredImage {
+			if !containerImageMatches(cs, desiredImage) {
 				continue
 			}
 			matched = true
