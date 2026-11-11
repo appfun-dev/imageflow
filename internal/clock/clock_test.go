@@ -6,9 +6,9 @@
 //
 // Test Structure Convention:
 // Each test function follows a three-part structure:
-//   1. metadata := []ao.Option{...}     — Allure traceability and hierarchy
-//   2. const (...)                      — Key test parameters (if any)
-//   3. agt.Test(t, name, body, metadata...)  — Test execution
+//  1. metadata := []ao.Option{...}     — Allure traceability and hierarchy
+//  2. const (...)                      — Key test parameters (if any)
+//  3. agt.Test(t, name, body, metadata...)  — Test execution
 //
 // Documentation lives in metadata.Description, not method comments.
 // Method comments are limited to a single godoc line for go doc compatibility.
