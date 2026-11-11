@@ -80,31 +80,43 @@ allure generate allure-results -o allure-report
 
 ## 标注模板
 
-### 单元测试
+### 单元测试（三段式 + options 包）
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
+    . "github.com/appfun-dev/imageflow/test/utils/should_dsl"
 )
 
+// TestAcceptsContainerNameFilter verifies imageFields path accepts container name filter.
 func (s *FieldPathSuite) TestAcceptsContainerNameFilter() {
+    metadata := []ao.Option{
+        ao.AllureID("IF-101"),
+        ao.TMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+        ao.TMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        ao.Label("userstory", "US-3"),
+        ao.Label("scenario", "合法路径通过校验"),
+        ao.Epic("Phase 1: API and minimal image model"),
+        ao.Feature("ADR-005 imageFields write contract"),
+        ao.Story("US-3"),
+        ao.Link("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-005-write-contract-cue-deferral.md", "ADR-005", "docs"),
+        ao.ParentSuite("unit"),
+        ao.Suite("FieldPath"),
+        ao.Description(`验证 imageFields 路径文法接受 [name=app] 单层容器名过滤。
+
+合法路径格式：.spec.template.spec.containers[name=<name>].image
+非法格式（通配符、数字索引）应被拒绝，见其他测试用例。`),
+    }
+
+    const validPath = ".spec.template.spec.containers[name=app].image"
+
     agt.Test(s.T(), "imageFields 路径接受 [name=app] 单层过滤",
-        WithAllureID("IF-101"),
-        WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
-        WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-        WithLabel("userstory", "US-3"),
-        WithLabel("scenario", "合法路径通过校验"),
-        WithEpic("Phase 1: API and minimal image model"),
-        WithFeature("ADR-005 imageFields write contract"),
-        WithStory("US-3"),
-        WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-005-write-contract-cue-deferral.md", "ADR-005", "docs"),
-        WithParentSuite("unit"),
-        WithSuite("FieldPath"),
         func(a *agt.Context) {
-            err := subscription.ValidateImageFieldPath(".spec.template.spec.containers[name=app].image")
-            require.NoError(a, err)
+            err := subscription.ValidateImageFieldPath(validPath)
+            AExpect(a, err).Should(BeNil(), "valid path must pass validation")
         },
+        metadata...,
     )
 }
 ```
@@ -113,25 +125,25 @@ func (s *FieldPathSuite) TestAcceptsContainerNameFilter() {
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
 )
 
+// TestRejectsMissingUpdatePermission verifies RBAC enforcement on target update.
 func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
-    agt.Test(s.T(), "订阅创建者缺少 target update 权限时拒绝写入",
-        WithAllureID("IF-102"),
-        WithTMS("IF-102", "https://github.com/appfun-dev/imageflow/issues/102"),
-        WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-        WithLabel("userstory", "US-5"),
-        WithLabel("scenario", "RBAC 不足时报告 Forbidden"),
-        WithEpic("Phase 1: API and minimal image model"),
-        WithFeature("ADR-003 cross-namespace authorization"),
-        WithStory("US-5"),
-        WithLink("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-003-subscription-authorization.md", "ADR-003", "docs"),
-        WithParentSuite("integration"),
-        WithSuite("SubscriptionAuthorization"),
-        WithDescription(`
-验证：当 ImageSubscription 的创建者没有被授权更新目标 workload 时，
+    metadata := []ao.Option{
+        ao.AllureID("IF-102"),
+        ao.TMS("IF-102", "https://github.com/appfun-dev/imageflow/issues/102"),
+        ao.TMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        ao.Label("userstory", "US-5"),
+        ao.Label("scenario", "RBAC 不足时报告 Forbidden"),
+        ao.Epic("Phase 1: API and minimal image model"),
+        ao.Feature("ADR-003 cross-namespace authorization"),
+        ao.Story("US-5"),
+        ao.Link("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-003-subscription-authorization.md", "ADR-003", "docs"),
+        ao.ParentSuite("integration"),
+        ao.Suite("SubscriptionAuthorization"),
+        ao.Description(`验证：当 ImageSubscription 的创建者没有被授权更新目标 workload 时，
 控制器应通过 SubjectAccessReview 识别并在该目标上产生 Forbidden Condition，
 且不对目标做任何字段写入。
 
@@ -142,19 +154,20 @@ func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
 
 预期结果：
 - subscription.status.targets[] 中对应项为 Forbidden
-- Deployment image 字段未被修改
-        `),
+- Deployment image 字段未被修改`),
+    }
+
+    agt.Test(s.T(), "订阅创建者缺少 target update 权限时拒绝写入",
         func(a *agt.Context) {
-            a.Step("创建只读 ServiceAccount 与 ImageSubscription", func(ctx context.Context) error {
+            a.Step("创建只读 ServiceAccount 与 ImageSubscription", func(ctx *agt.Context) {
                 // ...
-                return nil
             })
-            a.Step("触发 reconcile 并断言 SAR 结果", func(ctx context.Context) error {
-                a.StepDescription("控制器调用 SubjectAccessReview 检查 update 权限")
+            a.Step("触发 reconcile 并断言 SAR 结果", func(ctx *agt.Context) {
+                ctx.StepDescription("控制器调用 SubjectAccessReview 检查 update 权限")
                 // ...
-                return nil
             })
         },
+        metadata...,
     )
 }
 ```
@@ -163,11 +176,30 @@ func (s *SubscriptionAuthorizationSuite) TestRejectsMissingUpdatePermission() {
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
+    . "github.com/appfun-dev/imageflow/test/utils/should_dsl"
 )
 
+// TestValidateImageFieldPath verifies imageFields path grammar matrix.
 func (s *FieldPathSuite) TestValidateImageFieldPath() {
+    metadata := []ao.Option{
+        ao.AllureID("IF-101"),
+        ao.TMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
+        ao.TMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
+        ao.Label("userstory", "US-3"),
+        ao.Label("scenario", "imageFields 路径文法矩阵"),
+        ao.Epic("Phase 1: API and minimal image model"),
+        ao.Feature("ADR-005 imageFields write contract"),
+        ao.Story("US-3"),
+        ao.ParentSuite("unit"),
+        ao.Suite("FieldPath"),
+        ao.Description(`验证 imageFields 路径文法的合法与非法格式。
+
+合法：[name=<container>] 单层过滤
+非法：通配符 [*]、数字索引 [0]`),
+    }
+
     cases := []struct {
         name    string
         path    string
@@ -181,26 +213,18 @@ func (s *FieldPathSuite) TestValidateImageFieldPath() {
     for _, tc := range cases {
         s.Run(tc.name, func() {
             agt.Test(s.T(), tc.name,
-                WithAllureID("IF-101"),
-                WithTMS("IF-101", "https://github.com/appfun-dev/imageflow/issues/101"),
-                WithTMS("SPEC-1", "https://github.com/appfun-dev/imageflow/issues/1"),
-                WithLabel("userstory", "US-3"),
-                WithLabel("scenario", "imageFields 路径文法矩阵"),
-                WithParameter("path", tc.path),
-                WithParameter("wantErr", tc.wantErr),
-                WithEpic("Phase 1: API and minimal image model"),
-                WithFeature("ADR-005 imageFields write contract"),
-                WithStory("US-3"),
-                WithParentSuite("unit"),
-                WithSuite("FieldPath"),
                 func(a *agt.Context) {
                     err := subscription.ValidateImageFieldPath(tc.path)
                     if tc.wantErr {
-                        require.Error(a, err)
+                        AExpect(a, err).ShouldNot(BeNil())
                     } else {
-                        require.NoError(a, err)
+                        AExpect(a, err).Should(BeNil())
                     }
                 },
+                append(metadata,
+                    ao.Parameter("path", tc.path),
+                    ao.Parameter("wantErr", fmt.Sprintf("%v", tc.wantErr)),
+                )...,
             )
         })
     }
@@ -211,31 +235,39 @@ func (s *FieldPathSuite) TestValidateImageFieldPath() {
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
 )
 
+// TestLatestWinsSupersedesOldTag verifies supersession during active rollout.
 func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
+    metadata := []ao.Option{
+        // ... traceability and hierarchy omitted for brevity
+        ao.Description(`验证 rollout 进行中到达新 tag 时，旧投递被标记为 Superseded。
+
+步骤：
+1. 写入第一个 tag 并观察 ImageApplied
+2. 在 rollout 进行中写入第二个 tag
+3. 断言旧投递状态变为 Superseded`),
+    }
+
     agt.Test(s.T(), "rollout 中到达新 tag 时旧投递记为 Superseded",
-        // ... metadata omitted for brevity
         func(a *agt.Context) {
-            a.Step("写入第一个 tag 并观察 ImageApplied", func(ctx context.Context) error {
-                a.StepParameter("firstTag", "v1.0.0")
-                a.StepParameter("firstDigest", "sha256:aaa...")
+            a.Step("写入第一个 tag 并观察 ImageApplied", func(ctx *agt.Context) {
+                ctx.StepParameter("firstTag", "v1.0.0")
+                ctx.StepParameter("firstDigest", "sha256:aaa...")
                 // ...
-                return nil
             })
-            a.Step("在 rollout 进行中写入第二个 tag", func(ctx context.Context) error {
-                a.StepDescription("模拟镜像源在原生 rollout 尚未完成时发生第二次变化")
-                a.StepParameter("secondTag", "v1.1.0")
+            a.Step("在 rollout 进行中写入第二个 tag", func(ctx *agt.Context) {
+                ctx.StepDescription("模拟镜像源在原生 rollout 尚未完成时发生第二次变化")
+                ctx.StepParameter("secondTag", "v1.1.0")
                 // ...
-                return nil
             })
-            a.Step("断言旧投递为 Superseded", func(ctx context.Context) error {
+            a.Step("断言旧投递为 Superseded", func(ctx *agt.Context) {
                 // ...
-                return nil
             })
         },
+        metadata...,
     )
 }
 ```
@@ -246,53 +278,63 @@ func (s *DeliverySuite) TestLatestWinsSupersedesOldTag() {
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
     . "github.com/appfun-dev/imageflow/test/utils/should_dsl"
 )
 
+// TestFakeClockAdvancesDeterministically verifies Fake clock deterministic time advancement.
 func TestFakeClockAdvancesDeterministically(t *testing.T) {
+    metadata := []ao.Option{
+        ao.AllureID("CLOCK-001"),
+        ao.TMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
+        ao.Label("userstory", "US-INFRA-1"),
+        ao.Label("scenario", "deterministic time advancement"),
+        ao.Epic("Infrastructure: Test Seams"),
+        ao.Feature("ADR-009 Testing Strategy"),
+        ao.Story("US-INFRA-1"),
+        ao.ParentSuite("unit"),
+        ao.Suite("Clock"),
+        ao.Description(`验证 Fake clock 提供确定性时间控制。
+
+测试用例：
+1. 初始时间等于构造参数
+2. Advance() 正确递增内部时间
+3. Since() 计算从参考点经过的时长`),
+    }
+
+    const (
+        advanceDuration  = 5 * time.Minute
+        sinceTestAdvance = time.Hour
+    )
+
     agt.Test(t, "Fake clock advances deterministically",
-        WithAllureID("CLOCK-001"),
-        WithTMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
-        WithLabel("userstory", "US-INFRA-1"),
-        WithLabel("scenario", "deterministic time advancement"),
-        WithEpic("Infrastructure: Test Seams"),
-        WithFeature("ADR-009 Testing Strategy"),
-        WithStory("US-INFRA-1"),
-        WithParentSuite("unit"),
-        WithSuite("Clock"),
         func(a *agt.Context) {
             start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
             clk := NewFake(start)
 
-            a.Step("Verify initial time equals start", func(ctx interface{}) error {
+            a.Step("Verify initial time equals start", func(ctx *agt.Context) {
                 AExpect(a, clk.Now()).Should(Equal(start))
-                return nil
             })
 
-            a.Step("Advance by 5 minutes", func(ctx interface{}) error {
-                clk.Advance(5 * time.Minute)
-                want := start.Add(5 * time.Minute)
+            a.Step("Advance by configured duration", func(ctx *agt.Context) {
+                clk.Advance(advanceDuration)
+                want := start.Add(advanceDuration)
                 AExpect(a, clk.Now()).Should(Equal(want))
-                return nil
             })
 
-            // Async assertion with Eventually
-            a.Step("Verify Since computes elapsed duration", func(ctx interface{}) error {
+            a.Step("Verify Since computes elapsed duration", func(ctx *agt.Context) {
                 before := clk.Now()
-                clk.Advance(time.Hour)
-                AEventually(a, func() bool {
-                    return clk.Since(before) >= time.Hour
-                }).WithTimeout(1*time.Second).Should(BeTrue())
-                return nil
+                clk.Advance(sinceTestAdvance)
+                AExpect(a, clk.Since(before)).Should(Equal(sinceTestAdvance))
             })
         },
+        metadata...,
     )
 }
 ```
 
-> **完整范例**：见 [`internal/clock/clock_test.go`](internal/clock/clock_test.go)。该文件包含三个测试用例，覆盖同步断言、异步断言和并发安全场景，是后续测试改进的参考样本。
+> **完整范例**：见 [`internal/clock/clock_test.go`](internal/clock/clock_test.go)。该文件包含三个测试用例，覆盖同步断言、异步断言和并发安全场景，是后续测试的参考样本。
 
 ## 命名约定
 
@@ -308,10 +350,10 @@ func TestFakeClockAdvancesDeterministically(t *testing.T) {
 
 ## 描述与参数外显规则
 
-- **Integration / E2E 测试**：必须携带 `WithDescription` 或 `WithDescriptionHTML`（匿名导入）。
-- **HTML 描述触发条件**：描述含表格、列表、代码块或多行结构化内容时使用 `WithDescriptionHTML`。
-- **表格驱动测试**：通过 `WithParameter(name, value)` 外显参数；测试显示名保持稳定。
-- **步骤参数/说明**：关键步骤使用 `a.StepParameter` / `a.StepDescription` 补充。
+- **Integration / E2E 测试**：必须携带 `ao.Description` 或 `ao.DescriptionHTML`。
+- **HTML 描述触发条件**：描述含表格、列表、代码块或多行结构化内容时使用 `ao.DescriptionHTML`。
+- **表格驱动测试**：通过 `ao.Parameter(name, value)` 外显参数；测试显示名保持稳定。
+- **步骤参数/说明**：关键步骤使用 `ctx.StepParameter` / `ctx.StepDescription` 补充。
 
 ## 可追溯性 checklist
 
@@ -319,33 +361,102 @@ func TestFakeClockAdvancesDeterministically(t *testing.T) {
 
 - [ ] 测试位于 `test/unit/`、`test/integration/`、`test/e2e/` 或生产代码同包 `_test.go`。
 - [ ] 使用 `testify/suite` 组织；suite 结构体名以 `Suite` 结尾。
-- [ ] 测试方法内调用 `agt.Test(s.T(), ...)`（别名导入）。
-- [ ] `WithAllureID("IF-<id>")` 与 `WithTMS("IF-<id>", url)` 指向同一测试用例 issue（匿名导入）。
-- [ ] `WithTMS("SPEC-<id>", url)` 指向标题以 `Spec:` 开头的 GitHub issue。
-- [ ] `WithLabel("userstory", "US-<Seq>")` 已标注。
-- [ ] `WithLabel("scenario", "<场景名>")` 已填写。
-- [ ] `Epic` / `Feature` / `Story` 已按层级映射填写。
-- [ ] `ParentSuite` = `unit|integration|e2e`；`Suite` = 结构体名去掉 `Suite` 后缀。
-- [ ] Integration / E2E 测试已携带 `WithDescription` 或 `WithDescriptionHTML`。
-- [ ] 表格驱动测试已使用 `WithParameter` 外显参数。
-- [ ] 关键步骤已使用 `a.StepParameter` / `a.StepDescription` 补充说明。
+- [ ] 测试方法遵循三段式结构（metadata → params → body）。
+- [ ] 测试方法内调用 `agt.Test(s.T(), ..., metadata...)`。
+- [ ] 方法注释精简至单行 godoc，详细说明在 `ao.Description()` 中。
+- [ ] `ao.AllureID("IF-<id>")` 与 `ao.TMS("IF-<id>", url)` 指向同一测试用例 issue。
+- [ ] `ao.TMS("SPEC-<id>", url)` 指向标题以 `Spec:` 开头的 GitHub issue。
+- [ ] `ao.Label("userstory", "US-<Seq>")` 已标注。
+- [ ] `ao.Label("scenario", "<场景名>")` 已填写。
+- [ ] `ao.Epic` / `ao.Feature` / `ao.Story` 已按层级映射填写。
+- [ ] `ao.ParentSuite` = `unit|integration|e2e`；`ao.Suite` = 结构体名去掉 `Suite` 后缀。
+- [ ] Integration / E2E 测试已携带 `ao.Description` 或 `ao.DescriptionHTML`。
+- [ ] 表格驱动测试已使用 `ao.Parameter` 外显参数。
+- [ ] 关键步骤已使用 `ctx.StepParameter` / `ctx.StepDescription` 补充说明。
+
+## 测试结构约定
+
+### 三段式结构
+
+每个测试函数遵循统一的三段式结构，兼顾代码可读性与 Allure 报告完整性：
+
+```go
+func TestXxx(t *testing.T) {
+    // 1. Allure 元数据（内联，紧邻测试主体）
+    metadata := []ao.Option{
+        ao.AllureID("XXX-001"),
+        ao.TMS("XXX-001", "https://github.com/appfun-dev/imageflow/issues/XXX-001"),
+        ao.Label("userstory", "US-XXX-1"),
+        ao.Label("scenario", "场景名"),
+        ao.Epic("..."),
+        ao.Feature("..."),
+        ao.Story("..."),
+        ao.ParentSuite("unit"),
+        ao.Suite("Component"),
+        ao.Description(`详细说明...`),
+    }
+
+    // 2. 关键测试参数（const 提取，便于调整）
+    const (
+        paramA = valueA
+        paramB = valueB
+    )
+
+    // 3. 测试执行主体
+    agt.Test(t, "显示名称", func(a *agt.Context) {
+        // ...
+    }, metadata...)
+}
+```
+
+### Code-as-Documentation 原则
+
+- **方法注释精简至单行 godoc**：仅保留 `// TestXxx verifies ...` 形式的简短说明，确保 `go doc` 兼容。
+- **详细说明移入 metadata.Description**：测试目的、前置条件、预期结果、配置说明等全部写入 `ao.Description()`，在 Allure 报告中完整呈现。
+- **包级 godoc 声明约定**：测试文件的包注释应说明本文件采用的结构约定和文档策略。
+
+> **完整范例**：见 [`internal/clock/clock_test.go`](internal/clock/clock_test.go)。该文件包含三个测试用例，覆盖同步断言、异步断言和并发安全场景，是后续测试的参考样本。
 
 ## Allure 导入约定
 
 ### gotest 包
 
-Allure gotest 包采用**匿名导入 + 别名导入并存**：
+Allure gotest 包采用**别名导入**：
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"      // 匿名：With* 函数直接使用
-    agt "github.com/allure-framework/allure-go/commons/gotest"    // 别名：agt.Test, agt.Context
+    agt "github.com/allure-framework/allure-go/commons/gotest"    // agt.Test, agt.Context
 )
 ```
 
-- `agt.Test(...)` 替代 `allure.Test(...)`
-- `agt.Context` 替代 `allure.Context`
-- `With*(...)` 函数通过匿名导入直接使用
+- `agt.Test(...)` 用于创建测试
+- `agt.Context` 用于步骤回调签名
+
+### options 包（推荐）
+
+使用 `test/utils/allure/options` 包获取更简洁的元数据构造函数（去除 `With` 前缀）：
+
+```go
+import (
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"  // ao.AllureID, ao.Label, ...
+)
+```
+
+| 原函数 | options 包 | 说明 |
+|--------|-----------|------|
+| `WithAllureID` | `ao.AllureID` | 测试用例 ID |
+| `WithTMS` | `ao.TMS` | TMS 链接 |
+| `WithLabel` | `ao.Label` | 自定义标签 |
+| `WithEpic` | `ao.Epic` | Epic 层级 |
+| `WithFeature` | `ao.Feature` | Feature 层级 |
+| `WithStory` | `ao.Story` | Story 层级 |
+| `WithParentSuite` | `ao.ParentSuite` | 顶层 Suite |
+| `WithSuite` | `ao.Suite` | 二级 Suite |
+| `WithDescription` | `ao.Description` | Markdown 描述 |
+| `WithLink` | `ao.Link` | 文档链接 |
+| `WithParameter` | `ao.Parameter` | 测试参数 |
+
+> **命名冲突处理**：当 `options.Clock` 与包内类型冲突时，使用短别名导入：`import ao "...options"` 然后 `ao.Clock(...)`。
 
 ### testify 包优先级
 

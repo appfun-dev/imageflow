@@ -56,18 +56,33 @@
 
 ### gotest 包导入
 
-**规则**：Allure gotest 包采用匿名导入 + 别名导入并存。
+**规则**：Allure gotest 包采用别名导入。
 
 ```go
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"      // 匿名：With* 函数直接使用
-    agt "github.com/allure-framework/allure-go/commons/gotest"    // 别名：agt.Test, agt.Context
+    agt "github.com/allure-framework/allure-go/commons/gotest"    // agt.Test, agt.Context
 )
 ```
 
-- `agt.Test(...)` 替代 `allure.Test(...)`
-- `agt.Context` 替代 `allure.Context`
-- `With*(...)` 函数通过匿名导入直接使用（如 `WithAllureID`, `WithLabel`）
+- `agt.Test(...)` 用于创建测试
+- `agt.Context` 用于步骤回调签名
+
+### options 包（推荐）
+
+**规则**：使用 `test/utils/allure/options` 包获取更简洁的元数据构造函数。
+
+```go
+import (
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"  // ao.AllureID, ao.Label, ...
+)
+```
+
+- `ao.AllureID(...)` 替代 `WithAllureID(...)`
+- `ao.TMS(...)` 替代 `WithTMS(...)`
+- `ao.Label(...)` 替代 `WithLabel(...)`
+- 完整列表见 [TESTING.md](TESTING.md#options-包推荐)
+
+> **命名冲突处理**：当 `options.Clock` 与包内类型冲突时，使用短别名导入：`import ao "...options"` 然后 `ao.Clock(...)`。
 
 ### testify 包导入优先级
 
@@ -84,16 +99,16 @@ import (
 ```go
 // ✅ 场景 1：已导入 allure，优先用 allure 封装的 testify
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
     "github.com/allure-framework/allure-go/testify/assert"
     "github.com/allure-framework/allure-go/testify/require"
 )
 
 // ✅ 场景 2：allure 版本缺少某函数，回退到 stretchr（别名避免冲突）
 import (
-    . "github.com/allure-framework/allure-go/commons/gotest"
     agt "github.com/allure-framework/allure-go/commons/gotest"
+    ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
     "github.com/allure-framework/allure-go/testify/assert"
     strequire "github.com/stretchr/testify/require"  // ← 别名，仅当 allure require 缺少所需函数时
 )
