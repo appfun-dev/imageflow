@@ -11,7 +11,7 @@ import (
 
 	agt "github.com/allure-framework/allure-go/commons/gotest"
 
-	. "github.com/appfun-dev/imageflow/test/utils/allure/options"
+	ao "github.com/appfun-dev/imageflow/test/utils/allure/options"
 	. "github.com/appfun-dev/imageflow/test/utils/should_dsl"
 )
 
@@ -27,26 +27,26 @@ import (
 
 // clockDeterministicOpts holds Allure metadata for TestFakeClockAdvancesDeterministically.
 // Verifies Fake clock provides deterministic time control for unit tests.
-var clockDeterministicOpts = []Option{
+var clockDeterministicOpts = []ao.Option{
 	// Traceability
-	AllureID("CLOCK-001"),
-	TMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
-	Label("userstory", "US-INFRA-1"),
-	Label("scenario", "deterministic time advancement"),
-	Label("component", "clock"),
-	Label("layer", "unit"),
+	ao.AllureID("CLOCK-001"),
+	ao.TMS("CLOCK-001", "https://github.com/appfun-dev/imageflow/issues/CLOCK-001"),
+	ao.Label("userstory", "US-INFRA-1"),
+	ao.Label("scenario", "deterministic time advancement"),
+	ao.Label("component", "clock"),
+	ao.Label("layer", "unit"),
 	// Hierarchy
-	Epic("Infrastructure: Test Seams"),
-	Feature("ADR-009 Testing Strategy"),
-	Story("US-INFRA-1"),
+	ao.Epic("Infrastructure: Test Seams"),
+	ao.Feature("ADR-009 Testing Strategy"),
+	ao.Story("US-INFRA-1"),
 	// Documentation Links
-	Link("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-009-testing-strategy.md", "ADR-009", "docs"),
-	Link("https://github.com/appfun-dev/imageflow/blob/main/TESTING.md", "TESTING.md", "docs"),
+	ao.Link("https://github.com/appfun-dev/imageflow/blob/main/docs/adr/ADR-009-testing-strategy.md", "ADR-009", "docs"),
+	ao.Link("https://github.com/appfun-dev/imageflow/blob/main/TESTING.md", "TESTING.md", "docs"),
 	// Suite Classification
-	ParentSuite("unit"),
-	Suite("Clock"),
+	ao.ParentSuite("unit"),
+	ao.Suite("Clock"),
 	// Description
-	Description(`Verifies that Fake clock provides deterministic time control for unit tests.
+	ao.Description(`Verifies that Fake clock provides deterministic time control for unit tests.
 
 Test cases:
 1. Initial time equals construction parameter
@@ -60,23 +60,23 @@ inject Fake for deterministic behavior.`),
 
 // clockConcurrencyOpts holds Allure metadata for TestFakeClockConcurrencySafety.
 // Verifies Fake clock's RWMutex protects concurrent Now()/Advance() calls.
-var clockConcurrencyOpts = []Option{
+var clockConcurrencyOpts = []ao.Option{
 	// Traceability
-	AllureID("CLOCK-002"),
-	TMS("CLOCK-002", "https://github.com/appfun-dev/imageflow/issues/CLOCK-002"),
-	Label("userstory", "US-INFRA-1"),
-	Label("scenario", "concurrent access safety"),
-	Label("component", "clock"),
-	Label("layer", "unit"),
+	ao.AllureID("CLOCK-002"),
+	ao.TMS("CLOCK-002", "https://github.com/appfun-dev/imageflow/issues/CLOCK-002"),
+	ao.Label("userstory", "US-INFRA-1"),
+	ao.Label("scenario", "concurrent access safety"),
+	ao.Label("component", "clock"),
+	ao.Label("layer", "unit"),
 	// Hierarchy
-	Epic("Infrastructure: Test Seams"),
-	Feature("ADR-009 Testing Strategy"),
-	Story("US-INFRA-1"),
+	ao.Epic("Infrastructure: Test Seams"),
+	ao.Feature("ADR-009 Testing Strategy"),
+	ao.Story("US-INFRA-1"),
 	// Suite Classification
-	ParentSuite("unit"),
-	Suite("Clock"),
+	ao.ParentSuite("unit"),
+	ao.Suite("Clock"),
 	// Description
-	Description(`Verifies that Fake clock's RWMutex protects concurrent Now()/Advance() calls.
+	ao.Description(`Verifies that Fake clock's RWMutex protects concurrent Now()/Advance() calls.
 
 Spawns 10 reader goroutines and 10 writer goroutines, each performing 100
 iterations simultaneously. After all goroutines complete, verifies that
@@ -88,23 +88,23 @@ Run with -race flag to detect race conditions:
 
 // clockRealOpts holds Allure metadata for TestRealClockReturnsSystemTime.
 // Verifies Real clock correctly delegates to system time functions.
-var clockRealOpts = []Option{
+var clockRealOpts = []ao.Option{
 	// Traceability
-	AllureID("CLOCK-003"),
-	TMS("CLOCK-003", "https://github.com/appfun-dev/imageflow/issues/CLOCK-003"),
-	Label("userstory", "US-INFRA-1"),
-	Label("scenario", "real clock delegation"),
-	Label("component", "clock"),
-	Label("layer", "unit"),
+	ao.AllureID("CLOCK-003"),
+	ao.TMS("CLOCK-003", "https://github.com/appfun-dev/imageflow/issues/CLOCK-003"),
+	ao.Label("userstory", "US-INFRA-1"),
+	ao.Label("scenario", "real clock delegation"),
+	ao.Label("component", "clock"),
+	ao.Label("layer", "unit"),
 	// Hierarchy
-	Epic("Infrastructure: Test Seams"),
-	Feature("ADR-009 Testing Strategy"),
-	Story("US-INFRA-1"),
+	ao.Epic("Infrastructure: Test Seams"),
+	ao.Feature("ADR-009 Testing Strategy"),
+	ao.Story("US-INFRA-1"),
 	// Suite Classification
-	ParentSuite("unit"),
-	Suite("Clock"),
+	ao.ParentSuite("unit"),
+	ao.Suite("Clock"),
 	// Description
-	Description(`Verifies that Real clock correctly delegates to time.Now() and time.Since().
+	ao.Description(`Verifies that Real clock correctly delegates to time.Now() and time.Since().
 
 Now() must return a time within the call window [before, after].
 Since() must return at least the elapsed duration; uses Eventually to

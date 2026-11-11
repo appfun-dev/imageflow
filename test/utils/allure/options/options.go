@@ -102,9 +102,10 @@ var Parameter = gotest.WithParameter
 
 // ─── Infrastructure ─────────────────────────────────────────────────────────
 
-// WithClock overrides the timestamp source for deterministic test timing.
-// Named WithClock to avoid conflict with clock.Clock interface.
-var WithClock = gotest.WithClock
+// Clock overrides the timestamp source for deterministic test timing.
+// When used in packages with naming conflicts (e.g., clock.Clock), import
+// this package with an alias: import ao "github.com/.../options" then use ao.Clock.
+var Clock = gotest.WithClock
 
 // IDGenerator overrides the test ID generation function.
 var IDGenerator = gotest.WithIDGenerator
