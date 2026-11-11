@@ -2264,6 +2264,173 @@ func t11uJob(image string, st batchv1.JobStatus) *batchv1.Job {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CronJob observation (T6): ownerReference-based Job discovery
+// ---------------------------------------------------------------------------
+
+const t11uCronJobName = "t11u-cronjob"
+
+var t11uCronJobUID = types.UID("t11u-cronjob-uid")
+
+func t11uCronJobRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uBatchAPI, Kind: kindCronJob,
+		Namespace: t11uNamespace, Name: t11uCronJobName,
+	}
+}
+
+func t11uCronJob(image string) *batchv1.CronJob {
+	return &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: t11uCronJobName,
+			UID: t11uCronJobUID, Generation: 1,
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: t11uPodTemplate(image),
+				},
+			},
+		},
+	}
+}
+
+// t11uJobOwnedBy creates a Job owned by the CronJob via ownerReferences.
+func t11uJobOwnedBy(name, image string, cronJobUID types.UID, creationTime time.Time, st batchv1.JobStatus) *batchv1.Job {
+	isController := true
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: name,
+			UID: types.UID(name + "-uid"),
+			CreationTimestamp: metav1.NewTime(creationTime),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: t11uBatchAPI, Kind: kindCronJob,
+				Name: t11uCronJobName, UID: cronJobUID,
+				Controller: &isController,
+			}},
+		},
+		Spec: batchv1.JobSpec{
+			Template: t11uPodTemplate(image),
+		},
+		Status: st,
+	}
+}
+
+func TestObserverDetermineCronJobCompletionStates(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name    string
+		cronJob *batchv1.CronJob
+		jobs    []*batchv1.Job // Jobs owned by the CronJob
+		target  imageflowv1alpha1.SubscriptionTarget
+		entry   imageflowv1alpha1.TargetDeliveryStatus
+		want    imageflowv1alpha1.RolloutStatus
+		wantSub string
+	}{
+		{
+			name:    "has one completed Job → Succeeded",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: &now,
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+		{
+			name:    "has one failed Job → Failed",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+						Reason: "BackoffLimitExceeded",
+					}},
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "BackoffLimitExceeded",
+		},
+		{
+			name:    "multiple Jobs → selects most recent by creationTimestamp",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				// Older Job: completed
+				t11uJobOwnedBy("t11u-cj-job-old", t11uRefA, t11uCronJobUID, t11uStart.Add(-2*time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: ptr.To(metav1.NewTime(t11uStart.Add(-time.Hour))),
+				}),
+				// Newer Job: failed — this should be selected
+				t11uJobOwnedBy("t11u-cj-job-new", t11uRefA, t11uCronJobUID, t11uStart.Add(-30*time.Minute), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+						Reason: "DeadlineExceeded",
+					}},
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "DeadlineExceeded",
+		},
+		{
+			name:    "no Jobs → Unknown with explanatory message",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs:    nil,
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "no Jobs scheduled yet",
+		},
+		{
+			name:    "spec no longer holds desired image → Unknown",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Active:    1,
+					StartTime: &now,
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefB),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "currently references",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{tc.cronJob}
+			for _, j := range tc.jobs {
+				objs = append(objs, j)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindCronJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, nil)
+			if det.status != tc.want {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
+			}
+			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
+				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
+			}
+		})
+	}
+}
+
 func TestObserverDetermineJobCompletionStates(t *testing.T) {
 	now := metav1.NewTime(t11uStart)
 	cases := []struct {
