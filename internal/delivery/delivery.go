@@ -319,7 +319,7 @@ func UnsupportedMessage(gvk schema.GroupVersionKind, c Classification) string {
 			"available, so no writes are performed and rollout/health stay Unknown.", ref)
 	default:
 		return fmt.Sprintf("no delivery adapter is registered for %s: the built-in adapter set "+
-			"serves Deployment, StatefulSet, DaemonSet and CronJob located by containerNames (ADR-006); "+
+			"serves Deployment, StatefulSet, DaemonSet, Job and CronJob located by containerNames (ADR-006); "+
 			"third-party kinds require imageFields plus the generic resolver. Extending the "+
 			"built-in set requires a new ADR.", ref)
 	}
