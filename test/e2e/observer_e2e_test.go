@@ -241,7 +241,9 @@ spec:
 
 	// t11eAuditFragments asserts the complete per-delivery audit of a
 	// rollout-outcome Event: source, old/new image, target and the four
-	// outcome stages with the honest health verdict.
+	// outcome stages with the health verdict.
+	// v1.5: health is "Healthy" when rollout Succeeded (native determination),
+	// "Unknown" when rollout Failed (health gate blocks evaluation per D2).
 	t11eAuditFragments := func(g Gomega, msg, stream, oldImage, newImage, workload, rollout string) {
 		g.Expect(msg).To(ContainSubstring("stages — imageResolved"), "stage list")
 		g.Expect(msg).To(ContainSubstring(stream+":"+t11eTag), "source")
@@ -250,8 +252,12 @@ spec:
 		g.Expect(msg).To(ContainSubstring(workload), "target")
 		g.Expect(msg).To(ContainSubstring("imageApplied: true"), "imageApplied stage")
 		g.Expect(msg).To(ContainSubstring("rollout: "+rollout), "rollout stage")
-		g.Expect(msg).To(ContainSubstring("health: Unknown"),
-			"health stage: honest Unknown, never fabricated (ADR-005)")
+		wantHealth := "Unknown"
+		if rollout == "Succeeded" {
+			wantHealth = "Healthy"
+		}
+		g.Expect(msg).To(ContainSubstring("health: "+wantHealth),
+			"health stage reflects native determination (v1.5 D2/D3)")
 	}
 
 	BeforeAll(func() {
@@ -444,16 +450,19 @@ spec:
 		// The delivered pause digest is real: the kubelet pulls it, the pod
 		// becomes Ready, and the deployment controller converges. The
 		// observer then reads the native status (ADR-006) — imageApplied
-		// stays true and is NEVER the rollout verdict (ADR-005 §3), health
-		// stays honestly Unknown (no v1 status policy evaluator).
+		// stays true and is NEVER the rollout verdict (ADR-005 §3).
+		// v1.5: health is now natively determined as Healthy when all
+		// containers are Ready with no restart loops (spec D3 rule 1).
 		Eventually(func(g Gomega) {
 			g.Expect(t11eJSONPath(t11eWorkloadNS, "deployment", t11eCoDeploy,
 				`{.status.readyReplicas}`)).To(Equal("1"), "the real rollout must finish")
 			g.Expect(t11eEntryRollout(t11eCoSub, t11eCoDeploy)).To(Equal("Succeeded"))
 			g.Expect(t11eEntryReason(t11eCoSub, t11eCoDeploy)).To(Equal("Applied"),
 				"R3: per-target Reason/Message remain the engine's delivery-stage surface")
+			// v1.5: native health determination reports Healthy when rollout
+			// succeeded and all containers are Ready with no restart loops (D3 rule 1).
 			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eCoSub,
-				fmt.Sprintf(t11eHealthPthFmt, t11eCoDeploy))).To(Equal("Unknown"))
+				fmt.Sprintf(t11eHealthPthFmt, t11eCoDeploy))).To(Equal("Healthy"))
 			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eCoSub,
 				fmt.Sprintf(t11eAppliedPthFmt, t11eCoDeploy))).To(Equal("true"))
 			g.Expect(t11eAggregate(t11eCoSub)).To(Equal("Succeeded"))
