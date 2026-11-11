@@ -2232,3 +2232,143 @@ func TestObserverLabelMappings(t *testing.T) {
 		t.Fatalf("unmapped statuses must fall back to the unknown event reason: %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T5: Job completion determination
+// ---------------------------------------------------------------------------
+
+const (
+	t11uJobName = "t11u-job"
+	t11uBatchAPI = "batch/v1"
+)
+
+var t11uJobUID = types.UID("t11u-job-uid")
+
+func t11uJobRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uBatchAPI, Kind: kindJob,
+		Namespace: t11uNamespace, Name: t11uJobName,
+	}
+}
+
+func t11uJob(image string, st batchv1.JobStatus) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: t11uJobName,
+			UID: t11uJobUID, Generation: 1,
+		},
+		Spec: batchv1.JobSpec{
+			Template: t11uPodTemplate(image),
+		},
+		Status: st,
+	}
+}
+
+func TestObserverDetermineJobCompletionStates(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name    string
+		job     *batchv1.Job
+		target  imageflowv1alpha1.SubscriptionTarget
+		entry   imageflowv1alpha1.TargetDeliveryStatus
+		want    imageflowv1alpha1.RolloutStatus
+		wantSub string
+	}{
+		{
+			name: "succeeded when Complete condition is True",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+				CompletionTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+		{
+			name: "failed when Failed condition is True",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+					Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit",
+				}},
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "BackoffLimitExceeded",
+		},
+		{
+			name: "progressing when active pods exist",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Active:    1,
+				StartTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "active",
+		},
+		{
+			name:    "unknown when no conditions and no active pods",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "has not reported",
+		},
+		{
+			name:    "unknown when spec no longer holds desired image",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{Active: 1}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefB),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "currently references",
+		},
+		{
+			name:    "unknown when declared container missing from template",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{Active: 1}),
+			target:  imageflowv1alpha1.SubscriptionTarget{TargetRef: t11uJobRef(), ContainerNames: []string{"ghost"}},
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "not present in the pod template",
+		},
+		{
+			name: "complete takes priority over failed when both present",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"},
+				},
+				CompletionTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newT11uFixture(t, config.Config{}, tc.job)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.want {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
+			}
+			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
+				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
+			}
+		})
+	}
+}

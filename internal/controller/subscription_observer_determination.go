@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -116,6 +117,13 @@ type workloadFacts struct {
 	numberAvailable        int32
 	numberReady            int32
 	numberMisscheduled     int32
+	// Job (T5, ADR-006 amendment).
+	jobComplete       bool
+	jobFailed         bool
+	jobFailedReason   string
+	jobActive         int32
+	jobStartTime      *metav1.Time
+	jobCompletionTime *metav1.Time
 }
 
 // observableBuiltinKind reports whether the target's rollout is observable
@@ -225,6 +233,39 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 			wl.Status.DesiredNumberScheduled == 0 && wl.Status.UpdatedNumberScheduled == 0 &&
 			wl.Status.NumberAvailable == 0 && wl.Status.NumberReady == 0 &&
 			wl.Status.NumberMisscheduled == 0
+		return facts, true, nil
+	case batchv1.SchemeGroupVersion.WithKind(kindJob):
+		var wl batchv1.Job
+		if err := r.reader().Get(ctx, key, &wl); err != nil {
+			return observerFoundFromErr(err)
+		}
+		facts := workloadFacts{
+			kind:              observerKindJob,
+			uid:               wl.UID,
+			namespace:         wl.Namespace,
+			template:          &wl.Spec.Template.Spec,
+			generation:        wl.Generation,
+			jobActive:         wl.Status.Active,
+			jobStartTime:      wl.Status.StartTime,
+			jobCompletionTime: wl.Status.CompletionTime,
+		}
+		for _, cond := range wl.Status.Conditions {
+			switch cond.Type {
+			case batchv1.JobComplete:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobComplete = true
+				}
+			case batchv1.JobFailed:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobFailed = true
+					facts.jobFailedReason = cond.Reason
+				}
+			}
+		}
+		// A Job is uninitialized when the controller has not yet set any
+		// status: no conditions, no active pods, no start time.
+		facts.uninitialized = len(wl.Status.Conditions) == 0 &&
+			wl.Status.Active == 0 && wl.Status.StartTime == nil
 		return facts, true, nil
 	}
 	return workloadFacts{}, false, nil
@@ -369,6 +410,43 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
 			message: fmt.Sprintf("the native %s controller has not reported any status for %s yet (observedGeneration 0, empty status): the rollout of %s is honestly Unknown until native status appears", facts.kind, name, entry.DesiredImage),
+		}
+	}
+	// Job completion determination (T5, ADR-006 amendment): Jobs use
+	// conditions (Complete/Failed) rather than observedGeneration + replica
+	// counts. Complete takes priority over Failed when both are present
+	// (the Kubernetes Job controller sets both on deadline-exceeded jobs
+	// that also completed). Active pods without terminal conditions mean
+	// the Job is still running.
+	if facts.kind == observerKindJob {
+		if facts.jobComplete {
+			msg := fmt.Sprintf("rollout of %s succeeded: Job %s completed per native batch/v1 status", entry.DesiredImage, name)
+			if facts.jobCompletionTime != nil {
+				msg += fmt.Sprintf(" at %s", facts.jobCompletionTime.Time.Format(time.RFC3339))
+			}
+			msg += "; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)"
+			return rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded, message: msg}
+		}
+		if facts.jobFailed {
+			reason := facts.jobFailedReason
+			if reason == "" {
+				reason = "unknown reason"
+			}
+			return rolloutDetermination{
+				status:  imageflowv1alpha1.RolloutFailed,
+				message: fmt.Sprintf("rollout of %s failed: Job %s failed per native batch/v1 status with reason %s", entry.DesiredImage, name, reason),
+			}
+		}
+		if facts.jobActive > 0 {
+			msg := fmt.Sprintf("rollout of %s is in progress: Job %s has %d active pod(s)", entry.DesiredImage, name, facts.jobActive)
+			if facts.jobStartTime != nil {
+				msg += fmt.Sprintf(" since %s", facts.jobStartTime.Time.Format(time.RFC3339))
+			}
+			return rolloutDetermination{status: imageflowv1alpha1.RolloutProgressing, message: msg}
+		}
+		return rolloutDetermination{
+			status:  imageflowv1alpha1.RolloutUnknown,
+			message: fmt.Sprintf("the native Job controller has not reported any status for %s yet (no conditions, no active pods): the rollout of %s is honestly Unknown until native status appears", name, entry.DesiredImage),
 		}
 	}
 	if facts.progressDeadlineFailed {
