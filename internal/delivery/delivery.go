@@ -271,8 +271,10 @@ const (
 
 // excludedFirstBatchKinds are the kinds ADR-006 decision 3 names explicitly:
 // the built-in adapter set refuses them with an honest Unsupported condition.
+// batch/v1 Job was promoted into the first batch (T2) and is no longer listed
+// here; CronJob remains excluded because its nested jobTemplate path requires
+// a separate adapter (T3).
 var excludedFirstBatchKinds = map[schema.GroupVersionKind]bool{
-	{Group: "batch", Version: "v1", Kind: "Job"}:                  true,
 	{Group: "batch", Version: "v1", Kind: "CronJob"}:              true,
 	{Group: "", Version: "v1", Kind: "Pod"}:                       true,
 	{Group: "", Version: "v1", Kind: "ReplicationController"}:     true,

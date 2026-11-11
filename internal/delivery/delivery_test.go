@@ -30,6 +30,7 @@ var (
 	t9uGVKDeployment  = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindDeployment}
 	t9uGVKStatefulSet = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindStatefulSet}
 	t9uGVKDaemonSet   = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindDaemonSet}
+	t9uGVKJob         = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
 )
 
 const t9uDigestRef = "quay.io/example/ledger@sha256:" +
@@ -40,11 +41,18 @@ const t9uDigestRef = "quay.io/example/ledger@sha256:" +
 // inside the goconst threshold).
 func t9uWorkload(t *testing.T, kind string, containers ...[2]string) *unstructured.Unstructured {
 	t.Helper()
+	return t9uWorkloadAPI(t, "apps/v1", kind, containers...)
+}
+
+// t9uWorkloadAPI renders one pod-template workload fixture with an explicit
+// apiVersion, used for kinds outside apps/v1 (e.g. batch/v1 Job).
+func t9uWorkloadAPI(t *testing.T, apiVersion, kind string, containers ...[2]string) *unstructured.Unstructured {
+	t.Helper()
 	var list strings.Builder
 	for _, c := range containers {
 		list.WriteString("      - name: " + c[0] + "\n        image: " + c[1] + "\n")
 	}
-	doc := "apiVersion: apps/v1\nkind: " + kind + "\nmetadata:\n  name: t9-ledger\n  namespace: t9-apps\n" +
+	doc := "apiVersion: " + apiVersion + "\nkind: " + kind + "\nmetadata:\n  name: t9-ledger\n  namespace: t9-apps\n" +
 		"spec:\n  template:\n    spec:\n      containers:\n" + list.String()
 	obj := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
@@ -98,13 +106,10 @@ func TestFieldManagerForBoundsLongIdentitiesStably(t *testing.T) {
 }
 
 func TestBuiltInAdaptersAreRegisteredForTheFirstBatch(t *testing.T) {
-	for _, gvk := range []schema.GroupVersionKind{t9uGVKDeployment, t9uGVKStatefulSet, t9uGVKDaemonSet} {
+	for _, gvk := range []schema.GroupVersionKind{t9uGVKDeployment, t9uGVKStatefulSet, t9uGVKDaemonSet, t9uGVKJob} {
 		if LookupKindAdapter(gvk) == nil {
 			t.Fatalf("no adapter registered for %s (ADR-006 first batch)", gvk)
 		}
-	}
-	if LookupKindAdapter(schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}) != nil {
-		t.Fatal("Job must not have a built-in adapter (ADR-006)")
 	}
 	if LookupKindAdapter(schema.GroupVersionKind{Group: "apps", Version: "v1beta1",
 		Kind: t9uKindDeployment}) != nil {
@@ -114,19 +119,28 @@ func TestBuiltInAdaptersAreRegisteredForTheFirstBatch(t *testing.T) {
 
 func TestBuiltInPlanDeclaresOnlyTheNamedContainerImages(t *testing.T) {
 	cases := []struct {
-		kind string
-		gvk  schema.GroupVersionKind
+		kind       string
+		gvk        schema.GroupVersionKind
+		apiVersion string
 	}{
-		{t9uKindDeployment, t9uGVKDeployment},
-		{t9uKindStatefulSet, t9uGVKStatefulSet},
-		{t9uKindDaemonSet, t9uGVKDaemonSet},
+		{t9uKindDeployment, t9uGVKDeployment, t9uAPIAppsV1},
+		{t9uKindStatefulSet, t9uGVKStatefulSet, t9uAPIAppsV1},
+		{t9uKindDaemonSet, t9uGVKDaemonSet, t9uAPIAppsV1},
+		{"Job", t9uGVKJob, "batch/v1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind, func(t *testing.T) {
 			adapter := LookupKindAdapter(tc.gvk)
-			obj := t9uWorkload(t, tc.kind,
-				[2]string{t9uContainerApp, "quay.io/example/ledger:v1"},
-				[2]string{t9uContainerSide, "quay.io/platform/mesh:v9"})
+			var obj *unstructured.Unstructured
+			if tc.apiVersion == t9uAPIAppsV1 {
+				obj = t9uWorkload(t, tc.kind,
+					[2]string{t9uContainerApp, "quay.io/example/ledger:v1"},
+					[2]string{t9uContainerSide, "quay.io/platform/mesh:v9"})
+			} else {
+				obj = t9uWorkloadAPI(t, tc.apiVersion, tc.kind,
+					[2]string{t9uContainerApp, "quay.io/example/ledger:v1"},
+					[2]string{t9uContainerSide, "quay.io/platform/mesh:v9"})
+			}
 			plan, err := adapter.Plan(obj, []string{t9uContainerApp}, t9uDigestRef)
 			if err != nil {
 				t.Fatalf("Plan: %v", err)
@@ -144,8 +158,8 @@ func TestBuiltInPlanDeclaresOnlyTheNamedContainerImages(t *testing.T) {
 			}
 
 			ac := plan.Apply
-			if ac.GetKind() != tc.kind || ac.GroupVersionKind().GroupVersion().String() != t9uAPIAppsV1 {
-				t.Fatalf("apply configuration TypeMeta = %v", ac.GroupVersionKind())
+			if ac.GetKind() != tc.kind || ac.GroupVersionKind().GroupVersion().String() != tc.apiVersion {
+				t.Fatalf("apply configuration TypeMeta = %v, want %s %s", ac.GroupVersionKind(), tc.apiVersion, tc.kind)
 			}
 			if ac.GetName() != obj.GetName() || ac.GetNamespace() != obj.GetNamespace() {
 				t.Fatal("apply configuration must carry the target identity")
@@ -205,16 +219,122 @@ func asContainersNotFound(err error, target **ContainersNotFoundError) bool {
 	return ok
 }
 
+// TestJobDeliveryAdapterSingleContainer verifies Plan generation for a Job
+// with a single container — the adapter locates the container by name and
+// builds the correct SSA apply configuration targeting batch/v1.
+func TestJobDeliveryAdapterSingleContainer(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKJob)
+	if adapter == nil {
+		t.Fatal("batch/v1 Job adapter must be registered")
+	}
+	obj := t9uWorkloadAPI(t, "batch/v1", "Job",
+		[2]string{"worker", "quay.io/example/worker:v1"})
+	plan, err := adapter.Plan(obj, []string{"worker"}, t9uDigestRef)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Fields) != 1 {
+		t.Fatalf("fields = %d, want 1", len(plan.Fields))
+	}
+	f := plan.Fields[0]
+	if f.Container != "worker" || !f.Found || f.Observed != "quay.io/example/worker:v1" {
+		t.Fatalf("unexpected field plan: %+v", f)
+	}
+	wantPath := ".spec.template.spec.containers[name=worker].image"
+	if f.Path.String() != wantPath {
+		t.Fatalf("path = %q, want %q", f.Path.String(), wantPath)
+	}
+	ac := plan.Apply
+	if ac.GetKind() != "Job" || ac.GroupVersionKind().GroupVersion().String() != "batch/v1" {
+		t.Fatalf("apply configuration TypeMeta = %v, want batch/v1 Job", ac.GroupVersionKind())
+	}
+	containers, found, err := unstructured.NestedSlice(ac.Object,
+		fieldSpec, fieldTemplate, fieldSpec, fieldContainers)
+	if err != nil || !found || len(containers) != 1 {
+		t.Fatalf("declared containers = %v (found=%v err=%v)", containers, found, err)
+	}
+	entry := containers[0].(map[string]interface{})
+	if entry[fieldName] != "worker" || entry[fieldImage] != t9uDigestRef {
+		t.Fatalf("declared container = %v", entry)
+	}
+}
+
+// TestJobDeliveryAdapterMultipleContainers verifies Plan generation for a Job
+// with multiple containers — all named containers are declared in the apply
+// configuration, and sibling containers not in the request are excluded.
+func TestJobDeliveryAdapterMultipleContainers(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKJob)
+	if adapter == nil {
+		t.Fatal("batch/v1 Job adapter must be registered")
+	}
+	obj := t9uWorkloadAPI(t, "batch/v1", "Job",
+		[2]string{"worker", "quay.io/example/worker:v1"},
+		[2]string{"sidecar", "quay.io/platform/mesh:v9"},
+		[2]string{"logger", "quay.io/platform/logger:v2"})
+	plan, err := adapter.Plan(obj, []string{"worker", "logger"}, t9uDigestRef)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Fields) != 2 {
+		t.Fatalf("fields = %d, want 2", len(plan.Fields))
+	}
+	if plan.Fields[0].Container != "worker" || plan.Fields[1].Container != "logger" {
+		t.Fatalf("field order = [%s, %s], want [worker, logger]",
+			plan.Fields[0].Container, plan.Fields[1].Container)
+	}
+	ac := plan.Apply
+	containers, found, err := unstructured.NestedSlice(ac.Object,
+		fieldSpec, fieldTemplate, fieldSpec, fieldContainers)
+	if err != nil || !found || len(containers) != 2 {
+		t.Fatalf("declared containers count = %d, want 2", len(containers))
+	}
+	// The sidecar container must NOT appear in the apply configuration.
+	encoded, _ := yaml.Marshal(ac.Object)
+	if strings.Contains(string(encoded), "sidecar") {
+		t.Fatalf("sibling container leaked into the apply configuration:\n%s", encoded)
+	}
+}
+
+// TestJobDeliveryAdapterContainersNotFound verifies that requesting a
+// container name not present in the Job's pod template returns an honest
+// ContainersNotFoundError (no guessing, spec decision 6).
+func TestJobDeliveryAdapterContainersNotFound(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKJob)
+	if adapter == nil {
+		t.Fatal("batch/v1 Job adapter must be registered")
+	}
+	obj := t9uWorkloadAPI(t, "batch/v1", "Job",
+		[2]string{"worker", "quay.io/example/worker:v1"})
+	_, err := adapter.Plan(obj, []string{"worker", "ghost"}, t9uDigestRef)
+	var missing *ContainersNotFoundError
+	if !asContainersNotFound(err, &missing) {
+		t.Fatalf("err = %v, want *ContainersNotFoundError", err)
+	}
+	if missing.Kind != "Job" {
+		t.Fatalf("error kind = %q, want Job", missing.Kind)
+	}
+	if len(missing.Missing) != 1 || missing.Missing[0] != "ghost" {
+		t.Fatalf("missing = %v, want [ghost]", missing.Missing)
+	}
+	if len(missing.Present) != 1 || missing.Present[0] != "worker" {
+		t.Fatalf("present = %v, want [worker]", missing.Present)
+	}
+	if !strings.Contains(missing.Error(), "ghost") || !strings.Contains(missing.Error(), "worker") {
+		t.Fatalf("message must be diagnosable: %q", missing.Error())
+	}
+}
+
 func TestClassifyServesFirstBatchAndRefusesTheRest(t *testing.T) {
-	if _, _, _, ok := Classify(t9uGVKDeployment, false); !ok {
-		t.Fatal("apps/v1 Deployment with containerNames must be served")
+	for _, gvk := range []schema.GroupVersionKind{t9uGVKDeployment, t9uGVKJob} {
+		if _, _, _, ok := Classify(gvk, false); !ok {
+			t.Fatalf("%s with containerNames must be served", gvk)
+		}
 	}
 
-	job := schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
 	cron := schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}
 	pod := schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
 	rc := schema.GroupVersionKind{Version: "v1", Kind: "ReplicationController"}
-	for _, gvk := range []schema.GroupVersionKind{job, cron, pod, rc} {
+	for _, gvk := range []schema.GroupVersionKind{cron, pod, rc} {
 		_, _, class, ok := Classify(gvk, false)
 		if ok || class != ClassificationUnsupportedKind {
 			t.Fatalf("%s: ok=%v class=%v, want ClassificationUnsupportedKind (ADR-006)", gvk, ok, class)

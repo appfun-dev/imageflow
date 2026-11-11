@@ -200,4 +200,10 @@ func init() {
 	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet"} {
 		RegisterKindAdapter(podTemplateAdapter{gvk: appsV1.WithKind(kind)})
 	}
+	// batch/v1 Job uses the same pod-template container path as the apps/v1
+	// workloads (.spec.template.spec.containers[name=X].image), so the shared
+	// podTemplateAdapter serves it without modification.
+	RegisterKindAdapter(podTemplateAdapter{gvk: schema.GroupVersionKind{
+		Group: "batch", Version: "v1", Kind: "Job",
+	}})
 }
