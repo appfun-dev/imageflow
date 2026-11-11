@@ -41,8 +41,13 @@ const (
 )
 
 // podTemplateContainersPath is the unstructured navigation path of the
-// pod-template container list.
+// pod-template container list for standard workloads (Deployment, StatefulSet,
+// DaemonSet).
 var podTemplateContainersPath = []string{fieldSpec, fieldTemplate, fieldSpec, fieldContainers}
+
+// cronJobContainersPath is the unstructured navigation path of the container
+// list inside a CronJob's nested jobTemplate.
+var cronJobContainersPath = []string{fieldSpec, "jobTemplate", fieldSpec, fieldTemplate, fieldSpec, fieldContainers}
 
 // podTemplateContainerPath renders the canonical ADR-005-grammar path of one
 // pod-template container image field. The grammar is the single vocabulary for
@@ -52,8 +57,17 @@ func podTemplateContainerPath(container string) string {
 	return fmt.Sprintf(".spec.template.spec.containers[name=%s].image", container)
 }
 
+// cronJobContainerPath renders the ADR-005-grammar path for a container image
+// field inside a CronJob's nested jobTemplate.
+func cronJobContainerPath(container string) string {
+	return fmt.Sprintf(".spec.jobTemplate.spec.template.spec.containers[name=%s].image", container)
+}
+
 type podTemplateAdapter struct {
-	gvk schema.GroupVersionKind
+	gvk            schema.GroupVersionKind
+	containersPath []string
+	containerPath  func(string) string
+	applyNest      func(containers []interface{}) map[string]interface{}
 }
 
 func (a podTemplateAdapter) GVK() schema.GroupVersionKind { return a.gvk }
@@ -71,7 +85,7 @@ func (a podTemplateAdapter) Plan(
 		return nil, fmt.Errorf("%s: containerNames must be non-empty (no default guessing, "+
 			"spec decision 6)", a.gvk.Kind)
 	}
-	present := podTemplateContainerImages(obj)
+	present := a.containerImages(obj)
 	var missing []string
 	for _, name := range containerNames {
 		if _, ok := present[name]; !ok {
@@ -82,15 +96,15 @@ func (a podTemplateAdapter) Plan(
 		return nil, &ContainersNotFoundError{
 			Kind:    a.gvk.Kind,
 			Missing: missing,
-			Present: presentNames(obj),
+			Present: a.presentNames(obj),
 		}
 	}
 
 	plan := &Plan{
-		Apply: applyConfiguration(a.gvk, obj, containerNames, image),
+		Apply: a.applyConfiguration(obj, containerNames, image),
 	}
 	for _, name := range containerNames {
-		raw := podTemplateContainerPath(name)
+		raw := a.containerPath(name)
 		path, err := imagefields.Parse(raw)
 		if err != nil {
 			// Unreachable for DNS-1123 container names (the grammar's value
@@ -111,8 +125,7 @@ func (a podTemplateAdapter) Plan(
 
 // applyConfiguration builds the minimal SSA payload: TypeMeta, object
 // identity, the audit annotation and the declared container images.
-func applyConfiguration(
-	gvk schema.GroupVersionKind,
+func (a podTemplateAdapter) applyConfiguration(
 	obj *unstructured.Unstructured,
 	containerNames []string,
 	image string,
@@ -125,8 +138,8 @@ func applyConfiguration(
 		})
 	}
 	ac := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": gvk.GroupVersion().String(),
-		"kind":       gvk.Kind,
+		"apiVersion": a.gvk.GroupVersion().String(),
+		"kind":       a.gvk.Kind,
 		"metadata": map[string]interface{}{
 			fieldName:   obj.GetName(),
 			"namespace": obj.GetNamespace(),
@@ -134,24 +147,18 @@ func applyConfiguration(
 				ManagedByAnnotation: ManagedByAnnotationValue,
 			},
 		},
-		fieldSpec: map[string]interface{}{
-			fieldTemplate: map[string]interface{}{
-				fieldSpec: map[string]interface{}{
-					fieldContainers: containers,
-				},
-			},
-		},
+		fieldSpec: a.applyNest(containers),
 	}}
 	return ac
 }
 
-// podTemplateContainerImages reads spec.template.spec.containers[] into a
-// name -> image map. Entries without a name are skipped; non-string images
-// (impossible behind the Kubernetes schema) stay absent so FieldPlan.Found
-// reports the mismatch honestly.
-func podTemplateContainerImages(obj *unstructured.Unstructured) map[string]presentContainer {
+// containerImages reads the containers list at the adapter's configured path
+// into a name -> image map. Entries without a name are skipped; non-string
+// images (impossible behind the Kubernetes schema) stay absent so
+// FieldPlan.Found reports the mismatch honestly.
+func (a podTemplateAdapter) containerImages(obj *unstructured.Unstructured) map[string]presentContainer {
 	out := map[string]presentContainer{}
-	containers, found, err := unstructured.NestedSlice(obj.Object, podTemplateContainersPath...)
+	containers, found, err := unstructured.NestedSlice(obj.Object, a.containersPath...)
 	if err != nil || !found {
 		return out
 	}
@@ -175,11 +182,11 @@ type presentContainer struct {
 	found bool
 }
 
-// presentNames lists the pod-template container names in object order, for
-// the diagnosable ContainersNotFound message.
-func presentNames(obj *unstructured.Unstructured) []string {
+// presentNames lists the container names in object order at the adapter's
+// configured path, for the diagnosable ContainersNotFound message.
+func (a podTemplateAdapter) presentNames(obj *unstructured.Unstructured) []string {
 	var names []string
-	containers, found, err := unstructured.NestedSlice(obj.Object, podTemplateContainersPath...)
+	containers, found, err := unstructured.NestedSlice(obj.Object, a.containersPath...)
 	if err != nil || !found {
 		return names
 	}
@@ -195,15 +202,59 @@ func presentNames(obj *unstructured.Unstructured) []string {
 	return names
 }
 
+// standardApplyNest returns the spec nesting function for Deployment,
+// StatefulSet and DaemonSet: spec.template.spec.containers.
+func standardApplyNest(containers []interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		fieldTemplate: map[string]interface{}{
+			fieldSpec: map[string]interface{}{
+				fieldContainers: containers,
+			},
+		},
+	}
+}
+
+// cronJobApplyNest returns the spec nesting function for CronJob:
+// spec.jobTemplate.spec.template.spec.containers.
+func cronJobApplyNest(containers []interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"jobTemplate": map[string]interface{}{
+			fieldSpec: map[string]interface{}{
+				fieldTemplate: map[string]interface{}{
+					fieldSpec: map[string]interface{}{
+						fieldContainers: containers,
+					},
+				},
+			},
+		},
+	}
+}
+
 func init() {
 	appsV1 := schema.GroupVersion{Group: "apps", Version: "v1"}
 	for _, kind := range []string{"Deployment", "StatefulSet", "DaemonSet"} {
-		RegisterKindAdapter(podTemplateAdapter{gvk: appsV1.WithKind(kind)})
+		RegisterKindAdapter(podTemplateAdapter{
+			gvk:            appsV1.WithKind(kind),
+			containersPath: podTemplateContainersPath,
+			containerPath:  podTemplateContainerPath,
+			applyNest:      standardApplyNest,
+		})
 	}
 	// batch/v1 Job uses the same pod-template container path as the apps/v1
-	// workloads (.spec.template.spec.containers[name=X].image), so the shared
-	// podTemplateAdapter serves it without modification.
-	RegisterKindAdapter(podTemplateAdapter{gvk: schema.GroupVersionKind{
-		Group: "batch", Version: "v1", Kind: "Job",
-	}})
+	// workloads (.spec.template.spec.containers[name=X].image).
+	batchV1 := schema.GroupVersion{Group: "batch", Version: "v1"}
+	RegisterKindAdapter(podTemplateAdapter{
+		gvk:            batchV1.WithKind("Job"),
+		containersPath: podTemplateContainersPath,
+		containerPath:  podTemplateContainerPath,
+		applyNest:      standardApplyNest,
+	})
+	// CronJob uses a nested jobTemplate path (T3):
+	// .spec.jobTemplate.spec.template.spec.containers[name=X].image
+	RegisterKindAdapter(podTemplateAdapter{
+		gvk:            batchV1.WithKind("CronJob"),
+		containersPath: cronJobContainersPath,
+		containerPath:  cronJobContainerPath,
+		applyNest:      cronJobApplyNest,
+	})
 }

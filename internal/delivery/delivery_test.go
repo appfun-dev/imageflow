@@ -20,7 +20,9 @@ const (
 	t9uKindDeployment  = "Deployment"
 	t9uKindStatefulSet = "StatefulSet"
 	t9uKindDaemonSet   = "DaemonSet"
+	t9uKindCronJob     = "CronJob"
 	t9uAPIAppsV1       = "apps/v1"
+	t9uAPIBatchV1      = "batch/v1"
 	t9uContainerApp    = "app"
 	t9uContainerSide   = "sidecar"
 	t9uImageField      = "image"
@@ -31,6 +33,7 @@ var (
 	t9uGVKStatefulSet = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindStatefulSet}
 	t9uGVKDaemonSet   = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindDaemonSet}
 	t9uGVKJob         = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
+	t9uGVKCronJob     = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}
 )
 
 const t9uDigestRef = "quay.io/example/ledger@sha256:" +
@@ -331,10 +334,9 @@ func TestClassifyServesFirstBatchAndRefusesTheRest(t *testing.T) {
 		}
 	}
 
-	cron := schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}
 	pod := schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
 	rc := schema.GroupVersionKind{Version: "v1", Kind: "ReplicationController"}
-	for _, gvk := range []schema.GroupVersionKind{cron, pod, rc} {
+	for _, gvk := range []schema.GroupVersionKind{pod, rc} {
 		_, _, class, ok := Classify(gvk, false)
 		if ok || class != ClassificationUnsupportedKind {
 			t.Fatalf("%s: ok=%v class=%v, want ClassificationUnsupportedKind (ADR-006)", gvk, ok, class)
@@ -493,4 +495,166 @@ func t9uEntries(fixtures []managedFieldsFixture) []metav1.ManagedFieldsEntry {
 		})
 	}
 	return entries
+}
+
+// --- CronJob delivery adapter (T3) ------------------------------------------
+
+// t9uCronJob renders a batch/v1 CronJob fixture with containers nested under
+// .spec.jobTemplate.spec.template.spec.containers — the path that distinguishes
+// CronJob from Deployment/StatefulSet/DaemonSet.
+func t9uCronJob(t *testing.T, containers ...[2]string) *unstructured.Unstructured {
+	t.Helper()
+	var list strings.Builder
+	for _, c := range containers {
+		list.WriteString("            - name: " + c[0] + "\n              image: " + c[1] + "\n")
+	}
+	doc := "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: t9-nightly\n  namespace: t9-apps\n" +
+		"spec:\n  schedule: \"0 2 * * *\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n" + list.String()
+	obj := &unstructured.Unstructured{}
+	if err := yaml.Unmarshal([]byte(doc), &obj.Object); err != nil {
+		t.Fatalf("render CronJob fixture: %v", err)
+	}
+	return obj
+}
+
+func TestCronJobAdapterIsRegistered(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKCronJob)
+	if adapter == nil {
+		t.Fatal("batch/v1 CronJob must have a registered delivery adapter (T3)")
+	}
+	if adapter.GVK() != t9uGVKCronJob {
+		t.Fatalf("adapter GVK = %v, want %v", adapter.GVK(), t9uGVKCronJob)
+	}
+}
+
+func TestCronJobPlanSingleContainer(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKCronJob)
+	obj := t9uCronJob(t,
+		[2]string{t9uContainerApp, "quay.io/example/batch:v1"},
+		[2]string{t9uContainerSide, "quay.io/platform/logger:v2"})
+
+	plan, err := adapter.Plan(obj, []string{t9uContainerApp}, t9uDigestRef)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Fields) != 1 {
+		t.Fatalf("fields = %d, want 1", len(plan.Fields))
+	}
+	f := plan.Fields[0]
+	if f.Container != t9uContainerApp || !f.Found || f.Observed != "quay.io/example/batch:v1" {
+		t.Fatalf("unexpected field plan: %+v", f)
+	}
+	wantPath := ".spec.jobTemplate.spec.template.spec.containers[name=app].image"
+	if f.Path.String() != wantPath {
+		t.Fatalf("path = %q, want %q", f.Path.String(), wantPath)
+	}
+
+	// Verify apply configuration has the nested jobTemplate structure.
+	ac := plan.Apply
+	if ac.GetKind() != t9uKindCronJob || ac.GroupVersionKind().GroupVersion().String() != t9uAPIBatchV1 {
+		t.Fatalf("apply configuration TypeMeta = %v", ac.GroupVersionKind())
+	}
+	if ac.GetName() != obj.GetName() || ac.GetNamespace() != obj.GetNamespace() {
+		t.Fatal("apply configuration must carry the target identity")
+	}
+	if got := ac.GetAnnotations()[ManagedByAnnotation]; got != ManagedByAnnotationValue {
+		t.Fatalf("audit annotation = %q, want %q", got, ManagedByAnnotationValue)
+	}
+	// Navigate the nested path: spec.jobTemplate.spec.template.spec.containers
+	containers, found, err := unstructured.NestedSlice(ac.Object,
+		fieldSpec, "jobTemplate", fieldSpec, fieldTemplate, fieldSpec, fieldContainers)
+	if err != nil || !found || len(containers) != 1 {
+		t.Fatalf("declared containers = %v (found=%v err=%v)", containers, found, err)
+	}
+	entry := containers[0].(map[string]interface{})
+	if entry[fieldName] != t9uContainerApp || entry[fieldImage] != t9uDigestRef {
+		t.Fatalf("declared container = %v", entry)
+	}
+	if len(entry) != 2 {
+		t.Fatalf("apply configuration must declare ONLY name+image, got %v", entry)
+	}
+	// Sibling container must not leak.
+	encoded, _ := yaml.Marshal(ac.Object)
+	if strings.Contains(string(encoded), t9uContainerSide) {
+		t.Fatalf("sibling container leaked into the apply configuration:\n%s", encoded)
+	}
+}
+
+func TestCronJobPlanMultipleContainers(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKCronJob)
+	obj := t9uCronJob(t,
+		[2]string{t9uContainerApp, "quay.io/example/batch:v1"},
+		[2]string{t9uContainerSide, "quay.io/platform/logger:v2"})
+
+	plan, err := adapter.Plan(obj, []string{t9uContainerApp, t9uContainerSide}, t9uDigestRef)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Fields) != 2 {
+		t.Fatalf("fields = %d, want 2", len(plan.Fields))
+	}
+	for i, want := range []struct {
+		container string
+		observed  string
+		path      string
+	}{
+		{t9uContainerApp, "quay.io/example/batch:v1",
+			".spec.jobTemplate.spec.template.spec.containers[name=app].image"},
+		{t9uContainerSide, "quay.io/platform/logger:v2",
+			".spec.jobTemplate.spec.template.spec.containers[name=sidecar].image"},
+	} {
+		f := plan.Fields[i]
+		if f.Container != want.container || !f.Found || f.Observed != want.observed {
+			t.Fatalf("field[%d] = %+v, want container=%s observed=%s", i, f, want.container, want.observed)
+		}
+		if f.Path.String() != want.path {
+			t.Fatalf("field[%d] path = %q, want %q", i, f.Path.String(), want.path)
+		}
+	}
+
+	// Apply configuration must declare both containers.
+	ac := plan.Apply
+	containers, found, err := unstructured.NestedSlice(ac.Object,
+		fieldSpec, "jobTemplate", fieldSpec, fieldTemplate, fieldSpec, fieldContainers)
+	if err != nil || !found || len(containers) != 2 {
+		t.Fatalf("declared containers count = %d (found=%v err=%v)", len(containers), found, err)
+	}
+}
+
+func TestCronJobPlanContainersNotFoundError(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKCronJob)
+	obj := t9uCronJob(t, [2]string{t9uContainerApp, "quay.io/example/batch:v1"})
+
+	_, err := adapter.Plan(obj, []string{t9uContainerApp, "ghost"}, t9uDigestRef)
+	var missing *ContainersNotFoundError
+	if !asContainersNotFound(err, &missing) {
+		t.Fatalf("err = %v, want *ContainersNotFoundError", err)
+	}
+	if len(missing.Missing) != 1 || missing.Missing[0] != "ghost" {
+		t.Fatalf("missing = %v", missing.Missing)
+	}
+	if len(missing.Present) != 1 || missing.Present[0] != t9uContainerApp {
+		t.Fatalf("present = %v", missing.Present)
+	}
+	if missing.Kind != t9uKindCronJob {
+		t.Fatalf("error kind = %q, want %q", missing.Kind, t9uKindCronJob)
+	}
+	if !strings.Contains(missing.Error(), "ghost") || !strings.Contains(missing.Error(), t9uContainerApp) {
+		t.Fatalf("message must be diagnosable: %q", missing.Error())
+	}
+
+	// Empty containerNames must also be rejected.
+	if _, err := adapter.Plan(obj, nil, t9uDigestRef); err == nil {
+		t.Fatal("empty containerNames must be rejected (no default guessing, spec decision 6)")
+	}
+}
+
+func TestClassifyServesCronJob(t *testing.T) {
+	adapter, _, class, ok := Classify(t9uGVKCronJob, false)
+	if !ok || class != 0 {
+		t.Fatalf("CronJob with containerNames must be served: ok=%v class=%v", ok, class)
+	}
+	if adapter == nil || adapter.GVK() != t9uGVKCronJob {
+		t.Fatalf("adapter mismatch: %v", adapter)
+	}
 }
