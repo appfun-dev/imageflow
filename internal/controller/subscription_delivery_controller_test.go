@@ -1306,16 +1306,16 @@ func TestSubscriptionDeliveryUnsupportedKindsAreHonest(t *testing.T) {
 		TargetRef:   t9cTargetRef("checkout-paths"),
 		ImageFields: []string{fmt.Sprintf(t9cImagePathFmt, t9cContainer)},
 	}
-	jobTarget := imageflowv1alpha1.SubscriptionTarget{
+	podTarget := imageflowv1alpha1.SubscriptionTarget{
 		TargetRef: imageflowv1alpha1.TargetReference{
-			APIVersion: t9cAPIBatch,
-			Kind:       t9cKindJob,
+			APIVersion: "v1",
+			Kind:       "Pod",
 			Namespace:  t9cNamespace,
 			Name:       "checkout-nightly",
 		},
 		ContainerNames: []string{t9cContainer},
 	}
-	sub := t9cAuthorizedSub(jobTarget, pathsTarget)
+	sub := t9cAuthorizedSub(podTarget, pathsTarget)
 	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)))
 
 	result, err := f.reconcile(t)
@@ -1336,7 +1336,7 @@ func TestSubscriptionDeliveryUnsupportedKindsAreHonest(t *testing.T) {
 	}
 	cond := t9cCondition(got, imageflowv1alpha1.ConditionTypeUnsupported)
 	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonUnsupportedTargets ||
-		!strings.Contains(cond.Message, t9cKindJob) || !strings.Contains(cond.Message, "ADR") {
+		!strings.Contains(cond.Message, "Pod") || !strings.Contains(cond.Message, "ADR") {
 		t.Fatalf("Unsupported condition mismatch: %+v", cond)
 	}
 	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
