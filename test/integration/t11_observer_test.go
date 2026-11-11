@@ -992,7 +992,9 @@ var _ = Describe("T11 workload observer", Label("t11"), Ordered, func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(controller.ReasonStatusPolicyNotConfigured))
-		Expect(cond.Message).To(ContainSubstring("never fabricated"))
+		// v1.5: message updated to describe native health determination;
+		// "honestly Unknown" preserves the honesty guarantee for non-first-batch kinds.
+		Expect(cond.Message).To(ContainSubstring("honestly Unknown"))
 	})
 
 	It("t11i-envtest-latest-wins-superseded-terminal-across-the-engine-handoff", func() {
