@@ -9,6 +9,9 @@
 //   1. metadata := []ao.Option{...}     — Allure traceability and hierarchy
 //   2. const (...)                      — Key test parameters (if any)
 //   3. agt.Test(t, name, body, metadata...)  — Test execution
+//
+// Documentation lives in metadata.Description, not method comments.
+// Method comments are limited to a single godoc line for go doc compatibility.
 package clock
 
 import (
@@ -26,11 +29,7 @@ import (
 // Test: Fake Clock Deterministic Advancement
 // ════════════════════════════════════════════════════════════════════════════
 
-// TestFakeClockAdvancesDeterministically verifies Fake clock provides
-// deterministic time advancement for unit tests.
-//
-// This test serves as the canonical example for Allure-annotated unit tests
-// in ImageFlow. See TESTING.md for the full annotation schema.
+// TestFakeClockAdvancesDeterministically verifies Fake clock deterministic time advancement.
 func TestFakeClockAdvancesDeterministically(t *testing.T) {
 	metadata := []ao.Option{
 		// Traceability
@@ -52,6 +51,9 @@ func TestFakeClockAdvancesDeterministically(t *testing.T) {
 		ao.Suite("Clock"),
 		// Description
 		ao.Description(`Verifies that Fake clock provides deterministic time control for unit tests.
+
+This test serves as the canonical example for Allure-annotated unit tests
+in ImageFlow. See TESTING.md for the full annotation schema.
 
 Test cases:
 1. Initial time equals construction parameter
@@ -109,10 +111,7 @@ inject Fake for deterministic behavior.`),
 // Test: Fake Clock Concurrency Safety
 // ════════════════════════════════════════════════════════════════════════════
 
-// TestFakeClockConcurrencySafety verifies Fake clock is safe for concurrent access.
-//
-// Spawns multiple goroutines performing simultaneous reads (Now/Since) and
-// writes (Advance) to ensure no data races occur under contention.
+// TestFakeClockConcurrencySafety verifies Fake clock concurrent access safety.
 func TestFakeClockConcurrencySafety(t *testing.T) {
 	metadata := []ao.Option{
 		// Traceability
@@ -132,9 +131,13 @@ func TestFakeClockConcurrencySafety(t *testing.T) {
 		// Description
 		ao.Description(`Verifies that Fake clock's RWMutex protects concurrent Now()/Advance() calls.
 
-Spawns 10 reader goroutines and 10 writer goroutines, each performing 100
-iterations simultaneously. After all goroutines complete, verifies that
-the final time reflects all concurrent advances without data races.
+Spawns multiple goroutines performing simultaneous reads (Now/Since) and
+writes (Advance) to ensure no data races occur under contention.
+
+Configuration:
+- 10 reader goroutines + 10 writer goroutines
+- Each performs 100 iterations
+- Writers advance by 1ms per iteration
 
 Run with -race flag to detect race conditions:
   go test -race ./internal/clock/...`),
@@ -198,10 +201,7 @@ Run with -race flag to detect race conditions:
 // Test: Real Clock System Time Delegation
 // ════════════════════════════════════════════════════════════════════════════
 
-// TestRealClockReturnsSystemTime verifies Real clock delegates to system time.
-//
-// Uses Eventually for Since() assertion to account for potential clock drift
-// in CI environments where system time may not be perfectly monotonic.
+// TestRealClockReturnsSystemTime verifies Real clock system time delegation.
 func TestRealClockReturnsSystemTime(t *testing.T) {
 	metadata := []ao.Option{
 		// Traceability
@@ -221,14 +221,17 @@ func TestRealClockReturnsSystemTime(t *testing.T) {
 		// Description
 		ao.Description(`Verifies that Real clock correctly delegates to time.Now() and time.Since().
 
-Now() must return a time within the call window [before, after].
-Since() must return at least the elapsed duration; uses Eventually to
-account for potential clock drift in CI environments.`),
+Uses Eventually for Since() assertion to account for potential clock drift
+in CI environments where system time may not be perfectly monotonic.
+
+Assertions:
+- Now() must return a time within the call window [before, after]
+- Since() must return at least the elapsed duration`),
 	}
 
 	// test parameters
 	const (
-		elapsedThreshold = 100 * time.Millisecond
+		elapsedThreshold  = 100 * time.Millisecond
 		eventuallyTimeout = 1 * time.Second
 	)
 
