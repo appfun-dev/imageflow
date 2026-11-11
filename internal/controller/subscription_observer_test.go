@@ -2626,3 +2626,221 @@ func TestObserverDetermineCronJobHealthFromCompletion(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T8 (spec v1.6): completion-aware event messages for Job/CronJob — messages
+// use "completion of" language instead of "rollout of" for batch workloads.
+// ---------------------------------------------------------------------------
+
+func TestObserverCompletionAwareEventMessagesForJob(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name       string
+		job        *batchv1.Job
+		target     imageflowv1alpha1.SubscriptionTarget
+		entry      imageflowv1alpha1.TargetDeliveryStatus
+		wantStatus imageflowv1alpha1.RolloutStatus
+		wantMsgs   []string // substrings that must appear in the message
+	}{
+		{
+			name: "succeeded message includes completion time",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+				CompletionTime: &now,
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutSucceeded,
+			wantMsgs:   []string{"completion of", "succeeded", "Job", t11uJobName, "completed at"},
+		},
+		{
+			name: "failed message includes failure reason",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+					Reason: "BackoffLimitExceeded",
+				}},
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutFailed,
+			wantMsgs:   []string{"completion of", "failed", "Job", t11uJobName, "failed with reason", "BackoffLimitExceeded"},
+		},
+		{
+			name: "progressing message includes active-since time",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Active:    1,
+				StartTime: &now,
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutProgressing,
+			wantMsgs:   []string{"completion in progress", "Job", t11uJobName, "active since"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newT11uFixture(t, config.Config{}, tc.job)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.wantStatus {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.wantStatus)
+			}
+			for _, want := range tc.wantMsgs {
+				if !strings.Contains(det.message, want) {
+					t.Errorf("message %q missing substring %q", det.message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestObserverCompletionAwareEventMessagesForCronJob(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name       string
+		cronJob    *batchv1.CronJob
+		jobs       []*batchv1.Job
+		target     imageflowv1alpha1.SubscriptionTarget
+		entry      imageflowv1alpha1.TargetDeliveryStatus
+		wantStatus imageflowv1alpha1.RolloutStatus
+		wantMsgs   []string
+	}{
+		{
+			name:    "delegation message for completed Job",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: &now,
+				}),
+			},
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutSucceeded,
+			wantMsgs:   []string{"observing most recent Job", "for CronJob", t11uCronJobName, "completion of", "succeeded"},
+		},
+		{
+			name:       "no Jobs scheduled message",
+			cronJob:    t11uCronJob(t11uRefA),
+			jobs:       nil, // no Jobs
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutUnknown,
+			wantMsgs:   []string{"no Jobs scheduled yet", "CronJob", t11uCronJobName, "completion stays Unknown"},
+		},
+		{
+			name:    "delegation message for progressing Job",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-active", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Minute), batchv1.JobStatus{
+					Active:    1,
+					StartTime: &now,
+				}),
+			},
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutProgressing,
+			wantMsgs:   []string{"observing most recent Job", "for CronJob", t11uCronJobName, "completion in progress"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{tc.cronJob}
+			for _, j := range tc.jobs {
+				objs = append(objs, j)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindCronJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.wantStatus {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.wantStatus)
+			}
+			for _, want := range tc.wantMsgs {
+				if !strings.Contains(det.message, want) {
+					t.Errorf("message %q missing substring %q", det.message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestObserverReconcileJobSucceededDualNamespaceEvents(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	job := t11uJob(t11uRefA, batchv1.JobStatus{
+		Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}},
+		CompletionTime: &now,
+	})
+	target := t11uContainerTarget(t11uJobRef())
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions: t11uAuthorizedConditions(),
+		Targets:    []imageflowv1alpha1.TargetDeliveryStatus{t11uSeededEntry(t11uJobRef(), t11uRefA)},
+		RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+			t11uSeededRecord(t11uJobRef(), t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+		},
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		ObservedGeneration: 1,
+	})
+	f := newT11uFixture(t, config.Config{}, job, sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("succeeded completion must not poll: RequeueAfter = %v", res.RequeueAfter)
+	}
+	got := f.getSub()
+	entry := got.Status.Targets[0]
+	if !entry.ImageApplied || entry.RolloutStatus != imageflowv1alpha1.RolloutSucceeded {
+		t.Fatalf("entry = %+v, want imageApplied=true + rollout Succeeded", entry)
+	}
+	// Health should be Healthy for completed Job (T7).
+	if entry.HealthStatus != imageflowv1alpha1.HealthHealthy {
+		t.Fatalf("healthStatus = %q, want Healthy for completed Job", entry.HealthStatus)
+	}
+
+	// Dual-namespace events with completion-aware message.
+	events := f.drainEvents()
+	succeeded := t11uEventsWith(events, EventReasonRolloutSucceeded)
+	if len(succeeded) != 2 {
+		t.Fatalf("events = %v, want exactly two RolloutSucceeded (subscription side + target side)", events)
+	}
+	for _, ev := range succeeded {
+		for _, want := range []string{
+			"Normal " + EventReasonRolloutSucceeded,
+			"completion of",
+			"succeeded",
+			"Job",
+			t11uJobName,
+			"completed at",
+		} {
+			if !strings.Contains(ev, want) {
+				t.Fatalf("event %q missing completion-aware fragment %q", ev, want)
+			}
+		}
+	}
+}

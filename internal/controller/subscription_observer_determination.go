@@ -124,6 +124,10 @@ type workloadFacts struct {
 	jobActive         int32
 	jobStartTime      *metav1.Time
 	jobCompletionTime *metav1.Time
+	// T8: completion-aware event messages need the workload name for
+	// human-readable messages ("Job <name> completed at <time>").
+	jobName     string // Job resource name (for Job kind)
+	cronJobName string // CronJob resource name (for CronJob kind, when delegating to a Job)
 }
 
 // observableBuiltinKind reports whether the target's rollout is observable
@@ -248,6 +252,7 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 			jobActive:         wl.Status.Active,
 			jobStartTime:      wl.Status.StartTime,
 			jobCompletionTime: wl.Status.CompletionTime,
+			jobName:           wl.Name, // T8: for completion-aware event messages
 		}
 		for _, cond := range wl.Status.Conditions {
 			switch cond.Type {
@@ -300,6 +305,7 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 				template:      &cj.Spec.JobTemplate.Spec.Template.Spec,
 				generation:    cj.Generation,
 				uninitialized: true,
+				cronJobName:   cj.Name, // T8: for completion-aware event messages
 			}, true, nil
 		}
 		// Extract Job-specific fields from the discovered Job, keeping
@@ -313,6 +319,8 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 			jobActive:         latest.Status.Active,
 			jobStartTime:      latest.Status.StartTime,
 			jobCompletionTime: latest.Status.CompletionTime,
+			jobName:           latest.Name, // T8: the delegated Job name
+			cronJobName:       cj.Name,     // T8: the parent CronJob name
 		}
 		for _, cond := range latest.Status.Conditions {
 			switch cond.Type {
@@ -467,13 +475,13 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			message: fmt.Sprintf("%s currently references %s, not the desired image %s: native status would describe a different image, so the rollout stage stays honestly Unknown until the delivery engine re-applies (ADR-005 §3: imageApplied and rolloutStatus are independent stages)", name, current, entry.DesiredImage),
 		}
 	}
-	// CronJob no-Jobs case (T6): must be checked before the generic
+	// CronJob no-Jobs case (T6/T8): must be checked before the generic
 	// uninitialized gate because the CronJob itself may be initialized
-	// but simply has no Jobs scheduled yet.
+	// but simply has no Jobs scheduled yet. T8: completion-aware message.
 	if facts.kind == observerKindCronJob && facts.uninitialized {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
-			message: fmt.Sprintf("no Jobs scheduled yet for CronJob %s: the rollout of %s is honestly Unknown until the CronJob controller creates a Job", name, entry.DesiredImage),
+			message: fmt.Sprintf("no Jobs scheduled yet for CronJob %s; completion stays Unknown until the CronJob controller creates a Job", facts.cronJobName),
 		}
 	}
 	if facts.uninitialized {
@@ -482,20 +490,29 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			message: fmt.Sprintf("the native %s controller has not reported any status for %s yet (observedGeneration 0, empty status): the rollout of %s is honestly Unknown until native status appears", facts.kind, name, entry.DesiredImage),
 		}
 	}
-	// Job / CronJob completion determination (T5/T6, ADR-006 amendment):
+	// Job / CronJob completion determination (T5/T6/T8, ADR-006 amendment):
 	// Jobs use conditions (Complete/Failed) rather than observedGeneration +
 	// replica counts. Complete takes priority over Failed when both are
 	// present (the Kubernetes Job controller sets both on deadline-exceeded
 	// jobs that also completed). Active pods without terminal conditions
 	// mean the Job is still running. For CronJobs (T6), the facts are
 	// extracted from the most recent owned Job via ownerReferences.
+	// T8: completion-aware event messages use "completion of" language.
 	if facts.kind == observerKindJob || facts.kind == observerKindCronJob {
+		// Build the delegation prefix for CronJob (T8).
+		delegationPrefix := ""
+		if facts.kind == observerKindCronJob && facts.cronJobName != "" {
+			delegationPrefix = fmt.Sprintf("observing most recent Job %s for CronJob %s: ", facts.jobName, facts.cronJobName)
+		}
+		jobLabel := facts.jobName
+		if jobLabel == "" {
+			jobLabel = name // fallback to formatted target ref
+		}
 		if facts.jobComplete {
-			msg := fmt.Sprintf("rollout of %s succeeded: Job %s completed per native batch/v1 status", entry.DesiredImage, name)
+			msg := fmt.Sprintf("%scompletion of %s succeeded: Job %s completed", delegationPrefix, entry.DesiredImage, jobLabel)
 			if facts.jobCompletionTime != nil {
 				msg += fmt.Sprintf(" at %s", facts.jobCompletionTime.Time.Format(time.RFC3339))
 			}
-			msg += "; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)"
 			return rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded, message: msg}
 		}
 		if facts.jobFailed {
@@ -505,11 +522,11 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			}
 			return rolloutDetermination{
 				status:  imageflowv1alpha1.RolloutFailed,
-				message: fmt.Sprintf("rollout of %s failed: Job %s failed per native batch/v1 status with reason %s", entry.DesiredImage, name, reason),
+				message: fmt.Sprintf("%scompletion of %s failed: Job %s failed with reason %s", delegationPrefix, entry.DesiredImage, jobLabel, reason),
 			}
 		}
 		if facts.jobActive > 0 {
-			msg := fmt.Sprintf("rollout of %s is in progress: Job %s has %d active pod(s)", entry.DesiredImage, name, facts.jobActive)
+			msg := fmt.Sprintf("%scompletion in progress: Job %s active", delegationPrefix, jobLabel)
 			if facts.jobStartTime != nil {
 				msg += fmt.Sprintf(" since %s", facts.jobStartTime.Time.Format(time.RFC3339))
 			}
@@ -517,7 +534,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 		}
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
-			message: fmt.Sprintf("the native Job controller has not reported any status for %s yet (no conditions, no active pods): the rollout of %s is honestly Unknown until native status appears", name, entry.DesiredImage),
+			message: fmt.Sprintf("%sthe native Job controller has not reported any status for Job %s yet (no conditions, no active pods); completion stays Unknown until native status appears", delegationPrefix, jobLabel),
 		}
 	}
 	if facts.progressDeadlineFailed {
