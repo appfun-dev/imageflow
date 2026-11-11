@@ -30,7 +30,7 @@ Issue 托管在 `appfun-dev/imageflow` 的 GitHub Issues，通过 `gh` CLI 操�
 
 ### Grill 问题澄清 UI
 
-向用户呈现 grill/brainstorming 的 Frontier 题波请求拍板，或用户要求以可视化交互形式出题（如 `/genui` + Frontier）时，使用「题波卡」：一题一卡（radio 单选 + 「其他」textarea + 建议 callout），轮尾 submit 收整轮；回传后先与已入账 ADR 对账，再批量修订落地。详见 `docs/agents/grill-ui.md`。
+向用户呈现 grill/brainstorming 的 Frontier 题波请求拍板，或用户要求以可视化交互形式出题（如 `/generative-ui` + Frontier）时，使用「题波卡」：一题一卡（radio 单选 + 「其他」textarea + 建议 callout），轮尾 submit 收整轮；回传后先与已入账 ADR 对账，再批量修订落地。详见 `docs/agents/grill-ui.md`。
 
 ### BizDevOps 建模
 

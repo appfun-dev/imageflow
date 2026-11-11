@@ -37,6 +37,7 @@ import (
 
 	testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1252,14 +1253,18 @@ func TestObserverObservableBuiltinKindClassification(t *testing.T) {
 			TargetRef: t11uDeployRef(),
 		}, "", false},
 		{"third-party CRD is NOT observable", t11uEdgeGVK, edgeTarget, "", false},
-		{"excluded first-batch kind (batch/v1 Job) is NOT observable", schema.GroupVersionKind{
-			Group: "batch", Version: "v1", Kind: "Job",
-		}, imageflowv1alpha1.SubscriptionTarget{
+		{"job by container name is observable", batchv1.SchemeGroupVersion.WithKind(kindJob), imageflowv1alpha1.SubscriptionTarget{
 			TargetRef: imageflowv1alpha1.TargetReference{
 				APIVersion: "batch/v1", Kind: "Job", Namespace: t11uNamespace, Name: "t11u-job",
 			},
 			ContainerNames: []string{t11uContainer},
-		}, "", false},
+		}, observerKindJob, true},
+		{"cronjob by container name is observable", batchv1.SchemeGroupVersion.WithKind(kindCronJob), imageflowv1alpha1.SubscriptionTarget{
+			TargetRef: imageflowv1alpha1.TargetReference{
+				APIVersion: "batch/v1", Kind: "CronJob", Namespace: t11uNamespace, Name: "t11u-cronjob",
+			},
+			ContainerNames: []string{t11uContainer},
+		}, observerKindCronJob, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
