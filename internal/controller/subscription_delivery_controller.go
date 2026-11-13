@@ -241,7 +241,7 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions/status,verbs=get;update;patch
