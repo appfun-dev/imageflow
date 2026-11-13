@@ -511,7 +511,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 		if facts.jobComplete {
 			msg := fmt.Sprintf("%scompletion of %s succeeded: Job %s completed", delegationPrefix, entry.DesiredImage, jobLabel)
 			if facts.jobCompletionTime != nil {
-				msg += fmt.Sprintf(" at %s", facts.jobCompletionTime.Time.Format(time.RFC3339))
+				msg += fmt.Sprintf(" at %s", facts.jobCompletionTime.Format(time.RFC3339))
 			}
 			return rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded, message: msg}
 		}
@@ -528,7 +528,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 		if facts.jobActive > 0 {
 			msg := fmt.Sprintf("%scompletion in progress: Job %s active", delegationPrefix, jobLabel)
 			if facts.jobStartTime != nil {
-				msg += fmt.Sprintf(" since %s", facts.jobStartTime.Time.Format(time.RFC3339))
+				msg += fmt.Sprintf(" since %s", facts.jobStartTime.Format(time.RFC3339))
 			}
 			return rolloutDetermination{status: imageflowv1alpha1.RolloutProgressing, message: msg}
 		}

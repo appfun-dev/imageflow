@@ -120,9 +120,6 @@ const (
 	t11eJobXNMapping      = "t11e-job-xns-push"
 	t11eJobXN             = "t11e-job-xns"
 
-	// t11eJobImagePth is the jsonpath for a Job's container image (same as
-	// Deployment: .spec.template.spec.containers[0].image).
-	t11eJobImagePth = `{.spec.template.spec.containers[0].image}`
 	// t11eCronJobImagePth is the jsonpath for a CronJob's nested container
 	// image (.spec.jobTemplate.spec.template.spec.containers[0].image).
 	t11eCronJobImagePth = `{.spec.jobTemplate.spec.template.spec.containers[0].image}`
@@ -305,11 +302,14 @@ spec:
 		g.Expect(msg).To(ContainSubstring(workload), "target")
 		g.Expect(msg).To(ContainSubstring("imageApplied: true"), "imageApplied stage")
 		g.Expect(msg).To(ContainSubstring("rollout: "+rollout), "rollout stage")
-		wantHealth := "Unknown"
-		if rollout == "Succeeded" {
+		var wantHealth string
+		switch rollout {
+		case "Succeeded":
 			wantHealth = "Healthy"
-		} else if rollout == "Failed" {
+		case "Failed":
 			wantHealth = "Unhealthy"
+		default:
+			wantHealth = "Unknown"
 		}
 		g.Expect(msg).To(ContainSubstring("health: "+wantHealth),
 			"health stage reflects completion-based determination (v1.6 T7)")
@@ -874,10 +874,11 @@ spec:
 			wlMsgs := t11eEventMessages(t11eWorkloadNS, t11eJobFail, "RolloutFailed")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "workload-namespace RolloutFailed event")
 		}, "2m", "5s").Should(Succeed())
-		out, _ := kubectl("get", "events", "-n", t11eNamespace, "--field-selector",
-			"reason=RolloutFailed", "-o", `jsonpath={range .items[*]}{.involvedObject.name}{"="}{.involvedObject.kind}{"\n"}{end}`)
-		Expect(out).To(ContainSubstring(t11eJobFailSub+"=ImageSubscription"))
-		Expect(out).To(ContainSubstring(t11eJobFail+"=Job"))
+		jp := `jsonpath={range .items[*]}{.involvedObject.name}{"="}{.involvedObject.kind}{"\n"}{end}`
+		out, _ := kubectl("get", "events", "-n", t11eNamespace,
+			"--field-selector", "reason=RolloutFailed", "-o", jp)
+		Expect(out).To(ContainSubstring(t11eJobFailSub + "=ImageSubscription"))
+		Expect(out).To(ContainSubstring(t11eJobFail + "=Job"))
 
 		By("the failed summary floats up to the mirror")
 		istMirror := t11eJobFailStream + "--" + t11eTag
@@ -1023,7 +1024,7 @@ spec:
 		Eventually(func(g Gomega) {
 			wlApplied := t11eEventMessages(t11eWorkloadNS, t11eJobXN, "ImageApplied")
 			g.Expect(wlApplied).NotTo(BeEmpty(), "target-side ImageApplied event")
-			g.Expect(wlApplied[0]).To(ContainSubstring("previous field value: "+t11ePreImage))
+			g.Expect(wlApplied[0]).To(ContainSubstring("previous field value: " + t11ePreImage))
 		}, "2m", "5s").Should(Succeed())
 	})
 })
