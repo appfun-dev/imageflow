@@ -906,7 +906,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 							targetContainers[i] = tcMap
 						}
 					}
-					unstructured.SetNestedSlice(recreateObj.Object, targetContainers,
+					_ = unstructured.SetNestedSlice(recreateObj.Object, targetContainers,
 						"spec", "template", "spec", "containers")
 				}
 			}
