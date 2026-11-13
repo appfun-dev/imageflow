@@ -808,9 +808,10 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			return out
 		case apierrors.IsInvalid(applyErr) && ref.Kind == "Job" && strings.Contains(applyErr.Error(), "field is immutable"):
 			// Job.spec.template is immutable after creation. Delete the Job
-			// then immediately re-apply via SSA to create it with the new
-			// image in the same reconcile pass. The plan already carries
-			// the correct desired state.
+			// then re-apply via SSA to create it with the new image. We must
+			// wait for the delete to fully propagate before re-applying,
+			// otherwise SSA sees the existing Job and rejects the template
+			// change.
 			delObj := &unstructured.Unstructured{}
 			delObj.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
 			delObj.SetName(ref.Name)
@@ -822,11 +823,47 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 					authz.FormatTarget(ref), delErr))
 				return out
 			}
-			// Re-apply to create the Job with the new image. Use force=true
-			// because the previous owner (e.g. kubectl-client-side-apply) may
-			// still have stale managedFields entries in the API server cache
-			// even though the object was deleted.
-			recreateErr := r.applyOnce(ctx, plan, fieldManager, true)
+			// Verify deletion completed before re-applying. The API server
+			// delete is synchronous but finalizers or GC may delay removal.
+			verifyObj := &unstructured.Unstructured{}
+			verifyObj.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
+			verifyErr := r.apiReader.Get(ctx, types.NamespacedName{
+				Namespace: ref.Namespace, Name: ref.Name}, verifyObj)
+			if verifyErr == nil {
+				// Job still exists — cannot recreate in this pass. Return
+				// transient so the next reconcile retries after deletion
+				// completes.
+				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+					"deleted immutable Job %s but it still exists; retrying on next reconcile",
+					authz.FormatTarget(ref)))
+				out.requeue = waitingStateRequeue
+				return out
+			}
+			if !apierrors.IsNotFound(verifyErr) {
+				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+					"failed to verify deletion of Job %s: %v",
+					authz.FormatTarget(ref), verifyErr))
+				return out
+			}
+			// Job is gone. Build a fresh minimal plan for SSA create. The
+			// old plan's Apply payload may carry stale server-generated
+			// fields (controller-uid labels) that are invalid on a new Job.
+			freshPlan := &delivery.Plan{
+				Apply:  plan.Apply.DeepCopy(),
+				Fields: plan.Fields,
+			}
+			// Strip metadata.labels from the apply payload — they contain
+			// server-generated values (controller-uid, job-name) tied to
+			// the old Job's UID and would be rejected on create.
+			delete(freshPlan.Apply.Object, "metadata")
+			freshPlan.Apply.Object["metadata"] = map[string]interface{}{
+				"name":      ref.Name,
+				"namespace": ref.Namespace,
+				"annotations": map[string]interface{}{
+					delivery.ManagedByAnnotation: delivery.ManagedByAnnotationValue,
+				},
+			}
+			recreateErr := r.applyOnce(ctx, freshPlan, fieldManager, false)
 			if recreateErr != nil {
 				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 					"deleted immutable Job %s but failed to recreate: %v",
