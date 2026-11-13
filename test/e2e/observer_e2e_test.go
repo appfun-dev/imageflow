@@ -779,7 +779,14 @@ spec:
 `, t11eJobSuccess, t11eWorkloadNS, t11eContainer))
 		t11eSubscription(t11eJobSuccessSub, t11eJobSuccessStream, "Job", t11eWorkloadNS, t11eJobSuccess)
 
-		t11eDelivered(t11eJobSuccessSub, t11eWorkloadNS, "Job", t11eJobSuccess, t11ePauseRef)
+		// v1.6 spec §D4: delivery does NOT change existing Job images
+		// (immutable template). Verify imageApplied=true without checking
+		// the actual container image (which stays at the original value).
+		Eventually(func(g Gomega) {
+			g.Expect(t11eEntryReason(t11eJobSuccessSub, t11eJobSuccess)).To(Equal("Applied"))
+			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eJobSuccessSub,
+				fmt.Sprintf(t11eAppliedPthFmt, t11eJobSuccess))).To(Equal("true"))
+		}, "3m", "2s").Should(Succeed())
 
 		By("the Job completes natively and the observer reports Succeeded + Healthy")
 		Eventually(func(g Gomega) {
@@ -846,11 +853,13 @@ spec:
 `, t11eJobFail, t11eWorkloadNS, t11eContainer, t11ePreImage))
 		t11eSubscription(t11eJobFailSub, t11eJobFailStream, "Job", t11eWorkloadNS, t11eJobFail)
 
-		// The delivery writes the pause image; then our Job spec above has
-		// already been applied with the pre-image. We need to wait for the
-		// engine to deliver the registered digest into the Job. But since
-		// the Job uses exit 1, it will fail quickly after delivery.
-		t11eDelivered(t11eJobFailSub, t11eWorkloadNS, "Job", t11eJobFail, t11ePauseRef)
+		// v1.6 spec §D4: delivery does NOT change existing Job images.
+		// Verify imageApplied=true; the Job fails with its original image.
+		Eventually(func(g Gomega) {
+			g.Expect(t11eEntryReason(t11eJobFailSub, t11eJobFail)).To(Equal("Applied"))
+			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eJobFailSub,
+				fmt.Sprintf(t11eAppliedPthFmt, t11eJobFail))).To(Equal("true"))
+		}, "3m", "2s").Should(Succeed())
 
 		By("the Job fails natively and the observer reports Failed + Unhealthy")
 		Eventually(func(g Gomega) {
@@ -997,11 +1006,17 @@ spec:
       restartPolicy: Never
       containers:
       - name: %[3]s
-        image: %[4]s
-`, t11eJobXN, t11eWorkloadNS, t11eContainer, t11ePreImage))
+        image: docker.io/library/busybox:1.36
+        command: ["true"]
+`, t11eJobXN, t11eWorkloadNS, t11eContainer))
 		t11eSubscription(t11eJobXNSSub, t11eJobXNStream, "Job", t11eWorkloadNS, t11eJobXN)
 
-		t11eDelivered(t11eJobXNSSub, t11eWorkloadNS, "Job", t11eJobXN, t11ePauseRef)
+		// v1.6 spec §D4: delivery does NOT change existing Job images.
+		Eventually(func(g Gomega) {
+			g.Expect(t11eEntryReason(t11eJobXNSSub, t11eJobXN)).To(Equal("Applied"))
+			g.Expect(t11eJSONPath(t11eNamespace, "imagesubscription", t11eJobXNSSub,
+				fmt.Sprintf(t11eAppliedPthFmt, t11eJobXN))).To(Equal("true"))
+		}, "3m", "2s").Should(Succeed())
 
 		By("the Job completes and dual-namespace events are emitted")
 		Eventually(func(g Gomega) {
