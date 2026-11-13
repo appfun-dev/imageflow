@@ -874,6 +874,12 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			recreateObj.SetAnnotations(map[string]string{
 				delivery.ManagedByAnnotation: delivery.ManagedByAnnotationValue,
 			})
+			// Strip auto-generated fields that are tied to the old Job's UID.
+			// The Job controller regenerates these on create.
+			unstructured.RemoveNestedField(recreateObj.Object, "spec", "selector")
+			unstructured.RemoveNestedField(recreateObj.Object,
+				"spec", "template", "metadata", "labels")
+			unstructured.RemoveNestedField(recreateObj.Object, "status")
 			// Update container images to the desired value from the
 			// original SSA plan (which has the correct new image).
 			planContainers, _, _ := unstructured.NestedSlice(plan.Apply.Object,
