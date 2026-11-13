@@ -890,10 +890,12 @@ spec:
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "workload-namespace RolloutFailed event")
 		}, "2m", "5s").Should(Succeed())
 		jp := `jsonpath={range .items[*]}{.involvedObject.name}{"="}{.involvedObject.kind}{"\n"}{end}`
-		out, _ := kubectl("get", "events", "-n", t11eNamespace,
+		subOut, _ := kubectl("get", "events", "-n", t11eNamespace,
 			"--field-selector", "reason=RolloutFailed", "-o", jp)
-		Expect(out).To(ContainSubstring(t11eJobFailSub + "=ImageSubscription"))
-		Expect(out).To(ContainSubstring(t11eJobFail + "=Job"))
+		Expect(subOut).To(ContainSubstring(t11eJobFailSub + "=ImageSubscription"))
+		wlOut, _ := kubectl("get", "events", "-n", t11eWorkloadNS,
+			"--field-selector", "reason=RolloutFailed", "-o", jp)
+		Expect(wlOut).To(ContainSubstring(t11eJobFail + "=Job"))
 
 		By("the failed summary floats up to the mirror")
 		istMirror := t11eJobFailStream + "--" + t11eTag
