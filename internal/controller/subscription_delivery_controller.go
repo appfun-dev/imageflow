@@ -858,9 +858,9 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 				Apply:  plan.Apply.DeepCopy(),
 				Fields: plan.Fields,
 			}
-			// Strip metadata.labels from the apply payload — they contain
-			// server-generated values (controller-uid, job-name) tied to
-			// the old Job's UID and would be rejected on create.
+			// Strip metadata entirely and rebuild with only name/namespace/
+			// annotation. Server-generated labels (controller-uid, job-name)
+			// are tied to the old UID and rejected on create.
 			delete(freshPlan.Apply.Object, "metadata")
 			freshPlan.Apply.Object["metadata"] = map[string]interface{}{
 				"name":      ref.Name,
@@ -868,6 +868,25 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 				"annotations": map[string]interface{}{
 					delivery.ManagedByAnnotation: delivery.ManagedByAnnotationValue,
 				},
+			}
+			// Job CREATE requires restartPolicy in spec.template.spec.
+			// Extract it from the original target object captured by
+			// planDelivery before the failed apply.
+			if out.targetObject != nil {
+				rp, found, _ := unstructured.NestedString(out.targetObject.Object,
+					"spec", "template", "spec", "restartPolicy")
+				if found && rp != "" {
+					specMap, ok := freshPlan.Apply.Object["spec"].(map[string]interface{})
+					if ok {
+						tplMap, ok := specMap["template"].(map[string]interface{})
+						if ok {
+							tplSpecMap, ok := tplMap["spec"].(map[string]interface{})
+							if ok {
+								tplSpecMap["restartPolicy"] = rp
+							}
+						}
+					}
+				}
 			}
 			recreateErr := r.applyOnce(ctx, freshPlan, fieldManager, false)
 			if recreateErr != nil {
