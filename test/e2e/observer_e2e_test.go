@@ -772,6 +772,7 @@ spec:
       containers:
       - name: %[3]s
         image: %[4]s
+        command: ["sh", "-c", "sleep 5 && exit 0"]
 `, t11eJobSuccess, t11eWorkloadNS, t11eContainer, t11ePreImage))
 		t11eSubscription(t11eJobSuccessSub, t11eJobSuccessStream, "Job", t11eWorkloadNS, t11eJobSuccess)
 

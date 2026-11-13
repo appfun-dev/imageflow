@@ -851,42 +851,68 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 					authz.FormatTarget(ref), verifyErr))
 				return out
 			}
-			// Job is gone. Build a fresh minimal plan for SSA create. The
-			// old plan's Apply payload may carry stale server-generated
-			// fields (controller-uid labels) that are invalid on a new Job.
-			freshPlan := &delivery.Plan{
-				Apply:  plan.Apply.DeepCopy(),
-				Fields: plan.Fields,
+			// Job is gone. Build a recreate payload from the original
+			// target object (captured by planDelivery before the failed
+			// apply). We need the full spec (command, args, env, etc.)
+			// because SSA CREATE has no server state to merge with.
+			// Only strip server-generated metadata.labels (controller-uid,
+			// job-name) which are tied to the old UID.
+			if out.targetObject == nil {
+				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+					"deleted immutable Job %s but have no original spec to recreate from",
+					authz.FormatTarget(ref)))
+				return out
 			}
-			// Strip metadata entirely and rebuild with only name/namespace/
-			// annotation. Server-generated labels (controller-uid, job-name)
-			// are tied to the old UID and rejected on create.
-			delete(freshPlan.Apply.Object, "metadata")
-			freshPlan.Apply.Object["metadata"] = map[string]interface{}{
-				"name":      ref.Name,
-				"namespace": ref.Namespace,
-				"annotations": map[string]interface{}{
-					delivery.ManagedByAnnotation: delivery.ManagedByAnnotationValue,
-				},
-			}
-			// Job CREATE requires restartPolicy in spec.template.spec.
-			// Extract it from the original target object captured by
-			// planDelivery before the failed apply.
-			if out.targetObject != nil {
-				rp, found, _ := unstructured.NestedString(out.targetObject.Object,
-					"spec", "template", "spec", "restartPolicy")
-				if found && rp != "" {
-					specMap, ok := freshPlan.Apply.Object["spec"].(map[string]interface{})
-					if ok {
-						tplMap, ok := specMap["template"].(map[string]interface{})
-						if ok {
-							tplSpecMap, ok := tplMap["spec"].(map[string]interface{})
-							if ok {
-								tplSpecMap["restartPolicy"] = rp
-							}
+			recreateObj := out.targetObject.DeepCopy()
+			// Clean metadata for fresh create.
+			recreateObj.SetResourceVersion("")
+			recreateObj.SetUID("")
+			recreateObj.SetCreationTimestamp(metav1.Time{})
+			recreateObj.SetManagedFields(nil)
+			recreateObj.SetLabels(nil) // strip server-generated labels
+			// Keep only our managed-by annotation.
+			recreateObj.SetAnnotations(map[string]string{
+				delivery.ManagedByAnnotation: delivery.ManagedByAnnotationValue,
+			})
+			// Update container images to the desired value from the
+			// original SSA plan (which has the correct new image).
+			planContainers, _, _ := unstructured.NestedSlice(plan.Apply.Object,
+				"spec", "template", "spec", "containers")
+			if len(planContainers) > 0 {
+				targetContainers, found, _ := unstructured.NestedSlice(recreateObj.Object,
+					"spec", "template", "spec", "containers")
+				if found {
+					// Build a map of container name → desired image from the plan.
+					imageByName := make(map[string]string)
+					for _, pc := range planContainers {
+						pcMap, ok := pc.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						name, _ := pcMap["name"].(string)
+						img, _ := pcMap["image"].(string)
+						if name != "" && img != "" {
+							imageByName[name] = img
 						}
 					}
+					for i, tc := range targetContainers {
+						tcMap, ok := tc.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						name, _ := tcMap["name"].(string)
+						if newImg, ok := imageByName[name]; ok {
+							tcMap["image"] = newImg
+							targetContainers[i] = tcMap
+						}
+					}
+					unstructured.SetNestedSlice(recreateObj.Object, targetContainers,
+						"spec", "template", "spec", "containers")
 				}
+			}
+			freshPlan := &delivery.Plan{
+				Apply:  recreateObj,
+				Fields: plan.Fields,
 			}
 			recreateErr := r.applyOnce(ctx, freshPlan, fieldManager, false)
 			if recreateErr != nil {
