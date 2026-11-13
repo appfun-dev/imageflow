@@ -816,7 +816,13 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			delObj.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
 			delObj.SetName(ref.Name)
 			delObj.SetNamespace(ref.Namespace)
-			delErr := r.client.Delete(ctx, delObj)
+			// Use Background propagation with grace=0 to force-delete the
+			// Job immediately. Default graceful deletion leaves the Job in
+			// Terminating state while pods finish, blocking SSA recreate.
+			graceZero := int64(0)
+			propagation := metav1.DeletePropagationBackground
+			delErr := r.client.Delete(ctx, delObj, client.GracePeriodSeconds(graceZero),
+				client.PropagationPolicy(propagation))
 			if delErr != nil && !apierrors.IsNotFound(delErr) {
 				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 					"failed to delete immutable Job %s for image update: %v",
