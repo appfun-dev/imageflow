@@ -825,9 +825,11 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 					authz.FormatTarget(ref), delErr))
 				return out
 			}
-			// Re-apply to create the Job with the new image. SSA creates
-			// when the object does not exist.
-			recreateErr := r.applyOnce(ctx, plan, fieldManager, false)
+			// Re-apply to create the Job with the new image. Use force=true
+			// because the previous owner (e.g. kubectl-client-side-apply) may
+			// still have stale managedFields entries in the API server cache
+			// even though the object was deleted.
+			recreateErr := r.applyOnce(ctx, plan, fieldManager, true)
 			if recreateErr != nil {
 				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 					"deleted immutable Job %s but failed to recreate: %v",
