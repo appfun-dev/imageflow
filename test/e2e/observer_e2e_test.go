@@ -1045,11 +1045,8 @@ spec:
 				t11ePauseRef, t11eJobXN, "Succeeded")
 		}, "2m", "5s").Should(Succeed())
 
-		By("the ImageApplied event records the pre-image on the workload side")
-		Eventually(func(g Gomega) {
-			wlApplied := t11eEventMessages(t11eWorkloadNS, t11eJobXN, "ImageApplied")
-			g.Expect(wlApplied).NotTo(BeEmpty(), "target-side ImageApplied event")
-			g.Expect(wlApplied[0]).To(ContainSubstring("previous field value: " + t11ePreImage))
-		}, "2m", "5s").Should(Succeed())
+		// v1.6 §D4: delivery does NOT change Job images (immutable template),
+		// so no ImageApplied event is emitted on the workload — unlike
+		// Deployments where the engine writes the digest to the pod template.
 	})
 })
