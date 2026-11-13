@@ -809,11 +809,13 @@ spec:
 		Eventually(func(g Gomega) {
 			subMsgs := t11eEventMessages(t11eNamespace, t11eJobSuccessSub, "RolloutSucceeded")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-side RolloutSucceeded event")
-			t11eJobAuditFragments(g, subMsgs[0], t11eJobSuccessStream, t11eAuditNoOldImage,
+			// The observer reports the stream's registered image as both old
+			// and new since delivery is a no-op for immutable Jobs (v1.6 §D4).
+			t11eJobAuditFragments(g, subMsgs[0], t11eJobSuccessStream, t11ePauseRef,
 				t11ePauseRef, t11eJobSuccess, "Succeeded")
 			wlMsgs := t11eEventMessages(t11eWorkloadNS, t11eJobSuccess, "RolloutSucceeded")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "workload-namespace RolloutSucceeded event")
-			t11eJobAuditFragments(g, wlMsgs[0], t11eJobSuccessStream, t11eAuditNoOldImage,
+			t11eJobAuditFragments(g, wlMsgs[0], t11eJobSuccessStream, t11ePauseRef,
 				t11ePauseRef, t11eJobSuccess, "Succeeded")
 		}, "2m", "5s").Should(Succeed())
 
@@ -882,7 +884,7 @@ spec:
 		Eventually(func(g Gomega) {
 			subMsgs := t11eEventMessages(t11eNamespace, t11eJobFailSub, "RolloutFailed")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-side RolloutFailed event")
-			t11eJobAuditFragments(g, subMsgs[0], t11eJobFailStream, t11eAuditNoOldImage,
+			t11eJobAuditFragments(g, subMsgs[0], t11eJobFailStream, t11ePauseRef,
 				t11ePauseRef, t11eJobFail, "Failed")
 			wlMsgs := t11eEventMessages(t11eWorkloadNS, t11eJobFail, "RolloutFailed")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "workload-namespace RolloutFailed event")
@@ -1030,12 +1032,12 @@ spec:
 		Eventually(func(g Gomega) {
 			subMsgs := t11eEventMessages(t11eNamespace, t11eJobXNSSub, "RolloutSucceeded")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-namespace event")
-			t11eJobAuditFragments(g, subMsgs[0], t11eJobXNStream, t11eAuditNoOldImage,
+			t11eJobAuditFragments(g, subMsgs[0], t11eJobXNStream, t11ePauseRef,
 				t11ePauseRef, t11eJobXN, "Succeeded")
 
 			wlMsgs := t11eEventMessages(t11eWorkloadNS, t11eJobXN, "RolloutSucceeded")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "workload-namespace event")
-			t11eJobAuditFragments(g, wlMsgs[0], t11eJobXNStream, t11eAuditNoOldImage,
+			t11eJobAuditFragments(g, wlMsgs[0], t11eJobXNStream, t11ePauseRef,
 				t11ePauseRef, t11eJobXN, "Succeeded")
 		}, "2m", "5s").Should(Succeed())
 
