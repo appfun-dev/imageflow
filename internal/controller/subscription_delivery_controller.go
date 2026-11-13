@@ -806,6 +806,29 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 				authz.FormatTarget(ref)))
 			out.requeue = waitingStateRequeue
 			return out
+		case apierrors.IsInvalid(applyErr) && ref.Kind == "Job" && strings.Contains(applyErr.Error(), "field is immutable"):
+			// Job.spec.template is immutable after creation. To change the
+			// container image we must delete the Job and let it be recreated
+			// on the next reconcile pass with the new image applied fresh.
+			delErr := r.client.Delete(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": ref.APIVersion,
+				"kind":       ref.Kind,
+				"metadata": map[string]interface{}{
+					"name":      ref.Name,
+					"namespace": ref.Namespace,
+				},
+			}})
+			if delErr != nil && !apierrors.IsNotFound(delErr) {
+				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+					"failed to delete immutable Job %s for image update: %v",
+					authz.FormatTarget(ref), delErr))
+				return out
+			}
+			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+				"deleted immutable Job %s for image update; delivery replays on next reconcile",
+				authz.FormatTarget(ref)))
+			out.requeue = waitingStateRequeue
+			return out
 		default:
 			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 				"server-side apply to %s failed: %v", authz.FormatTarget(ref), applyErr))
