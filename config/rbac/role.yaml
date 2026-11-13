@@ -93,6 +93,7 @@ rules:
   - cronjobs
   - jobs
   verbs:
+  - delete
   - get
   - list
   - patch

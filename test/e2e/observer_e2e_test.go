@@ -364,10 +364,10 @@ metadata:
 rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets"]
-  verbs: ["get", "patch", "update"]
+  verbs: ["get", "delete", "patch", "update"]
 - apiGroups: ["batch"]
   resources: ["jobs", "cronjobs"]
-  verbs: ["get", "patch", "update"]
+  verbs: ["get", "delete", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -391,10 +391,10 @@ metadata:
 rules:
 - apiGroups: ["apps"]
   resources: ["deployments", "statefulsets", "daemonsets"]
-  verbs: ["get", "patch", "update"]
+  verbs: ["get", "delete", "patch", "update"]
 - apiGroups: ["batch"]
   resources: ["jobs", "cronjobs"]
-  verbs: ["get", "patch", "update"]
+  verbs: ["get", "delete", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
