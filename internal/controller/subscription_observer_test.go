@@ -2394,7 +2394,9 @@ func TestObserverDetermineCronJobCompletionStates(t *testing.T) {
 			wantSub: "no Jobs scheduled yet",
 		},
 		{
-			name:    "spec no longer holds desired image → Unknown",
+			// v1.6 spec §D4: image-match gate is skipped for CronJobs.
+			// The active Job reports Progressing regardless of image mismatch.
+			name:    "spec no longer holds desired image → Progressing (image gate skipped)",
 			cronJob: t11uCronJob(t11uRefA),
 			jobs: []*batchv1.Job{
 				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
@@ -2404,8 +2406,8 @@ func TestObserverDetermineCronJobCompletionStates(t *testing.T) {
 			},
 			target:  t11uContainerTarget(t11uCronJobRef()),
 			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefB),
-			want:    imageflowv1alpha1.RolloutUnknown,
-			wantSub: "currently references",
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "completion in progress",
 		},
 	}
 	for _, tc := range cases {
@@ -2487,12 +2489,14 @@ func TestObserverDetermineJobCompletionStates(t *testing.T) {
 			wantSub: "has not reported",
 		},
 		{
-			name:    "unknown when spec no longer holds desired image",
+			// v1.6 spec §D4: image-match gate is skipped for Jobs.
+			// The active Job reports Progressing regardless of image mismatch.
+			name:    "progressing when spec no longer holds desired image (image gate skipped)",
 			job:     t11uJob(t11uRefA, batchv1.JobStatus{Active: 1}),
 			target:  t11uContainerTarget(t11uJobRef()),
 			entry:   t11uSeededEntry(t11uJobRef(), t11uRefB),
-			want:    imageflowv1alpha1.RolloutUnknown,
-			wantSub: "currently references",
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "completion in progress",
 		},
 		{
 			name:    "unknown when declared container missing from template",
