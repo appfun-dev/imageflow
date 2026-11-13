@@ -807,9 +807,10 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			out.requeue = waitingStateRequeue
 			return out
 		case apierrors.IsInvalid(applyErr) && ref.Kind == "Job" && strings.Contains(applyErr.Error(), "field is immutable"):
-			// Job.spec.template is immutable after creation. To change the
-			// container image we must delete the Job and let it be recreated
-			// on the next reconcile pass with the new image applied fresh.
+			// Job.spec.template is immutable after creation. Delete the Job
+			// then immediately re-apply via SSA to create it with the new
+			// image in the same reconcile pass. The plan already carries
+			// the correct desired state.
 			delErr := r.client.Delete(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": ref.APIVersion,
 				"kind":       ref.Kind,
@@ -824,11 +825,17 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 					authz.FormatTarget(ref), delErr))
 				return out
 			}
-			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
-				"deleted immutable Job %s for image update; delivery replays on next reconcile",
-				authz.FormatTarget(ref)))
-			out.requeue = waitingStateRequeue
-			return out
+			// Re-apply to create the Job with the new image. SSA creates
+			// when the object does not exist.
+			recreateErr := r.applyOnce(ctx, plan, fieldManager, false)
+			if recreateErr != nil {
+				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
+					"deleted immutable Job %s but failed to recreate: %v",
+					authz.FormatTarget(ref), recreateErr))
+				return out
+			}
+			// Recreated successfully — fall through to success path below.
+			r.metrics.applies.WithLabelValues(applyResultSuccess).Inc()
 		default:
 			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 				"server-side apply to %s failed: %v", authz.FormatTarget(ref), applyErr))
