@@ -755,6 +755,9 @@ spec:
 		// Job controller marks it Complete after 30s (the Job's own
 		// completion path, not a pod failure). The observer reads the
 		// native Job condition (T5, ADR-006 amendment).
+		// Use busybox which exits immediately (command: true) so the Job
+		// reaches Complete condition quickly. The pause image used by other
+		// tests sleeps forever and cannot satisfy Job completion semantics.
 		t11eYAML("t11e-job-ok", fmt.Sprintf(`
 apiVersion: batch/v1
 kind: Job
@@ -762,7 +765,7 @@ metadata:
   name: %[1]s
   namespace: %[2]s
 spec:
-  activeDeadlineSeconds: 30
+  activeDeadlineSeconds: 60
   template:
     spec:
       terminationGracePeriodSeconds: 0
@@ -771,9 +774,9 @@ spec:
       restartPolicy: Never
       containers:
       - name: %[3]s
-        image: %[4]s
-        command: ["sh", "-c", "sleep 5 && exit 0"]
-`, t11eJobSuccess, t11eWorkloadNS, t11eContainer, t11ePreImage))
+        image: docker.io/library/busybox:1.36
+        command: ["true"]
+`, t11eJobSuccess, t11eWorkloadNS, t11eContainer))
 		t11eSubscription(t11eJobSuccessSub, t11eJobSuccessStream, "Job", t11eWorkloadNS, t11eJobSuccess)
 
 		t11eDelivered(t11eJobSuccessSub, t11eWorkloadNS, "Job", t11eJobSuccess, t11ePauseRef)
