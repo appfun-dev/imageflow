@@ -2238,7 +2238,7 @@ func TestObserverLabelMappings(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 const (
-	t11uJobName = "t11u-job"
+	t11uJobName  = "t11u-job"
 	t11uBatchAPI = "batch/v1"
 )
 
@@ -2302,7 +2302,7 @@ func t11uJobOwnedBy(name, image string, cronJobUID types.UID, creationTime time.
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: t11uNamespace, Name: name,
-			UID: types.UID(name + "-uid"),
+			UID:               types.UID(name + "-uid"),
 			CreationTimestamp: metav1.NewTime(creationTime),
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: t11uBatchAPI, Kind: kindCronJob,
