@@ -811,14 +811,11 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			// then immediately re-apply via SSA to create it with the new
 			// image in the same reconcile pass. The plan already carries
 			// the correct desired state.
-			delErr := r.client.Delete(ctx, &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": ref.APIVersion,
-				"kind":       ref.Kind,
-				"metadata": map[string]interface{}{
-					"name":      ref.Name,
-					"namespace": ref.Namespace,
-				},
-			}})
+			delObj := &unstructured.Unstructured{}
+			delObj.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
+			delObj.SetName(ref.Name)
+			delObj.SetNamespace(ref.Namespace)
+			delErr := r.client.Delete(ctx, delObj)
 			if delErr != nil && !apierrors.IsNotFound(delErr) {
 				out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 					"failed to delete immutable Job %s for image update: %v",
