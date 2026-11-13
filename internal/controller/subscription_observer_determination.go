@@ -469,7 +469,13 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			message: fmt.Sprintf("declared container(s) %v are not present in the pod template of %s: the delivery engine owns this failure surface (ContainerNotFound) and the rollout of %s cannot be observed (ADR-006)", missing, name, entry.DesiredImage),
 		}
 	}
-	if !holds {
+	if !holds && facts.kind != observerKindJob && facts.kind != observerKindCronJob {
+		// For long-running workloads (Deployment/STS/DS), image mismatch
+		// blocks rollout reporting because the native status describes a
+		// different image than desired. For Jobs/CronJobs, completion
+		// semantics are independent of image matching (v1.6 spec §D4:
+		// ImageFlow does NOT delete or recreate Jobs; the existing Job
+		// keeps its current image). Report completion regardless.
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
 			message: fmt.Sprintf("%s currently references %s, not the desired image %s: native status would describe a different image, so the rollout stage stays honestly Unknown until the delivery engine re-applies (ADR-005 §3: imageApplied and rolloutStatus are independent stages)", name, current, entry.DesiredImage),
