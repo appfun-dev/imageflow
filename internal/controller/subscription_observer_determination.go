@@ -31,8 +31,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -115,6 +117,17 @@ type workloadFacts struct {
 	numberAvailable        int32
 	numberReady            int32
 	numberMisscheduled     int32
+	// Job (T5, ADR-006 amendment).
+	jobComplete       bool
+	jobFailed         bool
+	jobFailedReason   string
+	jobActive         int32
+	jobStartTime      *metav1.Time
+	jobCompletionTime *metav1.Time
+	// T8: completion-aware event messages need the workload name for
+	// human-readable messages ("Job <name> completed at <time>").
+	jobName     string // Job resource name (for Job kind)
+	cronJobName string // CronJob resource name (for CronJob kind, when delegating to a Job)
 }
 
 // observableBuiltinKind reports whether the target's rollout is observable
@@ -133,6 +146,10 @@ func observableBuiltinKind(gvk schema.GroupVersionKind, target imageflowv1alpha1
 		return observerKindStatefulSet, true
 	case appsv1.SchemeGroupVersion.WithKind(kindDaemonSet):
 		return observerKindDaemonSet, true
+	case batchv1.SchemeGroupVersion.WithKind(kindJob):
+		return observerKindJob, true
+	case batchv1.SchemeGroupVersion.WithKind(kindCronJob):
+		return observerKindCronJob, true
 	}
 	return "", false
 }
@@ -220,6 +237,104 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 			wl.Status.DesiredNumberScheduled == 0 && wl.Status.UpdatedNumberScheduled == 0 &&
 			wl.Status.NumberAvailable == 0 && wl.Status.NumberReady == 0 &&
 			wl.Status.NumberMisscheduled == 0
+		return facts, true, nil
+	case batchv1.SchemeGroupVersion.WithKind(kindJob):
+		var wl batchv1.Job
+		if err := r.reader().Get(ctx, key, &wl); err != nil {
+			return observerFoundFromErr(err)
+		}
+		facts := workloadFacts{
+			kind:              observerKindJob,
+			uid:               wl.UID,
+			namespace:         wl.Namespace,
+			template:          &wl.Spec.Template.Spec,
+			generation:        wl.Generation,
+			jobActive:         wl.Status.Active,
+			jobStartTime:      wl.Status.StartTime,
+			jobCompletionTime: wl.Status.CompletionTime,
+			jobName:           wl.Name, // T8: for completion-aware event messages
+		}
+		for _, cond := range wl.Status.Conditions {
+			switch cond.Type {
+			case batchv1.JobComplete:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobComplete = true
+				}
+			case batchv1.JobFailed:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobFailed = true
+					facts.jobFailedReason = cond.Reason
+				}
+			}
+		}
+		// A Job is uninitialized when the controller has not yet set any
+		// status: no conditions, no active pods, no start time.
+		facts.uninitialized = len(wl.Status.Conditions) == 0 &&
+			wl.Status.Active == 0 && wl.Status.StartTime == nil
+		return facts, true, nil
+	case batchv1.SchemeGroupVersion.WithKind(kindCronJob):
+		// CronJob observation (T6): discover the most recent Job owned by
+		// this CronJob via ownerReferences and delegate completion
+		// determination to the Job logic. The CronJob itself carries no
+		// completion status — only its spawned Jobs do.
+		var cj batchv1.CronJob
+		if err := r.reader().Get(ctx, key, &cj); err != nil {
+			return observerFoundFromErr(err)
+		}
+		// List Jobs in the same namespace and filter by ownerReference.
+		var jobList batchv1.JobList
+		if err := r.client.List(ctx, &jobList, client.InNamespace(cj.Namespace)); err != nil {
+			return workloadFacts{}, false, err
+		}
+		var latest *batchv1.Job
+		for i := range jobList.Items {
+			j := &jobList.Items[i]
+			if !isOwnedBy(j.OwnerReferences, cj.UID) {
+				continue
+			}
+			if latest == nil || j.CreationTimestamp.After(latest.CreationTimestamp.Time) {
+				latest = j
+			}
+		}
+		if latest == nil {
+			// No Jobs scheduled yet for this CronJob.
+			return workloadFacts{
+				kind:          observerKindCronJob,
+				uid:           cj.UID,
+				namespace:     cj.Namespace,
+				template:      &cj.Spec.JobTemplate.Spec.Template.Spec,
+				generation:    cj.Generation,
+				uninitialized: true,
+				cronJobName:   cj.Name, // T8: for completion-aware event messages
+			}, true, nil
+		}
+		// Extract Job-specific fields from the discovered Job, keeping
+		// kind as observerKindCronJob so determineRollout can handle it.
+		facts := workloadFacts{
+			kind:              observerKindCronJob,
+			uid:               cj.UID,
+			namespace:         cj.Namespace,
+			template:          &latest.Spec.Template.Spec,
+			generation:        cj.Generation,
+			jobActive:         latest.Status.Active,
+			jobStartTime:      latest.Status.StartTime,
+			jobCompletionTime: latest.Status.CompletionTime,
+			jobName:           latest.Name, // T8: the delegated Job name
+			cronJobName:       cj.Name,     // T8: the parent CronJob name
+		}
+		for _, cond := range latest.Status.Conditions {
+			switch cond.Type {
+			case batchv1.JobComplete:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobComplete = true
+				}
+			case batchv1.JobFailed:
+				if cond.Status == corev1.ConditionTrue {
+					facts.jobFailed = true
+					facts.jobFailedReason = cond.Reason
+				}
+			}
+		}
 		return facts, true, nil
 	}
 	return workloadFacts{}, false, nil
@@ -354,16 +469,78 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			message: fmt.Sprintf("declared container(s) %v are not present in the pod template of %s: the delivery engine owns this failure surface (ContainerNotFound) and the rollout of %s cannot be observed (ADR-006)", missing, name, entry.DesiredImage),
 		}
 	}
-	if !holds {
+	if !holds && facts.kind != observerKindJob && facts.kind != observerKindCronJob {
+		// For long-running workloads (Deployment/STS/DS), image mismatch
+		// blocks rollout reporting because the native status describes a
+		// different image than desired. For Jobs/CronJobs, completion
+		// semantics are independent of image matching (v1.6 spec §D4:
+		// ImageFlow does NOT delete or recreate Jobs; the existing Job
+		// keeps its current image). Report completion regardless.
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
 			message: fmt.Sprintf("%s currently references %s, not the desired image %s: native status would describe a different image, so the rollout stage stays honestly Unknown until the delivery engine re-applies (ADR-005 §3: imageApplied and rolloutStatus are independent stages)", name, current, entry.DesiredImage),
+		}
+	}
+	// CronJob no-Jobs case (T6/T8): must be checked before the generic
+	// uninitialized gate because the CronJob itself may be initialized
+	// but simply has no Jobs scheduled yet. T8: completion-aware message.
+	if facts.kind == observerKindCronJob && facts.uninitialized {
+		return rolloutDetermination{
+			status:  imageflowv1alpha1.RolloutUnknown,
+			message: fmt.Sprintf("no Jobs scheduled yet for CronJob %s; completion stays Unknown until the CronJob controller creates a Job", facts.cronJobName),
 		}
 	}
 	if facts.uninitialized {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutUnknown,
 			message: fmt.Sprintf("the native %s controller has not reported any status for %s yet (observedGeneration 0, empty status): the rollout of %s is honestly Unknown until native status appears", facts.kind, name, entry.DesiredImage),
+		}
+	}
+	// Job / CronJob completion determination (T5/T6/T8, ADR-006 amendment):
+	// Jobs use conditions (Complete/Failed) rather than observedGeneration +
+	// replica counts. Complete takes priority over Failed when both are
+	// present (the Kubernetes Job controller sets both on deadline-exceeded
+	// jobs that also completed). Active pods without terminal conditions
+	// mean the Job is still running. For CronJobs (T6), the facts are
+	// extracted from the most recent owned Job via ownerReferences.
+	// T8: completion-aware event messages use "completion of" language.
+	if facts.kind == observerKindJob || facts.kind == observerKindCronJob {
+		// Build the delegation prefix for CronJob (T8).
+		delegationPrefix := ""
+		if facts.kind == observerKindCronJob && facts.cronJobName != "" {
+			delegationPrefix = fmt.Sprintf("observing most recent Job %s for CronJob %s: ", facts.jobName, facts.cronJobName)
+		}
+		jobLabel := facts.jobName
+		if jobLabel == "" {
+			jobLabel = name // fallback to formatted target ref
+		}
+		if facts.jobComplete {
+			msg := fmt.Sprintf("%scompletion of %s succeeded: Job %s completed", delegationPrefix, entry.DesiredImage, jobLabel)
+			if facts.jobCompletionTime != nil {
+				msg += fmt.Sprintf(" at %s", facts.jobCompletionTime.Format(time.RFC3339))
+			}
+			return rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded, message: msg}
+		}
+		if facts.jobFailed {
+			reason := facts.jobFailedReason
+			if reason == "" {
+				reason = "unknown reason"
+			}
+			return rolloutDetermination{
+				status:  imageflowv1alpha1.RolloutFailed,
+				message: fmt.Sprintf("%scompletion of %s failed: Job %s failed with reason %s", delegationPrefix, entry.DesiredImage, jobLabel, reason),
+			}
+		}
+		if facts.jobActive > 0 {
+			msg := fmt.Sprintf("%scompletion in progress: Job %s active", delegationPrefix, jobLabel)
+			if facts.jobStartTime != nil {
+				msg += fmt.Sprintf(" since %s", facts.jobStartTime.Format(time.RFC3339))
+			}
+			return rolloutDetermination{status: imageflowv1alpha1.RolloutProgressing, message: msg}
+		}
+		return rolloutDetermination{
+			status:  imageflowv1alpha1.RolloutUnknown,
+			message: fmt.Sprintf("%sthe native Job controller has not reported any status for Job %s yet (no conditions, no active pods); completion stays Unknown until native status appears", delegationPrefix, jobLabel),
 		}
 	}
 	if facts.progressDeadlineFailed {
@@ -414,7 +591,22 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 // (spec v1.5 D3): the observer never fabricates health it could not
 // observe. The function is pure and returns only the status — see the
 // package-level note on why the Health stage carries no message.
-func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
+func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string, kind string) imageflowv1alpha1.HealthStatus {
+	// Job/CronJob health (T7, spec v1.6): completion-based — derived directly
+	// from the rollout verdict. No pod-scan is performed for batch workloads:
+	// the Job's completion result IS the health signal. A completed Job is
+	// Healthy, a failed Job is Unhealthy, and anything else is Unknown.
+	if kind == observerKindJob || kind == observerKindCronJob {
+		switch rollout {
+		case imageflowv1alpha1.RolloutSucceeded:
+			return imageflowv1alpha1.HealthHealthy
+		case imageflowv1alpha1.RolloutFailed:
+			return imageflowv1alpha1.HealthUnhealthy
+		default:
+			return imageflowv1alpha1.HealthUnknown
+		}
+	}
+	// Deployment/STS/DS: pod-scan based health (existing logic unchanged).
 	if rollout != imageflowv1alpha1.RolloutSucceeded {
 		return imageflowv1alpha1.HealthUnknown
 	}
@@ -580,6 +772,19 @@ func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha
 func ownerRefHasUID(refs []metav1.OwnerReference, uid types.UID) bool {
 	for _, ref := range refs {
 		if ref.UID == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// isOwnedBy reports whether any ownerReference points at the given UID with
+// controller=true. Used by CronJob observation (T6) to find Jobs spawned by
+// a specific CronJob — the Kubernetes Job controller sets controller=true
+// on the ownerReference it creates.
+func isOwnedBy(refs []metav1.OwnerReference, uid types.UID) bool {
+	for _, ref := range refs {
+		if ref.UID == uid && ref.Controller != nil && *ref.Controller {
 			return true
 		}
 	}

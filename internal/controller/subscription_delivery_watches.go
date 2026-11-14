@@ -44,6 +44,8 @@ const (
 	kindDeployment  = "Deployment"
 	kindStatefulSet = "StatefulSet"
 	kindDaemonSet   = "DaemonSet"
+	kindJob         = "Job"
+	kindCronJob     = "CronJob"
 )
 
 // streamChangePredicate fires on stream creation/deletion and on updates that

@@ -271,9 +271,9 @@ const (
 
 // excludedFirstBatchKinds are the kinds ADR-006 decision 3 names explicitly:
 // the built-in adapter set refuses them with an honest Unsupported condition.
+// batch/v1 Job and CronJob were promoted into the built-in set (T2/T3) and
+// are no longer listed here.
 var excludedFirstBatchKinds = map[schema.GroupVersionKind]bool{
-	{Group: "batch", Version: "v1", Kind: "Job"}:                  true,
-	{Group: "batch", Version: "v1", Kind: "CronJob"}:              true,
 	{Group: "", Version: "v1", Kind: "Pod"}:                       true,
 	{Group: "", Version: "v1", Kind: "ReplicationController"}:     true,
 	{Group: "batch", Version: "v1beta1", Kind: "CronJob"}:         true,
@@ -310,7 +310,7 @@ func UnsupportedMessage(gvk schema.GroupVersionKind, c Classification) string {
 	switch c {
 	case ClassificationUnsupportedKind:
 		return fmt.Sprintf("%s is outside the built-in first batch (Deployment, StatefulSet, "+
-			"DaemonSet): no rollout semantics are observable for this Kind, so the built-in "+
+			"DaemonSet, CronJob): no rollout semantics are observable for this Kind, so the built-in "+
 			"adapter set refuses to process it (ADR-006). Extending the built-in set requires "+
 			"a new ADR.", ref)
 	case ClassificationNoPathAdapter:
@@ -319,7 +319,7 @@ func UnsupportedMessage(gvk schema.GroupVersionKind, c Classification) string {
 			"available, so no writes are performed and rollout/health stay Unknown.", ref)
 	default:
 		return fmt.Sprintf("no delivery adapter is registered for %s: the built-in adapter set "+
-			"serves Deployment, StatefulSet and DaemonSet located by containerNames (ADR-006); "+
+			"serves Deployment, StatefulSet, DaemonSet, Job and CronJob located by containerNames (ADR-006); "+
 			"third-party kinds require imageFields plus the generic resolver. Extending the "+
 			"built-in set requires a new ADR.", ref)
 	}

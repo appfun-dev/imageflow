@@ -8,7 +8,6 @@ rules:
   - ""
   resources:
   - configmaps
-  - pods
   verbs:
   - get
   - list
@@ -23,6 +22,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - secrets
   verbs:
   - get
@@ -30,8 +37,26 @@ rules:
   - apps
   resources:
   - daemonsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
   - deployments
   - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
   verbs:
   - get
   - list
@@ -47,11 +72,34 @@ rules:
   - list
   - watch
 - apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - authorization.k8s.io
   resources:
   - subjectaccessreviews
   verbs:
   - create
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - imageflow.appfun.dev
   resources:
@@ -75,11 +123,6 @@ rules:
   - imageflow.appfun.dev
   resources:
   - imagestreamimports/status
-  - imagestreammappings/status
-  - imagestreams/status
-  - imagestreamtags/status
-  - imagesubscriptions/status
-  - imagetags/status
   verbs:
   - get
   - patch
@@ -96,7 +139,68 @@ rules:
 - apiGroups:
   - imageflow.appfun.dev
   resources:
+  - imagestreammappings/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
   - imagestreams
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreams/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags
+  - imagetags
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagestreamtags/status
+  - imagetags/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
   - imagesubscriptions
   verbs:
   - get
@@ -105,7 +209,14 @@ rules:
 - apiGroups:
   - imageflow.appfun.dev
   resources:
-  - imagestreamtags
+  - imagesubscriptions/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
   - imagetags
   verbs:
   - create
@@ -115,3 +226,11 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - imageflow.appfun.dev
+  resources:
+  - imagetags/status
+  verbs:
+  - get
+  - patch
+  - update

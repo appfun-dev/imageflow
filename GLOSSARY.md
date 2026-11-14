@@ -47,8 +47,12 @@ _Avoid_: 裸用"目标资源"
 _Avoid_: 发布结果、部署记录
 
 **Outcome Stages**:
-端到端结果中必须分开建模与报告的阶段链：ImageResolved → ImageApplied → Rollout（Succeeded/Failed/Unknown）→ Health → BusinessValidation；禁止合并为单个 `Ready=True`。
+端到端结果中必须分开建模与报告的阶段链：ImageResolved → ImageApplied → Rollout/Completion（Succeeded/Failed/Unknown）→ Health → BusinessValidation；禁止合并为单个 `Ready=True`。长期运行 Kind（Deployment/StatefulSet/DaemonSet）使用 Rollout，批处理 Kind（Job/CronJob）使用 Completion（见 ADR-006 v1.6 修订）。
 _Avoid_: 裸用 Ready 作总体状态
+
+**Completion**:
+批处理 Workload（Job / CronJob）的终态判定语义，区别于长期运行服务的 Rollout。基于 condition-based 完成状态（Job conditions.type=Complete/Failed、completionTime）而非 replica-based rollout；Outcome Stages 中对应命名为 Completion（Succeeded/Failed/Unknown）。CronJob 的 Completion 跟踪其最近一次 Job 实例。详见 ADR-006 v1.6 修订。
+_Avoid_: 对 Job/CronJob 使用 Rollout 描述终态
 
 **Business Validation**:
 由外部验证/交付系统提供的端到端业务验收；不等同于 Kubernetes 健康状态。
@@ -80,7 +84,7 @@ _Avoid_: 变化检测器（作组件名时）
 协调订阅声明并更新目标 Workload 镜像字段的控制器；与 ImageSubscription 资源本身严格区分。
 
 **Built-in Workload Adapter**:
-在明确支持并测试过的内建 Workload Kind 中按容器名定位镜像字段的适配器；不得声称支持未实现/未测试的 GVK。v1 首批 = Deployment / StatefulSet / DaemonSet（ADR-006）；其余 Kind 如实报告 `Unsupported`。
+在明确支持并测试过的内建 Workload Kind 中按容器名定位镜像字段的适配器；不得声称支持未实现/未测试的 GVK。v1.6 内建 Kind = Deployment / StatefulSet / DaemonSet / Job / CronJob（ADR-006，v1.6 修订）；其余 Kind 如实报告 `Unsupported`。
 
 **Generic Image Field Resolver**:
 按配置的字段路径解析第三方 Workload 镜像字段的组件；不推断任意对象的语义正确性。

@@ -37,6 +37,7 @@ import (
 
 	testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -978,7 +979,7 @@ func TestObserverDetermineDeploymentHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDeployment); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1043,7 +1044,7 @@ func TestObserverDetermineStatefulSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindStatefulSet); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1108,7 +1109,7 @@ func TestObserverDetermineDaemonSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA); got != tc.want {
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDaemonSet); got != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
 			}
 		})
@@ -1143,7 +1144,7 @@ func TestObserverHealthRolloutGateBlocksEvaluation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(tc.rollout, pods, t11uRefA); got != imageflowv1alpha1.HealthUnknown {
+			if got := determineHealth(tc.rollout, pods, t11uRefA, observerKindDeployment); got != imageflowv1alpha1.HealthUnknown {
 				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got)
 			}
 		})
@@ -1252,14 +1253,18 @@ func TestObserverObservableBuiltinKindClassification(t *testing.T) {
 			TargetRef: t11uDeployRef(),
 		}, "", false},
 		{"third-party CRD is NOT observable", t11uEdgeGVK, edgeTarget, "", false},
-		{"excluded first-batch kind (batch/v1 Job) is NOT observable", schema.GroupVersionKind{
-			Group: "batch", Version: "v1", Kind: "Job",
-		}, imageflowv1alpha1.SubscriptionTarget{
+		{"job by container name is observable", batchv1.SchemeGroupVersion.WithKind(kindJob), imageflowv1alpha1.SubscriptionTarget{
 			TargetRef: imageflowv1alpha1.TargetReference{
 				APIVersion: "batch/v1", Kind: "Job", Namespace: t11uNamespace, Name: "t11u-job",
 			},
 			ContainerNames: []string{t11uContainer},
-		}, "", false},
+		}, observerKindJob, true},
+		{"cronjob by container name is observable", batchv1.SchemeGroupVersion.WithKind(kindCronJob), imageflowv1alpha1.SubscriptionTarget{
+			TargetRef: imageflowv1alpha1.TargetReference{
+				APIVersion: "batch/v1", Kind: "CronJob", Namespace: t11uNamespace, Name: "t11u-cronjob",
+			},
+			ContainerNames: []string{t11uContainer},
+		}, observerKindCronJob, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2225,5 +2230,621 @@ func TestObserverLabelMappings(t *testing.T) {
 	}
 	if got := observerEventReason(imageflowv1alpha1.RolloutSuperseded); got != EventReasonRolloutUnknown {
 		t.Fatalf("unmapped statuses must fall back to the unknown event reason: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T5: Job completion determination
+// ---------------------------------------------------------------------------
+
+const (
+	t11uJobName  = "t11u-job"
+	t11uBatchAPI = "batch/v1"
+)
+
+var t11uJobUID = types.UID("t11u-job-uid")
+
+func t11uJobRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uBatchAPI, Kind: kindJob,
+		Namespace: t11uNamespace, Name: t11uJobName,
+	}
+}
+
+func t11uJob(image string, st batchv1.JobStatus) *batchv1.Job {
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: t11uJobName,
+			UID: t11uJobUID, Generation: 1,
+		},
+		Spec: batchv1.JobSpec{
+			Template: t11uPodTemplate(image),
+		},
+		Status: st,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CronJob observation (T6): ownerReference-based Job discovery
+// ---------------------------------------------------------------------------
+
+const t11uCronJobName = "t11u-cronjob"
+
+var t11uCronJobUID = types.UID("t11u-cronjob-uid")
+
+func t11uCronJobRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uBatchAPI, Kind: kindCronJob,
+		Namespace: t11uNamespace, Name: t11uCronJobName,
+	}
+}
+
+func t11uCronJob(image string) *batchv1.CronJob {
+	return &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: t11uCronJobName,
+			UID: t11uCronJobUID, Generation: 1,
+		},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: t11uPodTemplate(image),
+				},
+			},
+		},
+	}
+}
+
+// t11uJobOwnedBy creates a Job owned by the CronJob via ownerReferences.
+func t11uJobOwnedBy(name, image string, cronJobUID types.UID, creationTime time.Time, st batchv1.JobStatus) *batchv1.Job {
+	isController := true
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: name,
+			UID:               types.UID(name + "-uid"),
+			CreationTimestamp: metav1.NewTime(creationTime),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: t11uBatchAPI, Kind: kindCronJob,
+				Name: t11uCronJobName, UID: cronJobUID,
+				Controller: &isController,
+			}},
+		},
+		Spec: batchv1.JobSpec{
+			Template: t11uPodTemplate(image),
+		},
+		Status: st,
+	}
+}
+
+func TestObserverDetermineCronJobCompletionStates(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name    string
+		cronJob *batchv1.CronJob
+		jobs    []*batchv1.Job // Jobs owned by the CronJob
+		target  imageflowv1alpha1.SubscriptionTarget
+		entry   imageflowv1alpha1.TargetDeliveryStatus
+		want    imageflowv1alpha1.RolloutStatus
+		wantSub string
+	}{
+		{
+			name:    "has one completed Job → Succeeded",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: &now,
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+		{
+			name:    "has one failed Job → Failed",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+						Reason: "BackoffLimitExceeded",
+					}},
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "BackoffLimitExceeded",
+		},
+		{
+			name:    "multiple Jobs → selects most recent by creationTimestamp",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				// Older Job: completed
+				t11uJobOwnedBy("t11u-cj-job-old", t11uRefA, t11uCronJobUID, t11uStart.Add(-2*time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: ptr.To(metav1.NewTime(t11uStart.Add(-time.Hour))),
+				}),
+				// Newer Job: failed — this should be selected
+				t11uJobOwnedBy("t11u-cj-job-new", t11uRefA, t11uCronJobUID, t11uStart.Add(-30*time.Minute), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+						Reason: "DeadlineExceeded",
+					}},
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "DeadlineExceeded",
+		},
+		{
+			name:    "no Jobs → Unknown with explanatory message",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs:    nil,
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "no Jobs scheduled yet",
+		},
+		{
+			// v1.6 spec §D4: image-match gate is skipped for CronJobs.
+			// The active Job reports Progressing regardless of image mismatch.
+			name:    "spec no longer holds desired image → Progressing (image gate skipped)",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Active:    1,
+					StartTime: &now,
+				}),
+			},
+			target:  t11uContainerTarget(t11uCronJobRef()),
+			entry:   t11uSeededEntry(t11uCronJobRef(), t11uRefB),
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "completion in progress",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{tc.cronJob}
+			for _, j := range tc.jobs {
+				objs = append(objs, j)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindCronJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, nil)
+			if det.status != tc.want {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
+			}
+			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
+				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestObserverDetermineJobCompletionStates(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name    string
+		job     *batchv1.Job
+		target  imageflowv1alpha1.SubscriptionTarget
+		entry   imageflowv1alpha1.TargetDeliveryStatus
+		want    imageflowv1alpha1.RolloutStatus
+		wantSub string
+	}{
+		{
+			name: "succeeded when Complete condition is True",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+				CompletionTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+		{
+			name: "failed when Failed condition is True",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+					Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit",
+				}},
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: "BackoffLimitExceeded",
+		},
+		{
+			name: "progressing when active pods exist",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Active:    1,
+				StartTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "active",
+		},
+		{
+			name:    "unknown when no conditions and no active pods",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "has not reported",
+		},
+		{
+			// v1.6 spec §D4: image-match gate is skipped for Jobs.
+			// The active Job reports Progressing regardless of image mismatch.
+			name:    "progressing when spec no longer holds desired image (image gate skipped)",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{Active: 1}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefB),
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "completion in progress",
+		},
+		{
+			name:    "unknown when declared container missing from template",
+			job:     t11uJob(t11uRefA, batchv1.JobStatus{Active: 1}),
+			target:  imageflowv1alpha1.SubscriptionTarget{TargetRef: t11uJobRef(), ContainerNames: []string{"ghost"}},
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "not present in the pod template",
+		},
+		{
+			name: "complete takes priority over failed when both present",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "DeadlineExceeded"},
+				},
+				CompletionTime: &now,
+			}),
+			target:  t11uContainerTarget(t11uJobRef()),
+			entry:   t11uSeededEntry(t11uJobRef(), t11uRefA),
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "completed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newT11uFixture(t, config.Config{}, tc.job)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.want {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.want)
+			}
+			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
+				t.Fatalf("message %q does not contain %q", det.message, tc.wantSub)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T7 (spec v1.6): completion-based health for Job/CronJob — health is derived
+// directly from rollout status, no pod-scan invoked.
+// ---------------------------------------------------------------------------
+
+func TestObserverDetermineJobHealthFromCompletion(t *testing.T) {
+	cases := []struct {
+		name    string
+		rollout imageflowv1alpha1.RolloutStatus
+		want    imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name:    "healthy when rollout succeeded",
+			rollout: imageflowv1alpha1.RolloutSucceeded,
+			want:    imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name:    "unhealthy when rollout failed",
+			rollout: imageflowv1alpha1.RolloutFailed,
+			want:    imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name:    "unknown when rollout progressing",
+			rollout: imageflowv1alpha1.RolloutProgressing,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+		{
+			name:    "unknown when rollout unknown",
+			rollout: imageflowv1alpha1.RolloutUnknown,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// For Job kind, determineHealth must NOT call scanPodsForHealth.
+			// We pass nil pods to prove no pod-scan occurs (it would panic on
+			// nil dereference if scanPodsForHealth were invoked).
+			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindJob)
+			if got != tc.want {
+				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
+					tc.rollout, observerKindJob, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestObserverDetermineCronJobHealthFromCompletion(t *testing.T) {
+	// CronJob health delegates to the same completion-based logic as Job.
+	// The observer treats CronJob identically to Job for health determination:
+	// health IS the completion result, no separate pod-level check needed.
+	cases := []struct {
+		name    string
+		rollout imageflowv1alpha1.RolloutStatus
+		want    imageflowv1alpha1.HealthStatus
+	}{
+		{
+			name:    "healthy when rollout succeeded",
+			rollout: imageflowv1alpha1.RolloutSucceeded,
+			want:    imageflowv1alpha1.HealthHealthy,
+		},
+		{
+			name:    "unhealthy when rollout failed",
+			rollout: imageflowv1alpha1.RolloutFailed,
+			want:    imageflowv1alpha1.HealthUnhealthy,
+		},
+		{
+			name:    "unknown when rollout progressing",
+			rollout: imageflowv1alpha1.RolloutProgressing,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+		{
+			name:    "unknown when rollout unknown",
+			rollout: imageflowv1alpha1.RolloutUnknown,
+			want:    imageflowv1alpha1.HealthUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindCronJob)
+			if got != tc.want {
+				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
+					tc.rollout, observerKindCronJob, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T8 (spec v1.6): completion-aware event messages for Job/CronJob — messages
+// use "completion of" language instead of "rollout of" for batch workloads.
+// ---------------------------------------------------------------------------
+
+func TestObserverCompletionAwareEventMessagesForJob(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name       string
+		job        *batchv1.Job
+		target     imageflowv1alpha1.SubscriptionTarget
+		entry      imageflowv1alpha1.TargetDeliveryStatus
+		wantStatus imageflowv1alpha1.RolloutStatus
+		wantMsgs   []string // substrings that must appear in the message
+	}{
+		{
+			name: "succeeded message includes completion time",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+				}},
+				CompletionTime: &now,
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutSucceeded,
+			wantMsgs:   []string{"completion of", "succeeded", "Job", t11uJobName, "completed at"},
+		},
+		{
+			name: "failed message includes failure reason",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{{
+					Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+					Reason: "BackoffLimitExceeded",
+				}},
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutFailed,
+			wantMsgs:   []string{"completion of", "failed", "Job", t11uJobName, "failed with reason", "BackoffLimitExceeded"},
+		},
+		{
+			name: "progressing message includes active-since time",
+			job: t11uJob(t11uRefA, batchv1.JobStatus{
+				Active:    1,
+				StartTime: &now,
+			}),
+			target:     t11uContainerTarget(t11uJobRef()),
+			entry:      t11uSeededEntry(t11uJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutProgressing,
+			wantMsgs:   []string{"completion in progress", "Job", t11uJobName, "active since"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newT11uFixture(t, config.Config{}, tc.job)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.wantStatus {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.wantStatus)
+			}
+			for _, want := range tc.wantMsgs {
+				if !strings.Contains(det.message, want) {
+					t.Errorf("message %q missing substring %q", det.message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestObserverCompletionAwareEventMessagesForCronJob(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	cases := []struct {
+		name       string
+		cronJob    *batchv1.CronJob
+		jobs       []*batchv1.Job
+		target     imageflowv1alpha1.SubscriptionTarget
+		entry      imageflowv1alpha1.TargetDeliveryStatus
+		wantStatus imageflowv1alpha1.RolloutStatus
+		wantMsgs   []string
+	}{
+		{
+			name:    "delegation message for completed Job",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-1", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Hour), batchv1.JobStatus{
+					Conditions: []batchv1.JobCondition{{
+						Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+					}},
+					CompletionTime: &now,
+				}),
+			},
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutSucceeded,
+			wantMsgs:   []string{"observing most recent Job", "for CronJob", t11uCronJobName, "completion of", "succeeded"},
+		},
+		{
+			name:       "no Jobs scheduled message",
+			cronJob:    t11uCronJob(t11uRefA),
+			jobs:       nil, // no Jobs
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutUnknown,
+			wantMsgs:   []string{"no Jobs scheduled yet", "CronJob", t11uCronJobName, "completion stays Unknown"},
+		},
+		{
+			name:    "delegation message for progressing Job",
+			cronJob: t11uCronJob(t11uRefA),
+			jobs: []*batchv1.Job{
+				t11uJobOwnedBy("t11u-cj-job-active", t11uRefA, t11uCronJobUID, t11uStart.Add(-time.Minute), batchv1.JobStatus{
+					Active:    1,
+					StartTime: &now,
+				}),
+			},
+			target:     t11uContainerTarget(t11uCronJobRef()),
+			entry:      t11uSeededEntry(t11uCronJobRef(), t11uRefA),
+			wantStatus: imageflowv1alpha1.RolloutProgressing,
+			wantMsgs:   []string{"observing most recent Job", "for CronJob", t11uCronJobName, "completion in progress"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{tc.cronJob}
+			for _, j := range tc.jobs {
+				objs = append(objs, j)
+			}
+			f := newT11uFixture(t, config.Config{}, objs...)
+			gvk := batchv1.SchemeGroupVersion.WithKind(kindCronJob)
+			facts, found, err := f.reconciler.getWorkloadFacts(t11uCtx, gvk, tc.target.TargetRef)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts: found=%v err=%v", found, err)
+			}
+			pods, err := f.reconciler.listWorkloadPods(t11uCtx, facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, tc.target, tc.entry, pods)
+			if det.status != tc.wantStatus {
+				t.Fatalf("determineRollout = %q (%s), want %q", det.status, det.message, tc.wantStatus)
+			}
+			for _, want := range tc.wantMsgs {
+				if !strings.Contains(det.message, want) {
+					t.Errorf("message %q missing substring %q", det.message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestObserverReconcileJobSucceededDualNamespaceEvents(t *testing.T) {
+	now := metav1.NewTime(t11uStart)
+	job := t11uJob(t11uRefA, batchv1.JobStatus{
+		Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}},
+		CompletionTime: &now,
+	})
+	target := t11uContainerTarget(t11uJobRef())
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions: t11uAuthorizedConditions(),
+		Targets:    []imageflowv1alpha1.TargetDeliveryStatus{t11uSeededEntry(t11uJobRef(), t11uRefA)},
+		RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+			t11uSeededRecord(t11uJobRef(), t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+		},
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		ObservedGeneration: 1,
+	})
+	f := newT11uFixture(t, config.Config{}, job, sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("succeeded completion must not poll: RequeueAfter = %v", res.RequeueAfter)
+	}
+	got := f.getSub()
+	entry := got.Status.Targets[0]
+	if !entry.ImageApplied || entry.RolloutStatus != imageflowv1alpha1.RolloutSucceeded {
+		t.Fatalf("entry = %+v, want imageApplied=true + rollout Succeeded", entry)
+	}
+	// Health should be Healthy for completed Job (T7).
+	if entry.HealthStatus != imageflowv1alpha1.HealthHealthy {
+		t.Fatalf("healthStatus = %q, want Healthy for completed Job", entry.HealthStatus)
+	}
+
+	// Dual-namespace events with completion-aware message.
+	events := f.drainEvents()
+	succeeded := t11uEventsWith(events, EventReasonRolloutSucceeded)
+	if len(succeeded) != 2 {
+		t.Fatalf("events = %v, want exactly two RolloutSucceeded (subscription side + target side)", events)
+	}
+	for _, ev := range succeeded {
+		for _, want := range []string{
+			"Normal " + EventReasonRolloutSucceeded,
+			"completion of",
+			"succeeded",
+			"Job",
+			t11uJobName,
+			"completed at",
+		} {
+			if !strings.Contains(ev, want) {
+				t.Fatalf("event %q missing completion-aware fragment %q", ev, want)
+			}
+		}
 	}
 }

@@ -301,6 +301,7 @@ func (r *SubscriptionObserverReconciler) reader() client.Reader {
 
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets;daemonsets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs;cronjobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions/status,verbs=get;update;patch
@@ -594,7 +595,7 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// (evaluateTargetWithCUE above already planned their health
 		// transition, v1.3 behavior unchanged).
 		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
-			health := determineHealth(out.rollout, pods, entry.DesiredImage)
+			health := determineHealth(out.rollout, pods, entry.DesiredImage, facts.kind)
 			out.health = health
 			if entry.HealthStatus != health {
 				out.healthTransition = &healthTransition{
@@ -1030,8 +1031,26 @@ func (r *SubscriptionObserverReconciler) freshTargetObject(ctx context.Context, 
 	if err := r.reader().Get(ctx, key, obj); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log.FromContext(ctx).V(1).Info("observer uncached target re-get failed", "target", authz.FormatTarget(ref), "error", err)
+			return nil
 		}
-		return nil
+		// Uncached reader says NotFound. For short-lived workloads (e.g. Job
+		// with backoffLimit=0) the API server can transiently miss the object
+		// on a direct read while the informer cache still holds it. Fall back
+		// to the cached client; if it also misses, the object is genuinely
+		// gone and we skip the target-side Event. The Event message is fully
+		// determined by ev.message, so a cached read cannot introduce stale
+		// audit content — only recover an otherwise-lost emission.
+		if r.client == nil || r.client == r.reader() {
+			return nil // no distinct cached reader available
+		}
+		cached := &unstructured.Unstructured{}
+		cached.SetGroupVersionKind(schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind))
+		if err := r.client.Get(ctx, key, cached); err != nil {
+			log.FromContext(ctx).V(1).Info("observer target re-get failed on both uncached and cached readers",
+				"target", authz.FormatTarget(ref), "error", err)
+			return nil
+		}
+		return cached
 	}
 	return obj
 }

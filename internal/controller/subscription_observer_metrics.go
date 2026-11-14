@@ -52,6 +52,8 @@ const (
 	observerKindDeployment  = "deployment"
 	observerKindStatefulSet = "statefulset"
 	observerKindDaemonSet   = "daemonset"
+	observerKindJob         = "job"
+	observerKindCronJob     = "cronjob"
 	observerKindOther       = "other"
 )
 
