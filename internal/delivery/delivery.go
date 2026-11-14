@@ -310,7 +310,7 @@ func UnsupportedMessage(gvk schema.GroupVersionKind, c Classification) string {
 	switch c {
 	case ClassificationUnsupportedKind:
 		return fmt.Sprintf("%s is outside the built-in first batch (Deployment, StatefulSet, "+
-			"DaemonSet, CronJob): no rollout semantics are observable for this Kind, so the built-in "+
+			"DaemonSet, Job, CronJob): no rollout semantics are observable for this Kind, so the built-in "+
 			"adapter set refuses to process it (ADR-006). Extending the built-in set requires "+
 			"a new ADR.", ref)
 	case ClassificationNoPathAdapter:

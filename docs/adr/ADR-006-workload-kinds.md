@@ -1,4 +1,4 @@
-# ADR-006：内建 Workload 内建 Kind —— Deployment / StatefulSet / DaemonSet / Job / CronJob
+# ADR-006：内建 Workload Kind —— Deployment / StatefulSet / DaemonSet / Job / CronJob
 
 - 状态：Amended (v1.6)
 - 日期：2026-10-16（初版）；2026-11-12（修订）

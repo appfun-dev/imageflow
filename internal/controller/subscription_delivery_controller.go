@@ -241,8 +241,8 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch;update;patch;delete
-// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreams,verbs=get;list;watch
@@ -807,13 +807,13 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 			out.requeue = waitingStateRequeue
 			return out
 		case apierrors.IsInvalid(applyErr) && ref.Kind == "Job" && strings.Contains(applyErr.Error(), "field is immutable"):
-			// Job.spec.template is immutable after creation (v1.6 spec §D4).
+			// Job.spec.template is immutable after creation (v1.6 spec §D3).
 			// ImageFlow does NOT delete or recreate Jobs — that would exceed
-			// the never-deploys principle (ADR-005 §1). The SSA update is
-			// recorded as applied; the existing Job keeps its current image,
-			// and future Jobs (from CronJob scheduling or manual recreation)
-			// will pick up the new template.
-			r.metrics.applies.WithLabelValues(applyResultSuccess).Inc()
+			// the never-deploys principle (ADR-005 §1). The SSA write was
+			// rejected by the API server; the existing Job keeps its current
+			// image. Future Jobs (from CronJob scheduling or manual recreation)
+			// will pick up the new template. We record converged=true (no retry
+			// needed) but delivered=false because the field was NOT updated.
 		default:
 			out = out.transient(TargetReasonApplyFailed, fmt.Sprintf(
 				"server-side apply to %s failed: %v", authz.FormatTarget(ref), applyErr))
