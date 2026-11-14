@@ -195,10 +195,9 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 | `KindNotInstalled` | 目标 Kind 未安装（CRD 缺失） |
 | `Forbidden` | T8 授权门拒绝（创建者缺 update 权限）→ 补授权等复核 |
 
-**观察器（T11）**：`RolloutProgressing/RolloutSucceeded/RolloutFailed/RolloutUnknown`
-**只**出现在它治愈的 `recentDeliveries[].reason` 上（per-target entry Reason/Message
-永远是引擎面，R3 冻结契约）；rollout 的 WHY 走 `rolloutStatus` 字段本身 +
-双 ns 事件 + `StatusPolicyEvaluated` condition。
+**观察器（T11）**：
+- **Rollout 原因**（`RolloutProgressing/Succeeded/Failed/Unknown`）**只**出现在它治愈的 `recentDeliveries[].reason` 上；rollout 的 WHY 走 `rolloutStatus` 字段本身 + 双 ns 事件 + `StatusPolicyEvaluated` condition。
+- **Health 原因**（`AllContainersReady/NotReady/NoMatchingPods/WaitingForRollout/JobCompleted` 等，spec v1.5 D7）写入 per-target entry `Reason/Message`，但**仅在 entry 无引擎原因时**（`isEngineOwnedReason` 守卫）。投递引擎的 ImageApplied 阶段解释（T9 冻结集）始终优先。
 
 ### 导入失败码（12 值 = `Complete` reason = message 前缀 = `imageflow_import_tasks_total{reason}` 标签）
 

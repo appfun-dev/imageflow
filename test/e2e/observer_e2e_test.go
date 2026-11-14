@@ -905,8 +905,12 @@ spec:
 		}, "2m", "5s").Should(Succeed())
 	})
 
-	// TODO(v1.7): CronJob→Job delegation not yet implemented in the observer.
-	// The observer has RBAC for cronjobs but no ownerReference-based Job discovery.
+	// PIt: CronJob→Job delegation is implemented (getWorkloadFacts CronJob
+	// case + isOwnedBy, T6), but this e2e is pended because the CronJob
+	// controller's scheduling interval (1 min) plus Job completion plus
+	// observer reconciliation makes the test timing-sensitive in CI.
+	// Un-pend when CI runner latency is characterized or the schedule is
+	// shortened via a test-specific CronJob.
 	PIt("t11-e2e-cronjob-creates-job-observer-picks-up", func() {
 		t11eRegister(t11eCJMapping, t11eCJStream, t11ePauseRef)
 

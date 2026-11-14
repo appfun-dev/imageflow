@@ -979,8 +979,8 @@ func TestObserverDetermineDeploymentHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDeployment); got != tc.want {
-				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDeployment); got.status != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
 	}
@@ -1044,8 +1044,8 @@ func TestObserverDetermineStatefulSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindStatefulSet); got != tc.want {
-				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindStatefulSet); got.status != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
 	}
@@ -1109,8 +1109,8 @@ func TestObserverDetermineDaemonSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDaemonSet); got != tc.want {
-				t.Fatalf("determineHealth = %q, want %q", got, tc.want)
+			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDaemonSet); got.status != tc.want {
+				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
 	}
@@ -1144,8 +1144,8 @@ func TestObserverHealthRolloutGateBlocksEvaluation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(tc.rollout, pods, t11uRefA, observerKindDeployment); got != imageflowv1alpha1.HealthUnknown {
-				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got)
+			if got := determineHealth(tc.rollout, pods, t11uRefA, observerKindDeployment); got.status != imageflowv1alpha1.HealthUnknown {
+				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got.status)
 			}
 		})
 	}
@@ -2582,9 +2582,9 @@ func TestObserverDetermineJobHealthFromCompletion(t *testing.T) {
 			// We pass nil pods to prove no pod-scan occurs (it would panic on
 			// nil dereference if scanPodsForHealth were invoked).
 			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindJob)
-			if got != tc.want {
+			if got.status != tc.want {
 				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
-					tc.rollout, observerKindJob, got, tc.want)
+					tc.rollout, observerKindJob, got.status, tc.want)
 			}
 		})
 	}
@@ -2623,9 +2623,9 @@ func TestObserverDetermineCronJobHealthFromCompletion(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindCronJob)
-			if got != tc.want {
+			if got.status != tc.want {
 				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
-					tc.rollout, observerKindCronJob, got, tc.want)
+					tc.rollout, observerKindCronJob, got.status, tc.want)
 			}
 		})
 	}
@@ -2846,5 +2846,74 @@ func TestObserverReconcileJobSucceededDualNamespaceEvents(t *testing.T) {
 				t.Fatalf("event %q missing completion-aware fragment %q", ev, want)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Ticket #75: health reason/message persistence + engine ownership guard
+// ---------------------------------------------------------------------------
+
+func TestIsEngineOwnedReason(t *testing.T) {
+	engineReasons := []string{
+		TargetReasonApplied,
+		TargetReasonConflict,
+		TargetReasonUnsupported,
+		TargetReasonTargetNotFound,
+		TargetReasonContainerNotFound,
+		TargetReasonApplyForbidden,
+		TargetReasonApplyFailed,
+		TargetReasonSourceUnresolved,
+		TargetReasonInvalidImageReference,
+		TargetReasonInvalidTarget,
+		TargetReasonInvalidImageField,
+		TargetReasonKindNotInstalled,
+		TargetReasonForbidden,
+	}
+	for _, r := range engineReasons {
+		if !isEngineOwnedReason(r) {
+			t.Errorf("isEngineOwnedReason(%q) = false, want true", r)
+		}
+	}
+	nonEngine := []string{"", "AllContainersReady", "NotReady", "NoMatchingPods", "WaitingForRollout", "JobCompleted"}
+	for _, r := range nonEngine {
+		if isEngineOwnedReason(r) {
+			t.Errorf("isEngineOwnedReason(%q) = true, want false", r)
+		}
+	}
+}
+
+func TestHealthVerdictD6MessageFormats(t *testing.T) {
+	cases := []struct {
+		name    string
+		verdict healthVerdict
+		wantMsg string
+	}{
+		{
+			name: "healthy deployment",
+			verdict: scanPodsForHealth([]*corev1.Pod{{
+				ObjectMeta: metav1.ObjectMeta{Name: "p1"},
+				Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "app", Image: "img@sha256:aaa", Ready: true, RestartCount: 0,
+				}}},
+			}}, "img@sha256:aaa", "Deployment"),
+			wantMsg: "health of img@sha256:aaa is healthy per native Deployment status: all 1 containers ready, 0 total restarts",
+		},
+		{
+			name:    "unknown no pods",
+			verdict: scanPodsForHealth(nil, "img@sha256:aaa", "StatefulSet"),
+			wantMsg: "health of img@sha256:aaa is unknown: no pods found matching desired image",
+		},
+		{
+			name:    "rollout gate",
+			verdict: determineHealth(imageflowv1alpha1.RolloutProgressing, nil, "img@sha256:aaa", "Deployment"),
+			wantMsg: "health stage is not evaluated: rollout is Progressing, health assessment requires rollout Succeeded (ADR-005 §3)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.verdict.message != tc.wantMsg {
+				t.Errorf("message = %q, want %q", tc.verdict.message, tc.wantMsg)
+			}
+		})
 	}
 }
