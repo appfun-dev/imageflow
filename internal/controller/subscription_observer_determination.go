@@ -71,17 +71,15 @@ type rolloutDetermination struct {
 	message string
 }
 
-// The Health-stage verdict is a bare HealthStatus, deliberately NOT a
-// status/message pair like rolloutDetermination: ADR-005 §7.5 froze the
-// per-target status model (no healthReason/healthMessage fields), so a
-// computed health message had no persistence surface and was dead code.
-// The WHY of a health verdict travels on the rollout transition Events and
-// the StatusPolicyEvaluated Condition instead.
-//
-// TODO(v1.5 follow-up): persisting a per-target health reason/message
-// requires new API fields on TargetDeliveryStatus, which needs an ADR-005
-// amendment cycle; tracked separately. Spec v1.5 D6 message formats apply
-// once that surface exists.
+// healthVerdict carries the Health-stage outcome: status + diagnostic
+// reason/message per spec v1.5 D6. ADR-005 §7.5 includes reason/message
+// in the frozen per-target status model; TargetDeliveryStatus already has
+// Reason and Message fields ready to receive these values.
+type healthVerdict struct {
+	status  imageflowv1alpha1.HealthStatus
+	reason  string
+	message string
+}
 
 // workloadFacts carries the ADR-006 observation fields extracted from a FRESH
 // read of one built-in workload, normalized across the three kinds.
@@ -473,7 +471,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 		// For long-running workloads (Deployment/STS/DS), image mismatch
 		// blocks rollout reporting because the native status describes a
 		// different image than desired. For Jobs/CronJobs, completion
-		// semantics are independent of image matching (v1.6 spec §D4:
+		// semantics are independent of image matching (v1.6 spec §D3:
 		// ImageFlow does NOT delete or recreate Jobs; the existing Job
 		// keeps its current image). Report completion regardless.
 		return rolloutDetermination{
@@ -589,9 +587,9 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 //
 // A nil pod slice (list failure at the shared fetch) degrades to Unknown
 // (spec v1.5 D3): the observer never fabricates health it could not
-// observe. The function is pure and returns only the status — see the
-// package-level note on why the Health stage carries no message.
-func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string, kind string) imageflowv1alpha1.HealthStatus {
+// observe. The function is pure and returns a healthVerdict with D6-format
+// reason/message for persistence on TargetDeliveryStatus.
+func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string, kind string) healthVerdict {
 	// Job/CronJob health (T7, spec v1.6): completion-based — derived directly
 	// from the rollout verdict. No pod-scan is performed for batch workloads:
 	// the Job's completion result IS the health signal. A completed Job is
@@ -599,18 +597,34 @@ func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod
 	if kind == observerKindJob || kind == observerKindCronJob {
 		switch rollout {
 		case imageflowv1alpha1.RolloutSucceeded:
-			return imageflowv1alpha1.HealthHealthy
+			return healthVerdict{
+				status:  imageflowv1alpha1.HealthHealthy,
+				reason:  "JobCompleted",
+				message: fmt.Sprintf("health of %s is healthy per native %s status: job completed successfully", desiredImage, kind),
+			}
 		case imageflowv1alpha1.RolloutFailed:
-			return imageflowv1alpha1.HealthUnhealthy
+			return healthVerdict{
+				status:  imageflowv1alpha1.HealthUnhealthy,
+				reason:  "JobFailed",
+				message: fmt.Sprintf("health of %s is unhealthy per native %s status: job failed", desiredImage, kind),
+			}
 		default:
-			return imageflowv1alpha1.HealthUnknown
+			return healthVerdict{
+				status:  imageflowv1alpha1.HealthUnknown,
+				reason:  "WaitingForRollout",
+				message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout),
+			}
 		}
 	}
-	// Deployment/STS/DS: pod-scan based health (existing logic unchanged).
+	// Deployment/STS/DS: rollout gate check.
 	if rollout != imageflowv1alpha1.RolloutSucceeded {
-		return imageflowv1alpha1.HealthUnknown
+		return healthVerdict{
+			status:  imageflowv1alpha1.HealthUnknown,
+			reason:  "WaitingForRollout",
+			message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout),
+		}
 	}
-	return scanPodsForHealth(pods, desiredImage)
+	return scanPodsForHealth(pods, desiredImage, kind)
 }
 
 // listWorkloadPods lists the pods owned by this workload, filtered and
@@ -748,25 +762,52 @@ func containerImageMatches(cs corev1.ContainerStatus, desiredImage string) bool 
 	return false
 }
 
-func scanPodsForHealth(pods []*corev1.Pod, desiredImage string) imageflowv1alpha1.HealthStatus {
-	matched := false
+func scanPodsForHealth(pods []*corev1.Pod, desiredImage string, kind string) healthVerdict {
+	var (
+		matched       bool
+		readyCount    int
+		totalRestarts int32
+	)
 	for _, pod := range pods {
 		for _, cs := range allContainerStatuses(pod) {
 			if !containerImageMatches(cs, desiredImage) {
 				continue
 			}
 			matched = true
+			totalRestarts += cs.RestartCount
 			if !cs.Ready {
 				// Rules 3 and 4 are both Unhealthy and worst-case wins, so
-				// the first not-ready container decides the verdict.
-				return imageflowv1alpha1.HealthUnhealthy
+				// the first not-ready container decides the verdict (spec v1.5 D3).
+				// Reason uses a bounded observer-owned value; the raw kubelet
+				// state reason (CrashLoopBackOff, ImagePullBackOff, etc.) stays
+				// in the message only — per-target Reason is a closed vocabulary.
+				kubeletDetail := "not ready"
+				if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+					kubeletDetail = cs.State.Waiting.Reason
+				} else if cs.State.Terminated != nil && cs.State.Terminated.Reason != "" {
+					kubeletDetail = cs.State.Terminated.Reason
+				}
+				return healthVerdict{
+					status:  imageflowv1alpha1.HealthUnhealthy,
+					reason:  "NotReady",
+					message: fmt.Sprintf("health of %s is unhealthy: container %s in pod %s has restartCount=%d and is not ready (%s)", desiredImage, cs.Name, pod.Name, cs.RestartCount, kubeletDetail),
+				}
 			}
+			readyCount++
 		}
 	}
 	if !matched {
-		return imageflowv1alpha1.HealthUnknown
+		return healthVerdict{
+			status:  imageflowv1alpha1.HealthUnknown,
+			reason:  "NoMatchingPods",
+			message: fmt.Sprintf("health of %s is unknown: no pods found matching desired image", desiredImage),
+		}
 	}
-	return imageflowv1alpha1.HealthHealthy
+	return healthVerdict{
+		status:  imageflowv1alpha1.HealthHealthy,
+		reason:  "AllContainersReady",
+		message: fmt.Sprintf("health of %s is healthy per native %s status: all %d containers ready, %d total restarts", desiredImage, kind, readyCount, totalRestarts),
+	}
 }
 
 func ownerRefHasUID(refs []metav1.OwnerReference, uid types.UID) bool {

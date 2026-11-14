@@ -98,11 +98,13 @@ const (
 )
 
 // Observer-owned reasons (T11 extends the frozen T9 TargetReason* vocabulary —
-// engine reasons are never redefined). They explain the ROLLOUT stage and are
-// written ONLY onto recentDeliveries records the observer heals; per-target
-// entry Reason/Message remain the delivery engine's ImageApplied-stage
-// surface (the observer's WHY travels in Events + the StatusPolicyEvaluated
-// Condition + the rolloutStatus field itself).
+// engine reasons are never redefined). Rollout reasons are written onto
+// recentDeliveries records the observer heals. Health reasons (NotReady,
+// AllContainersReady, NoMatchingPods, WaitingForRollout, JobCompleted, etc.)
+// are written onto per-target entry Reason/Message when the entry has no
+// engine-owned reason (isEngineOwnedReason guard); the delivery engine's
+// ImageApplied-stage explanation takes priority. The observer's rollout WHY
+// also travels in Events + the StatusPolicyEvaluated Condition.
 const (
 	TargetReasonRolloutProgressing = "RolloutProgressing"
 	TargetReasonRolloutSucceeded   = "RolloutSucceeded"
@@ -142,9 +144,10 @@ const (
 const auditImageNoneRecorded = "none recorded"
 
 // observerReasonFor maps a rollout status to its observer-owned reason.
-// Since the T11 contract fix (issue #12 CI lane conflicts), these reasons
-// are written ONLY onto recentDeliveries records the observer heals — the
-// per-target entry Reason/Message remain the delivery engine's surface.
+// These reasons are written onto recentDeliveries records the observer heals.
+// Per-target entry Reason/Message carry health verdicts when no engine-owned
+// reason is present (see isEngineOwnedReason); rollout WHY also travels in
+// Events + the StatusPolicyEvaluated Condition.
 func observerReasonFor(status imageflowv1alpha1.RolloutStatus) string {
 	switch status {
 	case imageflowv1alpha1.RolloutProgressing:
@@ -390,12 +393,16 @@ type observerOutcome struct {
 	// must move — from CUE evaluation (T4) or from native pod-level health
 	// determination (spec v1.5 D1).
 	healthTransition *healthTransition
+	// healthReason is the machine-readable reason for the health verdict
+	// (spec v1.5 D6), persisted to TargetDeliveryStatus.Reason when health
+	// evaluation runs. Distinct from the delivery engine's Reason which
+	// explains the ImageApplied stage.
+	healthReason string
+	// healthMessage is the human-readable explanation for the health verdict
+	// (spec v1.5 D6/D7), persisted to TargetDeliveryStatus.Message.
+	healthMessage string
 	// detMessage is the determination detail (native status summary or the
-	// honest-Unknown contract text) carried on the planned Event. The
-	// per-target Reason/Message stay owned by the delivery engine (they
-	// explain the ImageApplied stage — T9/T10 contract); the observer's WHY
-	// travels in the dual-namespace Events, the StatusPolicyEvaluated
-	// Condition, and the rolloutStatus field itself.
+	// honest-Unknown contract text) carried on the planned Event.
 	detMessage string
 	// evalErrClass carries the CUE evaluation error class when evaluation
 	// failed for this target (T4, ADR-013 D6). Empty on success or when no
@@ -595,12 +602,14 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// (evaluateTargetWithCUE above already planned their health
 		// transition, v1.3 behavior unchanged).
 		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
-			health := determineHealth(out.rollout, pods, entry.DesiredImage, facts.kind)
-			out.health = health
-			if entry.HealthStatus != health {
+			hv := determineHealth(out.rollout, pods, entry.DesiredImage, facts.kind)
+			out.health = hv.status
+			out.healthReason = hv.reason
+			out.healthMessage = hv.message
+			if entry.HealthStatus != hv.status {
 				out.healthTransition = &healthTransition{
 					from: entry.HealthStatus,
-					to:   health,
+					to:   hv.status,
 				}
 			}
 		}
@@ -730,6 +739,8 @@ func (r *SubscriptionObserverReconciler) evaluateTargetWithCUE(
 			}
 		}
 		out.health = healthStatus
+		out.healthReason = result.Reason
+		out.healthMessage = result.Message
 	}
 }
 
@@ -866,11 +877,12 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 		// it stays Unknown (ADR-005 §4).
 		transition.healthSamples = append(transition.healthSamples, observerHealthLabel(entry.HealthStatus))
 	}
-	// Apply health transitions (CUE evaluation, T4/ADR-013 D3; native health
-	// determination, spec v1.5 D1).
+	// Apply health transitions and persist reason/message (CUE evaluation,
+	// T4/ADR-013 D3; native health determination, spec v1.5 D1/D7).
 	for i := range outcomes {
 		out := &outcomes[i]
-		if out.healthTransition == nil {
+		// Skip targets where no health evaluation ran this pass.
+		if out.healthReason == "" && out.healthMessage == "" && out.healthTransition == nil {
 			continue
 		}
 		idx := findTargetEntry(computed.Targets, out.ref)
@@ -878,10 +890,24 @@ func (r *SubscriptionObserverReconciler) applyObserverOutcomes(fresh *imageflowv
 			continue
 		}
 		entry := &computed.Targets[idx]
-		if entry.HealthStatus != out.healthTransition.from {
-			continue // stale plan
+		// Apply status transition with CAS guard FIRST, so reason/message
+		// are only persisted when the status write succeeds (or no transition
+		// was needed). This avoids a transient inconsistent pair where a new
+		// reason/message accompanies a stale HealthStatus.
+		if out.healthTransition != nil {
+			if entry.HealthStatus != out.healthTransition.from {
+				continue // stale plan — skip both status and reason/message
+			}
+			entry.HealthStatus = out.healthTransition.to
 		}
-		entry.HealthStatus = out.healthTransition.to
+		// Persist health reason/message when health was evaluated (spec v1.5 D7).
+		// Engine-owned reasons (TargetReasonApplied, Forbidden, Conflict, etc.)
+		// take priority: the observer only writes when the entry has no reason
+		// or already carries an observer-written health reason.
+		if (out.healthReason != "" || out.healthMessage != "") && !isEngineOwnedReason(entry.Reason) {
+			entry.Reason = out.healthReason
+			entry.Message = out.healthMessage
+		}
 	}
 }
 
@@ -1281,6 +1307,31 @@ func (r *SubscriptionObserverReconciler) subsForConfigMap(ctx context.Context, o
 		}
 	}
 	return requests
+}
+
+// isEngineOwnedReason reports whether the given Reason string belongs to the
+// delivery engine's ImageApplied-stage vocabulary (T9 frozen set). When true,
+// the observer must NOT overwrite entry.Reason/Message with health verdicts —
+// the engine's explanation takes priority. Health reasons are written only when
+// the entry has no reason or already carries an observer-written value.
+func isEngineOwnedReason(reason string) bool {
+	switch reason {
+	case TargetReasonApplied,
+		TargetReasonConflict,
+		TargetReasonUnsupported,
+		TargetReasonTargetNotFound,
+		TargetReasonContainerNotFound,
+		TargetReasonApplyForbidden,
+		TargetReasonApplyFailed,
+		TargetReasonSourceUnresolved,
+		TargetReasonInvalidImageReference,
+		TargetReasonInvalidTarget,
+		TargetReasonInvalidImageField,
+		TargetReasonKindNotInstalled,
+		TargetReasonForbidden:
+		return true
+	}
+	return false
 }
 
 // compile-time interface guards
