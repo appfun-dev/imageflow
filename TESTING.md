@@ -647,3 +647,19 @@ Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -ski
 - **CUE priority**：envtest `TestCUEEvalEnvtestHappyPath` 与单元测试 `TestObserverHealthCUEPriorityOverNative` 验证 healthKey 存在时 CUE 评估生效；
 - **Pod-level signals**：`scanPodsForHealth` 的 container Ready + RestartCount 逻辑由 per-kind verdict matrix 直接覆盖（含 zero-restart not-ready → Unhealthy，spec D3 row 4）；
 - **Worst-case aggregation**：多 pod 场景的最差聚合由 Deployment verdict matrix 的 worst-case 用例覆盖。
+
+## Target 规范键（v1.7-01，#78）
+
+### 单元测试（`api/v1alpha1/common_types_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestCanonicalTargetKeyFormat` | name 形态键编码为 `apiVersion/kind/namespace/name` 四元组（`/` 连接） | 已实现 |
+| `TestCanonicalTargetKeyUniqueness` | 四字段逐一替换均产出不同键（单射） | 已实现 |
+| `TestCanonicalTargetKeyStability` | 同输入多次调用输出一致（稳定性） | 已实现 |
+
+### 覆盖率要点
+
+- **改造点收敛**：生产代码全部 `TargetReference` map key / `==` 比较（12 处）统一走 `CanonicalTargetKey`，终扫 grep 无残留；
+- **既有指纹兼容**：`mirror_synthesis.go` 的 `targetRefKey` 委托 `CanonicalTargetKey`，编码逐字节一致，事件去重指纹不变；
+- **回归兜底**：12 处改造点的外部行为由既有 controller/authz/webhook 单测与 envtest 套件保持绿来兜底。
