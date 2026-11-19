@@ -172,6 +172,12 @@ const (
 	// TargetReasonKindNotInstalled means the target GVK is not served by the
 	// cluster (CRD absent); waiting state, mirrors the T8 gate vocabulary.
 	TargetReasonKindNotInstalled = "KindNotInstalled"
+	// TargetReasonMatchLimitExceeded reports a selector target whose
+	// effective match set exceeded --selector-match-limit (ADR-014 decision
+	// 7, issue #83): the matches beyond the bound are NOT delivered and the
+	// target itself reports Failed with a Warning Event naming the bound and
+	// the observed count.
+	TargetReasonMatchLimitExceeded = "MatchLimitExceeded"
 )
 
 // Event reasons of the delivery surface (Event.reason vocabulary). Every
@@ -371,6 +377,12 @@ func NewSubscriptionDeliveryReconciler(
 	}
 	if metrics == nil {
 		metrics = newDeliveryMetrics()
+	}
+	if cfg.SelectorMatchLimit <= 0 {
+		// Zero-value configs (tests, embedders) fall back to the documented
+		// default so the hard bound is always positive — a limit of 0 would
+		// reject every match. Single normalization point (issue #83).
+		cfg.SelectorMatchLimit = config.DefaultSelectorMatchLimit
 	}
 	return &SubscriptionDeliveryReconciler{
 		client:    cl,
@@ -770,7 +782,10 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 // membership (server-side label filtering, terminal objects excluded), and
 // every matched object goes through the exact same per-object write contract
 // as a named target. Zero matches produce zero outcomes — no entry, no
-// event (the NoMatches status surface is #82's scope).
+// event (the NoMatches status surface is #82's scope). The effective match
+// set is bounded by --selector-match-limit (issue #83, ADR-014 decision 7):
+// matches beyond the bound are not delivered and the target reports
+// Failed/MatchLimitExceeded with a Warning event.
 func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
@@ -803,7 +818,30 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	if len(names) == 0 {
 		return nil
 	}
-	outcomes := make([]deliveryOutcome, 0, len(names))
+	// Hard match limit (issue #83, ADR-014 decision 7): the resolver already
+	// excluded terminal objects, so len(names) is the effective match set
+	// that counts against the quota. Names come back in sorted order, so the
+	// truncation deterministically keeps the first limit entries and the rest
+	// are never delivered. The selector-keyed outcome reports
+	// Failed/MatchLimitExceeded; its Warning event rides the planEffects
+	// reasonChanged path and stops repeating once persisted.
+	observed := len(names)
+	limit := r.config.SelectorMatchLimit
+	exceeded := observed > limit
+	if exceeded {
+		names = names[:limit]
+	}
+	outcomes := make([]deliveryOutcome, 0, len(names)+1)
+	if exceeded {
+		limitOut := base.failed(TargetReasonMatchLimitExceeded, fmt.Sprintf(
+			"selector target %s matched %d objects, over the hard limit of %d "+
+				"(--selector-match-limit): delivered the first %d in sorted name order, "+
+				"the remaining %d are NOT delivered; completed objects never count toward the quota",
+			authz.FormatTarget(ref), observed, limit, limit, observed-limit))
+		failed := imageflowv1alpha1.RolloutFailed
+		limitOut.rolloutSet = &failed
+		outcomes = append(outcomes, limitOut)
+	}
 	for _, name := range names {
 		objectRef := ref
 		objectRef.Name = name
