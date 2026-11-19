@@ -17,6 +17,9 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"sort"
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -117,7 +120,11 @@ const (
 )
 
 // TargetReference locates a workload object to receive image updates.
-// All four fields are required so a target is always unambiguous (design §7.2).
+// APIVersion, Kind and Namespace are required so a target is always
+// unambiguous (design §7.2). ADR-014 (v1.7) makes the object location
+// two-formed: exactly one of Name (Named Target) or LabelSelector
+// (Selector Target) must be set; the validating webhook enforces the
+// mutual exclusion and rejects empty selectors.
 type TargetReference struct {
 	// APIVersion of the target object, e.g. apps/v1.
 	// +kubebuilder:validation:Required
@@ -133,17 +140,29 @@ type TargetReference struct {
 
 	// Namespace of the target object. Targets may live in any namespace;
 	// cross-namespace access is authorized via SubjectAccessReview (ADR-003).
+	// The match domain of a Selector Target is exactly this namespace
+	// (ADR-014).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Namespace string `json:"namespace"`
 
-	// Name of the target object.
-	// +kubebuilder:validation:Required
+	// Name of the target object (Named Target). Mutually exclusive with
+	// LabelSelector; optional since v1.7 (ADR-014, anchored by v1.6 spec
+	// §D2), enforced by the validating webhook.
+	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	Name string `json:"name"`
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// LabelSelector matches a dynamic set of same-Kind objects in Namespace
+	// (Selector Target, ADR-014). Mutually exclusive with Name and must not
+	// be empty; both rules are enforced by the validating webhook.
+	// +kubebuilder:validation:Optional
+	// +optional
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 
 // CanonicalTargetKey derives the canonical string key identifying one target.
@@ -152,10 +171,63 @@ type TargetReference struct {
 // identity rule lives in exactly one place.
 //
 // The name form encodes the apiVersion/kind/namespace/name four-tuple joined
-// with "/". ADR-014 (v1.7) adds the mutually exclusive labelSelector form;
-// this function is the single extension point that will encode it.
+// with "/". ADR-014 (v1.7) adds the mutually exclusive labelSelector form and
+// this function is its single encoding extension point: when LabelSelector is
+// set, the key is the apiVersion/kind/namespace three-tuple followed by
+// "/selector(<body>)", where <body> is the deterministic canonical encoding
+// of the selector (see canonicalSelectorEncoding). The "selector(" wrapper
+// carries characters a DNS-subdomain name can never contain, so the two
+// location forms never collide.
 func CanonicalTargetKey(ref TargetReference) string {
+	if ref.LabelSelector != nil {
+		return ref.APIVersion + "/" + ref.Kind + "/" + ref.Namespace +
+			"/selector(" + canonicalSelectorEncoding(ref.LabelSelector) + ")"
+	}
 	return ref.APIVersion + "/" + ref.Kind + "/" + ref.Namespace + "/" + ref.Name
+}
+
+// canonicalSelectorEncoding renders a LabelSelector deterministically:
+// matchLabels sorted by key rendered as "key=value", then matchExpressions
+// sorted by (key, operator, values) rendered as "key Operator v1,v2" with
+// values sorted; entries joined with ";". Sorting is required because
+// matchLabels is a Go map (random iteration order) and matchExpressions is a
+// user-ordered slice — two semantically identical selectors must derive the
+// same canonical target key (ADR-014 extension point, issue #79).
+func canonicalSelectorEncoding(sel *metav1.LabelSelector) string {
+	entries := make([]string, 0, len(sel.MatchLabels)+len(sel.MatchExpressions))
+
+	keys := make([]string, 0, len(sel.MatchLabels))
+	for key := range sel.MatchLabels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		entries = append(entries, key+"="+sel.MatchLabels[key])
+	}
+
+	expressions := make([]metav1.LabelSelectorRequirement, len(sel.MatchExpressions))
+	copy(expressions, sel.MatchExpressions)
+	sort.Slice(expressions, func(i, j int) bool {
+		if expressions[i].Key != expressions[j].Key {
+			return expressions[i].Key < expressions[j].Key
+		}
+		if expressions[i].Operator != expressions[j].Operator {
+			return expressions[i].Operator < expressions[j].Operator
+		}
+		return strings.Join(expressions[i].Values, ";") < strings.Join(expressions[j].Values, ";")
+	})
+	for _, expression := range expressions {
+		values := make([]string, len(expression.Values))
+		copy(values, expression.Values)
+		sort.Strings(values)
+		entry := expression.Key + " " + string(expression.Operator)
+		if len(values) > 0 {
+			entry += " " + strings.Join(values, ",")
+		}
+		entries = append(entries, entry)
+	}
+
+	return strings.Join(entries, ";")
 }
 
 // StatusPolicyRef points at a CUE status policy stored in a ConfigMap (ADR-005 §4).

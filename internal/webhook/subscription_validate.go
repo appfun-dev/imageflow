@@ -298,11 +298,35 @@ func validateSourceRef(p *field.Path, src imageflowv1alpha1.SubscriptionSourceRe
 }
 
 // validateTarget enforces the per-target locator contract: exactly one of
-// containerNames / imageFields (mutual exclusion, no default guessing), the
-// built-in Kind binding to containerNames (ADR-006 + spec decision 6), and the
-// full grammar/duplicate/overlap validation of imageFields (ADR-005).
+// name / labelSelector (object location, ADR-014), exactly one of
+// containerNames / imageFields (field location, no default guessing), the
+// built-in Kind binding to containerNames (ADR-006 + spec decision 6), and
+// the full grammar/duplicate/overlap validation of imageFields (ADR-005).
 func validateTarget(p *field.Path, t *imageflowv1alpha1.SubscriptionTarget) field.ErrorList {
 	var errs field.ErrorList
+
+	// Object location (ADR-014): exactly one of name / labelSelector — Named
+	// Target or Selector Target — and a selector must not be empty (an empty
+	// selector would match every object of the Kind in the namespace).
+	targetRefPath := p.Child("targetRef")
+	hasName := t.TargetRef.Name != ""
+	hasSelector := t.TargetRef.LabelSelector != nil
+	switch {
+	case hasName && hasSelector:
+		errs = append(errs, field.Forbidden(targetRefPath.Child("labelSelector"),
+			"name and labelSelector are mutually exclusive: a target locates objects by exactly one"+
+				" form — Named Target (name) or Selector Target (labelSelector) (ADR-014)"))
+	case !hasName && !hasSelector:
+		errs = append(errs, field.Required(targetRefPath.Child("name"),
+			"exactly one of name or labelSelector is required: Named Target locates one object by"+
+				" name, Selector Target matches a set by labelSelector (ADR-014)"))
+	case hasSelector && len(t.TargetRef.LabelSelector.MatchLabels) == 0 &&
+		len(t.TargetRef.LabelSelector.MatchExpressions) == 0:
+		errs = append(errs, field.Invalid(targetRefPath.Child("labelSelector"), t.TargetRef.LabelSelector,
+			"must not be empty: an empty selector matches every object of the Kind in the namespace;"+
+				" declare matchLabels and/or matchExpressions (ADR-014)"))
+	}
+
 	hasContainers := len(t.ContainerNames) > 0
 	hasFields := len(t.ImageFields) > 0
 

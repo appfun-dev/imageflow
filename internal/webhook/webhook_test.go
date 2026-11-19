@@ -173,6 +173,28 @@ func TestValidateSubscriptionShapeAccepts(t *testing.T) {
 			other.TargetRef.Namespace = "team-b"
 			sub.Spec.Targets = append(sub.Spec.Targets, other)
 		},
+		"selector target by matchLabels (ADR-014)": func(sub *imageflowv1alpha1.ImageSubscription) {
+			sub.Spec.Targets[0].TargetRef.Name = ""
+			sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "payments-api"},
+			}
+		},
+		"selector target by matchExpressions (ADR-014)": func(sub *imageflowv1alpha1.ImageSubscription) {
+			sub.Spec.Targets[0].TargetRef.Name = ""
+			sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"payments-api"}},
+				},
+			}
+		},
+		"third-party selector target by imageFields (ADR-014)": func(sub *imageflowv1alpha1.ImageSubscription) {
+			target := thirdPartyTarget()
+			target.TargetRef.Name = ""
+			target.TargetRef.LabelSelector = &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "payments-edge"},
+			}
+			sub.Spec.Targets = []imageflowv1alpha1.SubscriptionTarget{target}
+		},
 	}
 	for name, mutate := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -282,6 +304,36 @@ func TestValidateSubscriptionShapeRejects(t *testing.T) {
 				sub.Spec.Targets[0].ImageFields = []string{".spec.runtime", thirdPartyPath}
 			},
 			"overlaps imageFields[0]",
+		},
+		"name and labelSelector both set": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchLabels: map[string]string{"app": "payments-api"},
+				}
+			},
+			"name and labelSelector are mutually exclusive",
+		},
+		"neither name nor labelSelector set": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+			},
+			"exactly one of name or labelSelector is required",
+		},
+		"empty labelSelector": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{}
+			},
+			"must not be empty",
+		},
+		"labelSelector with empty maps only": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchLabels: map[string]string{},
+				}
+			},
+			"must not be empty",
 		},
 	}
 	for name, tc := range rejected {

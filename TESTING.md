@@ -663,3 +663,32 @@ Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -ski
 - **改造点收敛**：生产代码全部 `TargetReference` map key / `==` 比较（12 处）统一走 `CanonicalTargetKey`，终扫 grep 无残留；
 - **既有指纹兼容**：`mirror_synthesis.go` 的 `targetRefKey` 委托 `CanonicalTargetKey`，编码逐字节一致，事件去重指纹不变；
 - **回归兜底**：12 处改造点的外部行为由既有 controller/authz/webhook 单测与 envtest 套件保持绿来兜底。
+
+## Selector Target API + 准入校验（v1.7-02，#79）
+
+### 单元测试（`api/v1alpha1/common_types_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestCanonicalTargetKeySelectorFormat` | selector 形态键编码为 `apiVersion/kind/namespace/selector(<body>)`；body = matchLabels 按 key 排序 `k=v` + matchExpressions 按 (key, operator, values) 排序 `key Op v1,v2`（`;` 连接）；LabelSelector 非 nil 时恒编码 selector 形态 | 已实现 |
+| `TestCanonicalTargetKeySelectorUniqueness` | 四元组字段与 selector 子句（matchLabels 值、matchExpressions values/operator）逐一替换均产出不同键；同四元组的 name 形态与 selector 形态永不冲突 | 已实现 |
+| `TestCanonicalTargetKeySelectorStability` | matchExpressions 切片顺序与 matchLabels map 迭代顺序不改变键（排序后编码，确定性） | 已实现 |
+
+### 准入校验单元测试（`internal/webhook/webhook_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestValidateSubscriptionShapeAccepts/selector target by matchLabels (ADR-014)` | 合法 selector-only target（内建 Kind + containerNames）通过 | 已实现 |
+| `TestValidateSubscriptionShapeAccepts/selector target by matchExpressions (ADR-014)` | 仅 matchExpressions 的合法 selector target 通过 | 已实现 |
+| `TestValidateSubscriptionShapeAccepts/third-party selector target by imageFields (ADR-014)` | selector 形态与 imageFields 正交组合（第三方 Kind）通过 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/name and labelSelector both set` | name/labelSelector 同设拒绝（互斥，ADR-014） | 已实现 |
+| `TestValidateSubscriptionShapeRejects/neither name nor labelSelector set` | name/labelSelector 同缺拒绝（二选一必填） | 已实现 |
+| `TestValidateSubscriptionShapeRejects/empty labelSelector` | 空 selector（matchLabels 与 matchExpressions 均空）拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/labelSelector with empty maps only` | 仅含空 map 的 selector 同样按空 selector 拒绝 | 已实现 |
+
+### 覆盖率要点
+
+- **API 形态**：`TargetReference.LabelSelector *metav1.LabelSelector` 可选；`Name` kubebuilder 校验由 Required 改 Optional；CRD 清单（imagesubscriptions / imagestreamtags / imagetags 三处内嵌 targetRef）与 `zz_generated.deepcopy.go` 经 `make generate manifests` 重新生成；
+- **隐藏验收点（#78 扩展点兑现）**：selector target 进控制器前（#81），`CanonicalTargetKey` 已能区分两种定位形态且键确定性由排序保证；
+- **校验落点**：name/labelSelector 校验与 T3 containerNames/imageFields 互斥同处 `validateTarget`，风格一致（field.ErrorList 聚合、Invalid 422 面），CRD 层不加 CEL（沿用 spec decision 6 分工）；
+- **已知环境限制**：`test/integration` 的 `Admission webhooks [BeforeAll]`（webhook server StartedChecker 20s 超时）在 base commit 55c3e07e 上同样失败，属本机环境既有问题，与本改动无关；e2e 需 Podman，本机不跑。
