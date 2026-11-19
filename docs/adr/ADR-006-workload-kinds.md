@@ -64,7 +64,7 @@ Label Selector 多目标（一个 Subscription 通过 label selector 匹配多�
 
 ## 未解决问题
 
-- v1.7 Label Selector 多目标支持（一个 Subscription 匹配多个同 Kind Workload）。
+- v1.7 Label Selector 多目标支持（一个 Subscription 匹配多个同 Kind Workload）。→ **已由 ADR-014 解决**（v1.7，2026-11-20）。
 - v1.7+ 是否纳入 Argo Rollouts / Kruise 等渐进交付负载 —— 届时评估并修订本 ADR。
 
 ## 修订记录
@@ -87,3 +87,11 @@ v1.6 核心目标是扩展内建 Kind 覆盖至批处理工作负载。Job/CronJ
 **兼容性：**
 
 本次修订向后兼容。已有 Deployment/StatefulSet/DaemonSet 的行为不变；新增 Job/CronJob 支持不影响现有 Subscription。Label Selector 多目标功能原未在 v1 实现，推迟记录不改变任何现有行为。
+
+### v1.7 指针补注（2026-11-20）
+
+**变更内容：** 未解决问题中「v1.7 Label Selector 多目标支持」一项加解决指针，标注已由 ADR-014 解决。
+
+**修订理由：** v1.7 grilling（Wave A/B/C，15 题）完成，ADR-014（Label Selector 多目标 / Selector Target）Accepted；补注指针保持决策溯源链完整。
+
+**兼容性：** 纯文档指针补注，不改变任何现有行为。

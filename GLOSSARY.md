@@ -39,8 +39,15 @@ _Avoid_: trigger、webhook、镜像更新
 _Avoid_: 触发注解、订阅器
 
 **Subscription Target**:
-一条 ImageSubscription 要更新的 Workload 及其镜像字段定位方式：内建 Kind 按容器名，第三方 Kind 按 imageFields[] 路径；写入值仅为 digest 引用（`repo@sha256:...`，ADR-005）。独占粒度 = **image 字段**（SSA fieldManager，ADR-008）：同一 workload 的不同容器可分属不同订阅，同字段冲突先到先得（后来者 Conflict Condition、零写入）。
+一条 ImageSubscription 要更新的 Workload 及其镜像字段定位方式：内建 Kind 按容器名，第三方 Kind 按 imageFields[] 路径；写入值仅为 digest 引用（`repo@sha256:...`，ADR-005）。独占粒度 = **image 字段**（SSA fieldManager，ADR-008）：同一 workload 的不同容器可分属不同订阅，同字段冲突先到先得（后来者 Conflict Condition、零写入）。对象定位形态两种：**Named Target**（按 name 定位单个对象）与 **Selector Target**（按 labelSelector 动态匹配一组对象，v1.7，ADR-014）。
 _Avoid_: 裸用"目标资源"
+
+**Named Target**:
+Subscription Target 的 name 定位形态：`targetRef.name` 显式指定单个 Workload 对象；v1 起的默认形态，与 Selector Target 互斥（webhook 强制二选一，ADR-014）。
+
+**Selector Target**:
+Subscription Target 的 labelSelector 定位形态（v1.7，ADR-014）：`targetRef.labelSelector` 在同 namespace 内动态匹配同 GVK 的一组对象，与 name 互斥。持续 reconcile——新匹配对象立即投递当前 desired image，摘除 label 的对象保留已写镜像、不回收；结束态对象（Completed Pod/Job）完全排除出匹配集；匹配数硬上限默认 50（启动时可配置，超限 Failed/MatchLimitExceeded）；零匹配为合法空集合（Unknown/NoMatches）；冲突逐对象独立检测（先到先得原则逐对象延续）；status 为 per-target 最坏态聚合 + matched 计数，per-object 明细走 Events。
+_Avoid_: 动态目标集、Dynamic Target Set
 
 **Delivery Result**:
 一次镜像变化应用到一个目标的结果记录，横跨 ImageApplied / Rollout / Health 各独立阶段；v1 不是 CRD，存于 ImageSubscription.status 与 Events，其事件信息同时浮现到相关 ImageStreamTag / ImageTag 的 status 上。订阅整体态 = 跨目标最坏态聚合（Failed > Unknown > Progressing > Succeeded），无跨目标回滚；latest-wins：rollout 进行中新 tag 到达立即转投，旧投递记 Superseded；status 保留有界 3/5/5（ADR-008），完整历史交给 kube Events 与审计管道。

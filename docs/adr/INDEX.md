@@ -20,6 +20,7 @@
 | imageReferenceFormat、写入格式、枚举 | ADR-012 | imageReferenceFormat 枚举 | Accepted |
 | CUE Status Evaluator、状态评估、healthKey | ADR-013 | CUE Status Evaluator 实现 | Amended (v1.5) |
 | 原生健康判定、Pod 就绪、重启计数 | ADR-013 | （见上方 CUE Status Evaluator） | Amended (v1.5) |
+| Label Selector、多目标、Selector Target、动态匹配 | ADR-014 | Label Selector 多目标（Selector Target） | Accepted (v1.7) |
 
 ## 按版本查找
 
@@ -31,6 +32,8 @@
 | v1.3 | ADR-013 (CUE Status Evaluator) |
 | v1.4 | ADR-010 修订 (Secure Metrics) |
 | v1.5 | ADR-013 修订 (Native Health Determination) |
+| v1.6 | ADR-006 修订 (Job/CronJob 内建 Kind) |
+| v1.7 | ADR-014 (Label Selector 多目标 / Selector Target) |
 
 ## 使用说明
 
