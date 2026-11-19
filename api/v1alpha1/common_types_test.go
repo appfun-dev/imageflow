@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"regexp"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -233,5 +234,30 @@ func TestCanonicalTargetKeySelectorStability(t *testing.T) {
 		if CanonicalTargetKey(ordered) != key {
 			t.Fatalf("call %d changed the key, want stable %q", i, key)
 		}
+	}
+}
+
+// TestCanonicalTargetKeyFormsDisjoint pins the cross-form collision
+// invariant: the selector form wraps its body in "selector(...)", whose
+// parentheses the CRD-level DNS-subdomain pattern on Name (see
+// TargetReference.Name) can never admit. A name like "selector(app=x)"
+// must fail that pattern, so a Named Target can never share a canonical
+// key with a Selector Target.
+func TestCanonicalTargetKeyFormsDisjoint(t *testing.T) {
+	dnsSubdomain := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+	impossibleNames := []string{"selector(app=x)", "selector(app=x;tier=backend)", "selector()"}
+	for _, name := range impossibleNames {
+		if dnsSubdomain.MatchString(name) {
+			t.Fatalf("name %q passes the DNS-subdomain pattern and could collide with a selector-form key", name)
+		}
+	}
+
+	named := TargetReference{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "payments", Name: "api"}
+	selected := TargetReference{
+		APIVersion: "apps/v1", Kind: "Deployment", Namespace: "payments",
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}},
+	}
+	if CanonicalTargetKey(named) == CanonicalTargetKey(selected) {
+		t.Fatal("name-form and selector-form keys must never collide")
 	}
 }

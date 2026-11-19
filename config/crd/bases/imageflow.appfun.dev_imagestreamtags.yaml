@@ -311,9 +311,12 @@ spec:
                           description: |-
                             Name of the target object (Named Target). Mutually exclusive with
                             LabelSelector; optional since v1.7 (ADR-014, anchored by v1.6 spec
-                            §D2), enforced by the validating webhook.
+                            §D2), enforced by the validating webhook. The DNS-subdomain pattern
+                            additionally guarantees a name can never collide with the
+                            "selector(...)" canonical-key wrapper (see CanonicalTargetKey).
                           maxLength: 253
                           minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                           type: string
                         namespace:
                           description: |-

@@ -673,6 +673,7 @@ Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -ski
 | `TestCanonicalTargetKeySelectorFormat` | selector 形态键编码为 `apiVersion/kind/namespace/selector(<body>)`；body = matchLabels 按 key 排序 `k=v` + matchExpressions 按 (key, operator, values) 排序 `key Op v1,v2`（`;` 连接）；LabelSelector 非 nil 时恒编码 selector 形态 | 已实现 |
 | `TestCanonicalTargetKeySelectorUniqueness` | 四元组字段与 selector 子句（matchLabels 值、matchExpressions values/operator）逐一替换均产出不同键；同四元组的 name 形态与 selector 形态永不冲突 | 已实现 |
 | `TestCanonicalTargetKeySelectorStability` | matchExpressions 切片顺序与 matchLabels map 迭代顺序不改变键（排序后编码，确定性） | 已实现 |
+| `TestCanonicalTargetKeyFormsDisjoint` | 两形态键永不撞键：`selector(...)` 包装的括号被 Name 的 DNS-subdomain pattern 排除，`name: "selector(app=x)"` 过不了 schema 校验（review #79 c2 修复） | 已实现 |
 
 ### 准入校验单元测试（`internal/webhook/webhook_test.go`）
 

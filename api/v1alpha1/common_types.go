@@ -150,10 +150,13 @@ type TargetReference struct {
 
 	// Name of the target object (Named Target). Mutually exclusive with
 	// LabelSelector; optional since v1.7 (ADR-014, anchored by v1.6 spec
-	// §D2), enforced by the validating webhook.
+	// §D2), enforced by the validating webhook. The DNS-subdomain pattern
+	// additionally guarantees a name can never collide with the
+	// "selector(...)" canonical-key wrapper (see CanonicalTargetKey).
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +optional
 	Name string `json:"name,omitempty"`
 
