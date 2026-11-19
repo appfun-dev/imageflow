@@ -8,6 +8,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -325,6 +326,16 @@ func validateTarget(p *field.Path, t *imageflowv1alpha1.SubscriptionTarget) fiel
 		errs = append(errs, field.Invalid(targetRefPath.Child("labelSelector"), t.TargetRef.LabelSelector,
 			"must not be empty: an empty selector matches every object of the Kind in the namespace;"+
 				" declare matchLabels and/or matchExpressions (ADR-014)"))
+	case hasSelector:
+		// v1.7-03 (#80, #79 review handoff): deep selector syntax. A dirty
+		// key/value would flow into the canonical target key, so admission
+		// re-runs the API server's own selector rules (apimachinery) instead
+		// of inventing a parallel grammar: valid operator enum, In/NotIn
+		// require values, Exists/DoesNotExist forbid them, and every
+		// matchLabels/matchExpressions key and value must be a valid label.
+		errs = append(errs, metav1validation.ValidateLabelSelector(
+			t.TargetRef.LabelSelector, metav1validation.LabelSelectorValidationOptions{},
+			targetRefPath.Child("labelSelector"))...)
 	}
 
 	hasContainers := len(t.ContainerNames) > 0

@@ -42,6 +42,7 @@ const (
 type t8SarRecorder struct {
 	calls     int
 	users     []string
+	attrs     []*authorizationv1.ResourceAttributes
 	decide    func(sar *authorizationv1.SubjectAccessReview)
 	createErr error
 }
@@ -62,6 +63,7 @@ func newT8AuthorizerFixture(t *testing.T, opts authz.Options) (*subscriptionVali
 				}
 				rec.calls++
 				rec.users = append(rec.users, sar.Spec.User)
+				rec.attrs = append(rec.attrs, sar.Spec.ResourceAttributes.DeepCopy())
 				if rec.createErr != nil {
 					return rec.createErr
 				}
@@ -110,6 +112,22 @@ func t8Target(name, kind string) imageflowv1alpha1.SubscriptionTarget {
 			Kind:       kind,
 			Namespace:  "team-billing",
 			Name:       name,
+		},
+		ContainerNames: []string{"app"},
+	}
+}
+
+// t8SelectorTarget builds a Selector Target (ADR-014): same GVK/namespace
+// fixture as t8Target, located by matchLabels instead of a name.
+func t8SelectorTarget(kind string, matchLabels map[string]string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion: "apps/v1",
+			Kind:       kind,
+			Namespace:  "team-billing",
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: matchLabels,
+			},
 		},
 		ContainerNames: []string{"app"},
 	}
@@ -356,6 +374,207 @@ func TestShapeOnlyValidatorWithoutAuthorizer(t *testing.T) {
 
 	if _, err := validator.ValidateCreate(context.Background(), sub); err != nil {
 		t.Fatalf("zero-value validator must stay shape-only, got %v", err)
+	}
+}
+
+// --- v1.7-03 (#80): selector targets — namespace-level unnamed SAR ---
+
+// Selector targets re-verify the creator with a namespace-level SAR that
+// carries NO resourceName (ADR-014 决策 4): the admitted object set is
+// dynamic, so "update on <resource> in <namespace>" is the only honest
+// question to ask. The allowed direction must admit cleanly.
+func TestValidateCreateSelectorTargetChecksNamespaceScope(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	sub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "billing-api"}))
+
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
+
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want allowed", err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("SAR calls = %d, want exactly one namespace-level check", rec.calls)
+	}
+	attrs := rec.attrs[0]
+	if attrs == nil {
+		t.Fatal("SAR must carry resource attributes")
+	}
+	if attrs.Name != "" {
+		t.Errorf("SAR resourceAttributes.name = %q, want empty: a selector target authorizes "+
+			"namespace-wide — the SAR must not name a resource (#80)", attrs.Name)
+	}
+	if attrs.Verb != "update" || attrs.Resource != "deployments" || attrs.Namespace != "team-billing" {
+		t.Errorf("SAR attrs = %+v, want update on deployments in namespace team-billing", attrs)
+	}
+}
+
+// A denied namespace-level SAR must REJECT a selector target at admission
+// (#80: deny 即拒入). Named targets keep their advisory semantics because the
+// controller fails closed per object; a selector target has no per-object
+// check left — admission is the only unnamed gate.
+func TestValidateCreateSelectorTargetDeniedRejectsAdmission(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	rec.decide = func(sar *authorizationv1.SubjectAccessReview) {
+		sar.Status.Allowed = false
+		sar.Status.Reason = t8DenyMessage
+	}
+	sub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "billing-api"}))
+
+	_, err := validator.ValidateCreate(context.Background(), sub)
+
+	if err == nil {
+		t.Fatal("ValidateCreate() = nil; a denied namespace-level SAR must reject a selector " +
+			"target at admission (#80, ADR-014 决策 4)")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("error = %v, want Forbidden: the SAR answer is an authorization denial", err)
+	}
+	for _, want := range []string{t8CreatorUser, "selector", t8DenyMessage,
+		"apps/v1/Deployment/team-billing/selector(app=billing-api)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must mention %q", err.Error(), want)
+		}
+	}
+	if rec.calls != 1 || rec.attrs[0].Name != "" {
+		t.Errorf("SAR = %d call(s) with attrs %+v, want one unnamed namespace-level check",
+			rec.calls, rec.attrs)
+	}
+}
+
+// The namespace-level verdict is cached by (subject, GVK, namespace): two
+// selector targets on the same GVK+namespace — even with different selectors —
+// share one cached verdict, and a later subscription reuses it without any
+// new SAR call (#80: SAR 结果复用现有 TTL 缓存).
+func TestValidateCreateSelectorTargetsShareCachedNamespaceSAR(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	sub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "billing-api"}),
+		t8SelectorTarget("Deployment", map[string]string{"tier": "backend"}))
+
+	if _, err := validator.ValidateCreate(context.Background(), sub); err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want allowed", err)
+	}
+	if rec.calls != 1 {
+		t.Fatalf("SAR calls = %d, want 1: selector targets on the same GVK+namespace share "+
+			"one cached namespace-level verdict", rec.calls)
+	}
+
+	other := t8Subscription("billing-fleet-2", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "other"}))
+	if _, err := validator.ValidateCreate(context.Background(), other); err != nil {
+		t.Fatalf("ValidateCreate() error = %v, want allowed", err)
+	}
+	if rec.calls != 1 {
+		t.Errorf("SAR calls = %d, want still 1: the cached namespace-level verdict is reused "+
+			"within its TTL for any selector on the same GVK+namespace", rec.calls)
+	}
+}
+
+// An update that leaves spec.targets unchanged performs zero SAR work for
+// selector targets as well (#80 acceptance; the periodic re-verification owns
+// RBAC drift on an unchanged target set).
+func TestValidateUpdateSelectorTargetsUnchangedSkipsSAR(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	oldSub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "billing-api"}))
+	updated := oldSub.DeepCopy()
+	updated.Annotations = map[string]string{"team-note": "unrelated edit"}
+
+	if _, err := validator.ValidateUpdate(context.Background(), oldSub, updated); err != nil {
+		t.Fatalf("ValidateUpdate() error = %v, want allowed", err)
+	}
+	if rec.calls != 0 {
+		t.Errorf("SAR calls = %d, want 0 when spec.targets (selector form) is unchanged", rec.calls)
+	}
+}
+
+// The targets-change timing re-checks selector targets: an update whose new
+// selector target fails the namespace-level SAR is rejected, while the
+// unchanged named sibling still passes its own (allowed) check.
+func TestValidateUpdateSelectorTargetChangeDeniedRejects(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	rec.decide = func(sar *authorizationv1.SubjectAccessReview) {
+		if sar.Spec.ResourceAttributes.Name == "" {
+			sar.Status.Allowed = false
+			sar.Status.Reason = `User "t8-creator@example.com" cannot update resource "statefulsets"`
+			return
+		}
+		sar.Status.Allowed = true
+	}
+	oldSub := t8Subscription("billing-fleet", t8CreatorValue, t8Target(t8AppTarget, "Deployment"))
+	updated := oldSub.DeepCopy()
+	updated.Spec.Targets = append(updated.Spec.Targets,
+		t8SelectorTarget("StatefulSet", map[string]string{"app": "audit-log"}))
+
+	_, err := validator.ValidateUpdate(context.Background(), oldSub, updated)
+
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("error = %v, want Forbidden once a changed selector target fails the "+
+			"namespace-level SAR", err)
+	}
+	if !strings.Contains(err.Error(), "selector(app=audit-log)") {
+		t.Errorf("error %q must name the rejected selector target", err.Error())
+	}
+	if rec.calls != 2 {
+		t.Errorf("SAR calls = %d, want 2 (both targets re-checked on targets change)", rec.calls)
+	}
+}
+
+// Mixed denials: a denied named target keeps the advisory warning semantics
+// (controller-side Forbidden + zero writes) while the denied selector target
+// rejects the admission — both surfaces in one response.
+func TestValidateCreateMixedDeniedNamedWarnsSelectorRejects(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{})
+	rec.decide = func(sar *authorizationv1.SubjectAccessReview) {
+		sar.Status.Allowed = false
+		sar.Status.Reason = t8DenyMessage
+	}
+	sub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8Target(t8AppTarget, "Deployment"),
+		t8SelectorTarget("StatefulSet", map[string]string{"app": "audit-log"}))
+
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
+
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("error = %v, want Forbidden from the denied selector target", err)
+	}
+	namedAdvisory := false
+	for _, w := range warnings {
+		if strings.Contains(w, t8AppTarget) && strings.Contains(w, "ZERO writes") {
+			namedAdvisory = true
+		}
+	}
+	if !namedAdvisory {
+		t.Errorf("warnings = %v, want the named-denial advisory retained alongside the rejection",
+			warnings)
+	}
+}
+
+// An unresolved selector check (rate-limited here) stays advisory: only a
+// definitive deny rejects, because the controller's periodic re-verification
+// still fails closed for anything admission could not settle (#80 boundary).
+func TestValidateCreateSelectorTargetUnresolvedWarnsWithoutRejection(t *testing.T) {
+	validator, rec := newT8AuthorizerFixture(t, authz.Options{LimiterQPS: 1, LimiterBurst: 1})
+	sub := t8Subscription("billing-fleet", t8CreatorValue,
+		t8SelectorTarget("Deployment", map[string]string{"app": "billing-api"}),
+		t8SelectorTarget("StatefulSet", map[string]string{"app": "audit-log"}))
+
+	warnings, err := validator.ValidateCreate(context.Background(), sub)
+
+	if err != nil {
+		t.Fatalf("ValidateCreate() error = %v; an unresolved selector check stays advisory "+
+			"(the periodic re-verification fails closed)", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], authz.ReasonRateLimited) {
+		t.Fatalf("warnings = %v, want one warning carrying the RateLimited code", warnings)
+	}
+	if rec.calls != 1 {
+		t.Errorf("SAR calls = %d, want 1 (the shed check must not reach the API)", rec.calls)
 	}
 }
 
