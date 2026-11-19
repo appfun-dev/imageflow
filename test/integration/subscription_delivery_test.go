@@ -1100,4 +1100,202 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
 		})
 	})
+
+	// --- selector-target specs (issue #81, v1.7-04) --------------------------
+
+	Context("with selector targets running through the production registrar", Ordered, func() {
+		const (
+			t81sDeliveryName = "subscription-delivery-t81"
+			t81sStream       = "t81s-stream"
+			t81sRivalStream  = "t81s-rival-stream"
+			t81sSubName      = "t81s-selector-sub"
+			t81sRivalSubName = "t81s-rival-sub"
+			t81sWeb1         = "t81s-web-1"
+			t81sWeb2         = "t81s-web-2"
+			t81sWeb3         = "t81s-web-3"
+			t81sLabelKey     = "t81s-app"
+			t81sLabelValue   = "web"
+		)
+		var (
+			mgrCancel context.CancelFunc
+			mgrDone   chan struct{}
+		)
+
+		// t81sCreateLabeledDeployment creates a Deployment carrying
+		// object-level labels (the match domain of a selector target) plus
+		// its own immutable pod selector.
+		t81sCreateLabeledDeployment := func(name string, objLabels map[string]string,
+			containers ...[2]string) {
+			podLabels, podSelector := t9iSelector(name)
+			Expect(k8s.Create(ctx, &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns, Name: name, Labels: objLabels,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: ptr.To(int32(0)),
+					Selector: podSelector,
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+						Spec:       t9iPodSpec(containers...),
+					},
+				},
+			})).To(Succeed())
+		}
+
+		t81sSelectorTarget := func() imageflowv1alpha1.SubscriptionTarget {
+			return imageflowv1alpha1.SubscriptionTarget{
+				TargetRef: imageflowv1alpha1.TargetReference{
+					APIVersion: t9iAPIApps,
+					Kind:       t9iKindDeploy,
+					Namespace:  ns,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{t81sLabelKey: t81sLabelValue},
+					},
+				},
+				ContainerNames: []string{t9iContainer},
+			}
+		}
+
+		BeforeAll(func() {
+			scheme := runtime.NewScheme()
+			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+			Expect(imageflowv1alpha1.AddToScheme(scheme)).To(Succeed())
+			mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+				Scheme: scheme,
+				Metrics: metricsserver.Options{
+					BindAddress: "0",
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			// Delivery-only manager: the T8 gate surface is written directly
+			// by the lane (t9iAuthorize), keeping the assertions on the #81
+			// match-and-deliver path.
+			Expect(controller.RegisterSubscriptionDelivery(mgr, t81sDeliveryName,
+				controller.Options{Clock: clock.Real{}, Config: config.Config{}})).To(Succeed())
+			var mgrCtx context.Context
+			mgrCtx, mgrCancel = context.WithCancel(ctx)
+			mgrDone = make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(mgrDone)
+				Expect(mgr.Start(mgrCtx)).To(Succeed())
+			}()
+			Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
+		})
+
+		AfterAll(func() {
+			if mgrCancel != nil {
+				mgrCancel()
+				Eventually(mgrDone, 30*time.Second, 100*time.Millisecond).Should(BeClosed())
+			}
+		})
+
+		It("t81s-envtest-selector-fan-out-per-object-ssa-conflict-skip-and-label-driven-reconcile", func() {
+			t9iCreateStream(t81sStream, t9iDigestA)
+			t9iCreateStream(t81sRivalStream, t9iDigestB)
+			webLabels := map[string]string{t81sLabelKey: t81sLabelValue}
+			t81sCreateLabeledDeployment(t81sWeb1, webLabels, [2]string{t9iContainer, t9iPreImage})
+			t81sCreateLabeledDeployment(t81sWeb2, webLabels, [2]string{t9iContainer, t9iPreImage})
+			t81sCreateLabeledDeployment(t81sWeb3, nil, [2]string{t9iContainer, t9iPreImage})
+
+			By("a rival named-target subscription takes exclusive ownership of web-2 first")
+			rival := t9iNewSub(t81sRivalSubName, t81sRivalStream, "",
+				t9iContainerTarget(t9iKindDeploy, t81sWeb2, t9iContainer))
+			Expect(k8s.Create(ctx, rival)).To(Succeed())
+			t9iAuthorize(t81sRivalSubName)
+			Eventually(func(g Gomega) {
+				g.Expect(t9iGetDeploy(t81sWeb2).Spec.Template.Spec.Containers[0].Image).
+					To(Equal(t9iDigestB))
+				entry := t9iEntry(t9iGetSub(t81sRivalSubName), t81sWeb2)
+				g.Expect(entry).NotTo(BeNil())
+				g.Expect(entry.Reason).To(Equal(controller.TargetReasonApplied))
+			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			By("the selector subscription fans out per object: web-1 delivered, web-2 conflict-skipped")
+			selSub := t9iNewSub(t81sSubName, t81sStream, "", t81sSelectorTarget())
+			Expect(k8s.Create(ctx, selSub)).To(Succeed())
+			t9iAuthorize(t81sSubName)
+			Eventually(func(g Gomega) {
+				got := t9iGetSub(t81sSubName)
+				// Per-object name-form entries only — never a selector-form entry.
+				for _, entry := range got.Status.Targets {
+					g.Expect(entry.TargetRef.Name).NotTo(BeEmpty())
+					g.Expect(entry.TargetRef.LabelSelector).To(BeNil())
+				}
+				e1 := t9iEntry(got, t81sWeb1)
+				g.Expect(e1).NotTo(BeNil())
+				g.Expect(e1.Reason).To(Equal(controller.TargetReasonApplied))
+				g.Expect(e1.ImageApplied).To(BeTrue())
+				e2 := t9iEntry(got, t81sWeb2)
+				g.Expect(e2).NotTo(BeNil())
+				g.Expect(e2.Reason).To(Equal(controller.TargetReasonConflict),
+					"the contested object must be skipped, not force-applied")
+				g.Expect(e2.Message).To(ContainSubstring(t81sRivalSubName),
+					"the conflict entry must name the claimant")
+				g.Expect(got.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutConflict))
+				cond := t9iCondition(got, imageflowv1alpha1.ConditionTypeConflict)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(t9iGetDeploy(t81sWeb1).Spec.Template.Spec.Containers[0].Image).
+					To(Equal(t9iDigestA))
+				// Real managedFields: the selector sub owns web-1's image,
+				// the rival still owns web-2's (zero writes by the loser).
+				g.Expect(t9iOwnsContainerImage(
+					&t9iGetDeploy(t81sWeb1).ObjectMeta,
+					delivery.FieldManagerFor(ns, t81sSubName), t9iContainer)).To(BeTrue())
+				web2 := t9iGetDeploy(t81sWeb2)
+				g.Expect(web2.Spec.Template.Spec.Containers[0].Image).To(Equal(t9iDigestB))
+				g.Expect(t9iOwnsContainerImage(&web2.ObjectMeta,
+					delivery.FieldManagerFor(ns, t81sRivalSubName), t9iContainer)).To(BeTrue())
+				g.Expect(t9iOwnsContainerImage(&web2.ObjectMeta,
+					delivery.FieldManagerFor(ns, t81sSubName), t9iContainer)).To(BeFalse())
+			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			By("the Conflict Event lands on the subscription, naming the claimant")
+			// Failure transitions are subscription-side Warnings (the
+			// named-target conflict path #81 reuses — dual-namespace copies
+			// belong to the ImageApplied audit event only).
+			Eventually(func(g Gomega) {
+				var list corev1.EventList
+				g.Expect(k8s.List(ctx, &list, client.InNamespace(ns))).To(Succeed())
+				var found *corev1.Event
+				for i := range list.Items {
+					ev := &list.Items[i]
+					if ev.InvolvedObject.Name == t81sSubName &&
+						ev.Reason == controller.EventReasonDeliveryConflict {
+						found = ev
+						break
+					}
+				}
+				g.Expect(found).NotTo(BeNil(), "the selector sub must announce the terminal Conflict")
+				g.Expect(found.Type).To(Equal(corev1.EventTypeWarning))
+				g.Expect(found.Message).To(ContainSubstring(t81sRivalSubName),
+					"the event must carry the claimant identity")
+				g.Expect(found.Message).To(ContainSubstring(t81sWeb2),
+					"the event must name the contested object")
+			}, 60*time.Second, 500*time.Millisecond).Should(Succeed())
+
+			By("labeling web-3 joins the match set through the server-side-filtered informer")
+			web3 := t9iGetDeploy(t81sWeb3)
+			patch := client.MergeFrom(web3.DeepCopy())
+			web3.Labels = map[string]string{t81sLabelKey: t81sLabelValue}
+			Expect(k8s.Patch(ctx, web3, patch)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(t9iGetDeploy(t81sWeb3).Spec.Template.Spec.Containers[0].Image).
+					To(Equal(t9iDigestA), "the label event must drive a reconcile that delivers the new member")
+				entry := t9iEntry(t9iGetSub(t81sSubName), t81sWeb3)
+				g.Expect(entry).NotTo(BeNil())
+				g.Expect(entry.Reason).To(Equal(controller.TargetReasonApplied))
+			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			By("the contested object stays untouched by the losing subscription")
+			Consistently(func(g Gomega) {
+				g.Expect(t9iGetDeploy(t81sWeb2).Spec.Template.Spec.Containers[0].Image).
+					To(Equal(t9iDigestB))
+			}, 6*time.Second, 500*time.Millisecond).Should(Succeed())
+		})
+	})
 })

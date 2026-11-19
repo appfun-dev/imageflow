@@ -428,41 +428,119 @@ type rolloutTransition struct {
 func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *imageflowv1alpha1.ImageSubscription) observerPass {
 	pass := observerPass{}
 	seen := map[string]struct{}{}
+	namedKeys := map[string]struct{}{}
+	var selectorTargets []*imageflowv1alpha1.SubscriptionTarget
 	for i := range sub.Spec.Targets {
-		target := sub.Spec.Targets[i]
+		target := &sub.Spec.Targets[i]
 		targetKey := imageflowv1alpha1.CanonicalTargetKey(target.TargetRef)
 		if _, dup := seen[targetKey]; dup {
 			continue
 		}
 		seen[targetKey] = struct{}{}
-		pass.targetCount++
-		if target.StatusPolicyRef != nil {
-			pass.policyRefs++
+		if target.TargetRef.LabelSelector != nil && target.TargetRef.Name == "" {
+			selectorTargets = append(selectorTargets, target)
+		} else {
+			namedKeys[targetKey] = struct{}{}
 		}
-		out := r.observeTarget(ctx, sub, target)
-		if out == nil {
-			continue
-		}
-		pass.outcomes = append(pass.outcomes, *out)
-		pass.errs = append(pass.errs, out.errs...)
-		// Collect CUE evaluation result for the StatusPolicyEvaluated Condition (T4).
-		if out.evalErrClass != "" || (target.StatusPolicyRef != nil && hasCUEKeys(target.StatusPolicyRef)) {
-			pass.evalResults = append(pass.evalResults, targetEvalResult{
-				ref:       out.ref,
-				success:   out.evalErrClass == "",
-				errClass:  out.evalErrClass,
-				errReason: out.evalErrReason,
-				message:   out.detMessage,
-			})
-		}
-		if out.rollout == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
-			// Poll fallback: watches can be missed; an in-flight rollout is
-			// re-judged on a bounded cadence until it reaches a terminal
-			// result (native progressDeadlineSeconds bounds the Failed case).
-			pass.requeue = waitingStateRequeue
-		}
+		r.observeOneTarget(ctx, sub, target, &pass)
+	}
+	// Issue #81: selector targets produce one per-object status entry each
+	// (name-form ref). Observe each engine-written entry as if it were a
+	// named spec target carrying the selector target's locators and policy —
+	// third-party kinds and imageFields locators fall into the existing
+	// honest-Unknown path, built-in containerNames targets get native
+	// observation. Entries whose object left the match set are pruned by the
+	// engine's stale-pruning, not here.
+	if len(selectorTargets) > 0 {
+		r.observeSelectorEntries(ctx, sub, selectorTargets, namedKeys, &pass)
 	}
 	return pass
+}
+
+// observeOneTarget plans and accumulates the observation effects of one
+// effective target (a spec target, or a per-object entry synthesized from a
+// selector target).
+func (r *SubscriptionObserverReconciler) observeOneTarget(
+	ctx context.Context,
+	sub *imageflowv1alpha1.ImageSubscription,
+	target *imageflowv1alpha1.SubscriptionTarget,
+	pass *observerPass,
+) {
+	pass.targetCount++
+	if target.StatusPolicyRef != nil {
+		pass.policyRefs++
+	}
+	out := r.observeTarget(ctx, sub, *target)
+	if out == nil {
+		return
+	}
+	pass.outcomes = append(pass.outcomes, *out)
+	pass.errs = append(pass.errs, out.errs...)
+	// Collect CUE evaluation result for the StatusPolicyEvaluated Condition (T4).
+	if out.evalErrClass != "" || (target.StatusPolicyRef != nil && hasCUEKeys(target.StatusPolicyRef)) {
+		pass.evalResults = append(pass.evalResults, targetEvalResult{
+			ref:       out.ref,
+			success:   out.evalErrClass == "",
+			errClass:  out.evalErrClass,
+			errReason: out.evalErrReason,
+			message:   out.detMessage,
+		})
+	}
+	if out.rollout == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
+		// Poll fallback: watches can be missed; an in-flight rollout is
+		// re-judged on a bounded cadence until it reaches a terminal
+		// result (native progressDeadlineSeconds bounds the Failed case).
+		pass.requeue = waitingStateRequeue
+	}
+}
+
+// observeSelectorEntries observes every per-object status entry the engine
+// wrote for a selector target (issue #81). An entry belongs to a selector
+// target when it is name-form (per-object), not owned by a named spec
+// target, and shares the selector target's class (apiVersion/kind/namespace)
+// — label matching happened at delivery time and is not re-checked here.
+// First selector target in spec order wins, mirroring the engine's
+// first-wins status-entry rule for overlapping selectors.
+func (r *SubscriptionObserverReconciler) observeSelectorEntries(
+	ctx context.Context,
+	sub *imageflowv1alpha1.ImageSubscription,
+	selectorTargets []*imageflowv1alpha1.SubscriptionTarget,
+	namedKeys map[string]struct{},
+	pass *observerPass,
+) {
+	seenEntries := map[string]struct{}{}
+	for i := range sub.Status.Targets {
+		ref := sub.Status.Targets[i].TargetRef
+		if ref.Name == "" {
+			continue // not a per-object entry
+		}
+		key := imageflowv1alpha1.CanonicalTargetKey(ref)
+		if _, named := namedKeys[key]; named {
+			continue // owned by a named spec target — observed in the main loop
+		}
+		if _, dup := seenEntries[key]; dup {
+			continue
+		}
+		var cover *imageflowv1alpha1.SubscriptionTarget
+		for _, st := range selectorTargets {
+			if st.TargetRef.APIVersion == ref.APIVersion && st.TargetRef.Kind == ref.Kind &&
+				st.TargetRef.Namespace == ref.Namespace {
+				cover = st
+				break
+			}
+		}
+		if cover == nil {
+			continue
+		}
+		seenEntries[key] = struct{}{}
+		synthetic := &imageflowv1alpha1.SubscriptionTarget{
+			TargetRef:       ref,
+			ContainerNames:  cover.ContainerNames,
+			ImageFields:     cover.ImageFields,
+			StatusPolicyRef: cover.StatusPolicyRef,
+		}
+		r.observeOneTarget(ctx, sub, synthetic, pass)
+	}
 }
 
 // hasCUEKeys reports whether the statusPolicyRef has at least one of
@@ -1250,8 +1328,10 @@ func (r *SubscriptionObserverReconciler) subsForWorkload(ctx context.Context, ob
 		sub := &subs[i]
 		for j := range sub.Spec.Targets {
 			ref := sub.Spec.Targets[j].TargetRef
-			if ref.APIVersion == apiVersion && ref.Kind == kind &&
-				ref.Namespace == obj.GetNamespace() && ref.Name == obj.GetName() {
+			// Named targets map the exact object; selector targets (issue
+			// #81) map every matching object — the observer then re-judges
+			// the per-object entries the engine wrote for the match set.
+			if targetRefMatchesObject(ref, apiVersion, kind, obj) {
 				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
 					Namespace: sub.Namespace,
 					Name:      sub.Name,
