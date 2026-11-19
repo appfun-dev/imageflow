@@ -2062,7 +2062,8 @@ func TestRenderFloatEventsDedupesByIdentityNewestWins(t *testing.T) {
 		first.OldDigest != t11uDigestA || first.NewDigest != t11uDigestB {
 		t.Fatalf("first render = %+v, want the newest Succeeded view with bare digests", first)
 	}
-	if first.Subscription == nil || first.Subscription.Name != t11uSubName || first.Target == nil || *first.Target != (t11uDeployRef()) {
+	if first.Subscription == nil || first.Subscription.Name != t11uSubName || first.Target == nil ||
+		imageflowv1alpha1.CanonicalTargetKey(*first.Target) != imageflowv1alpha1.CanonicalTargetKey(t11uDeployRef()) {
 		t.Fatalf("first render = %+v, want subscription and target refs", first)
 	}
 	if !strings.Contains(first.Message, "Delivery summary") || !strings.Contains(first.Message, "ADR-005") {

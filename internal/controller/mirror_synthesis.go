@@ -388,7 +388,7 @@ func targetRefKey(ref *imageflowv1alpha1.TargetReference) string {
 	if ref == nil {
 		return ""
 	}
-	return ref.APIVersion + "/" + ref.Kind + "/" + ref.Namespace + "/" + ref.Name
+	return imageflowv1alpha1.CanonicalTargetKey(*ref)
 }
 
 // consumersByTag buckets subscription consumer references per tag of one

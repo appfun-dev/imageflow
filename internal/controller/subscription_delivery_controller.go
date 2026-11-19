@@ -611,10 +611,11 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 	fieldManager string,
 ) deliveryPass {
 	pass := deliveryPass{outcomes: make([]deliveryOutcome, 0, len(sub.Spec.Targets))}
-	seen := make(map[imageflowv1alpha1.TargetReference]bool, len(sub.Spec.Targets))
+	seen := make(map[string]bool, len(sub.Spec.Targets))
 	for i := range sub.Spec.Targets {
 		target := &sub.Spec.Targets[i]
-		if seen[target.TargetRef] {
+		targetKey := imageflowv1alpha1.CanonicalTargetKey(target.TargetRef)
+		if seen[targetKey] {
 			// Duplicate target references (webhook lane; defensive): one
 			// outcome per distinct target keeps entries and records unique.
 			log.FromContext(ctx).V(1).Info("skipping duplicate target reference in spec.targets",
@@ -622,7 +623,7 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 				"target", authz.FormatTarget(target.TargetRef))
 			continue
 		}
-		seen[target.TargetRef] = true
+		seen[targetKey] = true
 
 		outcome := r.deliverTarget(ctx, sub, source, target, fieldManager)
 		pass.outcomes = append(pass.outcomes, outcome)
@@ -1137,6 +1138,7 @@ func (r *SubscriptionDeliveryReconciler) findLiveClaimant(
 			"treating contested ownership as live (zero writes)")
 		return "unknown (subscription list unavailable)", true
 	}
+	refKey := imageflowv1alpha1.CanonicalTargetKey(ref)
 	for i := range subs.Items {
 		other := &subs.Items[i]
 		if other.Namespace == self.Namespace && other.Name == self.Name {
@@ -1147,7 +1149,7 @@ func (r *SubscriptionDeliveryReconciler) findLiveClaimant(
 		}
 		for j := range other.Spec.Targets {
 			t := &other.Spec.Targets[j]
-			if t.TargetRef != ref {
+			if imageflowv1alpha1.CanonicalTargetKey(t.TargetRef) != refKey {
 				continue
 			}
 			if claimsOverlap(t, contested) {

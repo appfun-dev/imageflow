@@ -373,7 +373,7 @@ func TestCheckTargetsKeepsInputOrderWithMixedVerdicts(t *testing.T) {
 		if verdicts[i].Verdict != w {
 			t.Errorf("verdict[%d] = %+v, want %s", i, verdicts[i], w)
 		}
-		if verdicts[i].Target != targets[i] {
+		if imageflowv1alpha1.CanonicalTargetKey(verdicts[i].Target) != imageflowv1alpha1.CanonicalTargetKey(targets[i]) {
 			t.Errorf("verdict[%d] target = %+v, want %+v", i, verdicts[i].Target, targets[i])
 		}
 	}

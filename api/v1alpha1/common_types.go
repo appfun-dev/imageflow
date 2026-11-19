@@ -146,6 +146,18 @@ type TargetReference struct {
 	Name string `json:"name"`
 }
 
+// CanonicalTargetKey derives the canonical string key identifying one target.
+// Controllers use it wherever a TargetReference identity is needed — map keys,
+// equality checks, dedup — instead of comparing the struct directly, so the
+// identity rule lives in exactly one place.
+//
+// The name form encodes the apiVersion/kind/namespace/name four-tuple joined
+// with "/". ADR-014 (v1.7) adds the mutually exclusive labelSelector form;
+// this function is the single extension point that will encode it.
+func CanonicalTargetKey(ref TargetReference) string {
+	return ref.APIVersion + "/" + ref.Kind + "/" + ref.Namespace + "/" + ref.Name
+}
+
 // StatusPolicyRef points at a CUE status policy stored in a ConfigMap (ADR-005 §4).
 // v1 freezes the storage/IO contract only; the evaluator lands in v1.3 (ADR-013).
 // Targets with an unavailable or unconfigured policy report rollout/health as Unknown

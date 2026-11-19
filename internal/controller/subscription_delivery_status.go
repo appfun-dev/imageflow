@@ -381,9 +381,10 @@ func mergeRecentDeliveries(
 	merged := make([]imageflowv1alpha1.DeliveryResult, 0, len(existing)+len(records))
 	merged = append(merged, existing...)
 	for _, record := range records {
+		recordKey := imageflowv1alpha1.CanonicalTargetKey(record.TargetRef)
 		for i := range merged {
 			entry := &merged[i]
-			if entry.TargetRef == record.TargetRef && entry.NewImage != record.NewImage &&
+			if imageflowv1alpha1.CanonicalTargetKey(entry.TargetRef) == recordKey && entry.NewImage != record.NewImage &&
 				(entry.RolloutResult == "" || entry.RolloutResult == imageflowv1alpha1.RolloutProgressing) {
 				// The in-flight delivery of this target is superseded by the
 				// new digest: terminal, never retried, never rolled back.
@@ -429,8 +430,9 @@ func supersededEvent(
 		reason:    EventReasonDeliverySuperseded,
 		message:   authz.TruncateMessage(message, 1024),
 	}
+	entryKey := imageflowv1alpha1.CanonicalTargetKey(entry.TargetRef)
 	for i := range outcomes {
-		if outcomes[i].ref == entry.TargetRef && outcomes[i].targetObject != nil {
+		if imageflowv1alpha1.CanonicalTargetKey(outcomes[i].ref) == entryKey && outcomes[i].targetObject != nil {
 			ev.targetSide = true
 			ev.targetObject = outcomes[i].targetObject
 			break

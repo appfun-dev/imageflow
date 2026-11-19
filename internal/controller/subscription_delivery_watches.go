@@ -161,11 +161,12 @@ func (r *SubscriptionDeliveryReconciler) peerSubsForSub(
 }
 
 // sharesTargetRef reports whether two subscriptions declare at least one
-// identical target reference (all four fields equal).
+// identical target reference (same canonical key).
 func sharesTargetRef(a, b *imageflowv1alpha1.ImageSubscription) bool {
 	for i := range a.Spec.Targets {
+		aKey := imageflowv1alpha1.CanonicalTargetKey(a.Spec.Targets[i].TargetRef)
 		for j := range b.Spec.Targets {
-			if a.Spec.Targets[i].TargetRef == b.Spec.Targets[j].TargetRef {
+			if aKey == imageflowv1alpha1.CanonicalTargetKey(b.Spec.Targets[j].TargetRef) {
 				return true
 			}
 		}

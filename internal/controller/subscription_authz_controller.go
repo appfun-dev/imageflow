@@ -437,9 +437,9 @@ func applyForbiddenTargetEntries(
 	denied []authz.TargetVerdict,
 ) bool {
 	changed := false
-	stillDenied := make(map[imageflowv1alpha1.TargetReference]bool, len(denied))
+	stillDenied := make(map[string]bool, len(denied))
 	for _, verdict := range denied {
-		stillDenied[verdict.Target] = true
+		stillDenied[imageflowv1alpha1.CanonicalTargetKey(verdict.Target)] = true
 		message := authz.TruncateMessage(verdict.Reason, authz.MaxTargetReasonLength)
 		if idx := findTargetEntry(*entries, verdict.Target); idx >= 0 {
 			entry := &(*entries)[idx]
@@ -461,7 +461,7 @@ func applyForbiddenTargetEntries(
 
 	kept := make([]imageflowv1alpha1.TargetDeliveryStatus, 0, len(*entries))
 	for _, entry := range *entries {
-		if entry.Reason == TargetReasonForbidden && !stillDenied[entry.TargetRef] {
+		if entry.Reason == TargetReasonForbidden && !stillDenied[imageflowv1alpha1.CanonicalTargetKey(entry.TargetRef)] {
 			changed = true
 			entry.Reason = ""
 			entry.Message = ""
@@ -480,13 +480,14 @@ func applyForbiddenTargetEntries(
 	return changed
 }
 
-// findTargetEntry locates the status entry of a target by reference equality.
+// findTargetEntry locates the status entry of a target by canonical key.
 func findTargetEntry(
 	entries []imageflowv1alpha1.TargetDeliveryStatus,
 	ref imageflowv1alpha1.TargetReference,
 ) int {
+	refKey := imageflowv1alpha1.CanonicalTargetKey(ref)
 	for i := range entries {
-		if entries[i].TargetRef == ref {
+		if imageflowv1alpha1.CanonicalTargetKey(entries[i].TargetRef) == refKey {
 			return i
 		}
 	}

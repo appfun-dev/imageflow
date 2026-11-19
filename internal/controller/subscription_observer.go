@@ -427,13 +427,14 @@ type rolloutTransition struct {
 
 func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *imageflowv1alpha1.ImageSubscription) observerPass {
 	pass := observerPass{}
-	seen := map[imageflowv1alpha1.TargetReference]struct{}{}
+	seen := map[string]struct{}{}
 	for i := range sub.Spec.Targets {
 		target := sub.Spec.Targets[i]
-		if _, dup := seen[target.TargetRef]; dup {
+		targetKey := imageflowv1alpha1.CanonicalTargetKey(target.TargetRef)
+		if _, dup := seen[targetKey]; dup {
 			continue
 		}
-		seen[target.TargetRef] = struct{}{}
+		seen[targetKey] = struct{}{}
 		pass.targetCount++
 		if target.StatusPolicyRef != nil {
 			pass.policyRefs++
@@ -1117,9 +1118,10 @@ func observerAuditMessage(sub *imageflowv1alpha1.ImageSubscription, entry imagef
 // attributedRecord finds the recentDeliveries record describing the image
 // currently observed on the entry (newest first), for Event audit rendering.
 func attributedRecord(records []imageflowv1alpha1.DeliveryResult, entry imageflowv1alpha1.TargetDeliveryStatus) *imageflowv1alpha1.DeliveryResult {
+	entryKey := imageflowv1alpha1.CanonicalTargetKey(entry.TargetRef)
 	for i := range records {
 		rec := &records[i]
-		if rec.TargetRef != entry.TargetRef {
+		if imageflowv1alpha1.CanonicalTargetKey(rec.TargetRef) != entryKey {
 			continue
 		}
 		if rec.NewImage == entry.ObservedImage || (entry.ImageApplied && rec.NewImage == entry.DesiredImage) {
@@ -1130,8 +1132,9 @@ func attributedRecord(records []imageflowv1alpha1.DeliveryResult, entry imageflo
 }
 
 func findOutcome(outcomes []observerOutcome, ref imageflowv1alpha1.TargetReference) *observerOutcome {
+	refKey := imageflowv1alpha1.CanonicalTargetKey(ref)
 	for i := range outcomes {
-		if outcomes[i].ref == ref {
+		if imageflowv1alpha1.CanonicalTargetKey(outcomes[i].ref) == refKey {
 			return &outcomes[i]
 		}
 	}
