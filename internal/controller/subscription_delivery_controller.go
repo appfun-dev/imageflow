@@ -104,12 +104,15 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/authz"
@@ -276,7 +279,7 @@ func RegisterSubscriptionDelivery(mgr ctrl.Manager, name string, opts Options) e
 		opts.Config,
 		sharedDeliveryMetrics(),
 	)
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		For(&imageflowv1alpha1.ImageSubscription{}).
 		Watches(&imageflowv1alpha1.ImageStream{},
@@ -293,9 +296,40 @@ func RegisterSubscriptionDelivery(mgr ctrl.Manager, name string, opts Options) e
 			builder.WithPredicates(workloadChangePredicate{})).
 		Watches(&appsv1.DaemonSet{},
 			handler.EnqueueRequestsFromMapFunc(r.subsForWorkload),
-			builder.WithPredicates(workloadChangePredicate{})).
-		Complete(r)
+			builder.WithPredicates(workloadChangePredicate{}))
+
+	// Selector targets (issue #81, ADR-014 decision 12): the shared per-tuple
+	// informer registry resolves match sets and streams membership events
+	// (label changes land as add/delete inside the server-side-filtered set)
+	// onto a channel the controller watches — membership changes enqueue the
+	// affected subscriptions without polling.
+	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("build dynamic client for selector match resolution: %w", err)
+	}
+	resolver := newMatchResolver(mgr.GetRESTMapper(), newDynamicListerWatcher(dyn),
+		mgr.GetLogger().WithName(name).WithName("match-resolver"))
+	if err := mgr.Add(resolver); err != nil {
+		return err
+	}
+	r.SetMatchResolver(resolver)
+	matchEvents := make(chan event.TypedGenericEvent[client.Object], matchEventBuffer)
+	resolver.setOnChange(func(obj *unstructured.Unstructured) {
+		select {
+		case matchEvents <- event.TypedGenericEvent[client.Object]{Object: obj}:
+		default:
+			mgr.GetLogger().V(1).Info("dropping selector match event: queue full",
+				"namespace", obj.GetNamespace(), "name", obj.GetName())
+		}
+	})
+	return b.WatchesRawSource(source.Channel(matchEvents,
+		handler.EnqueueRequestsFromMapFunc(r.subsForMatchedObject))).Complete(r)
 }
+
+// matchEventBuffer bounds the selector match-event queue; a full queue drops
+// (and logs) events — the subscription's own waiting-state requeues and
+// informer resyncs bound the loss.
+const matchEventBuffer = 1024
 
 // SubscriptionDeliveryReconciler converges the declared image fields of one
 // subscription's targets onto the catalog's current digest association.
@@ -306,6 +340,14 @@ type SubscriptionDeliveryReconciler struct {
 	clock     clock.Clock
 	config    config.Config
 	metrics   *deliveryMetrics
+	matcher   matchResolverAPI // selector-target match sets (issue #81); nil in legacy unit tests
+}
+
+// SetMatchResolver installs the selector-target match resolver. Production
+// wires the shared-informer matchResolver from RegisterSubscriptionDelivery;
+// unit tests substitute a fake-client lister.
+func (r *SubscriptionDeliveryReconciler) SetMatchResolver(matcher matchResolverAPI) {
+	r.matcher = matcher
 }
 
 // NewSubscriptionDeliveryReconciler builds the reconciler. apiReader may be
@@ -612,6 +654,7 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 ) deliveryPass {
 	pass := deliveryPass{outcomes: make([]deliveryOutcome, 0, len(sub.Spec.Targets))}
 	seen := make(map[string]bool, len(sub.Spec.Targets))
+	seenOutcomes := make(map[string]bool, len(sub.Spec.Targets))
 	for i := range sub.Spec.Targets {
 		target := &sub.Spec.Targets[i]
 		targetKey := imageflowv1alpha1.CanonicalTargetKey(target.TargetRef)
@@ -625,30 +668,47 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 		}
 		seen[targetKey] = true
 
-		outcome := r.deliverTarget(ctx, sub, source, target, fieldManager)
-		pass.outcomes = append(pass.outcomes, outcome)
-		if outcome.err != nil {
-			pass.errs = append(pass.errs, outcome.err)
-		}
-		if outcome.requeue > 0 && (pass.requeue == 0 || outcome.requeue < pass.requeue) {
-			pass.requeue = outcome.requeue
+		for _, outcome := range r.deliverTarget(ctx, sub, source, target, fieldManager) {
+			// Selector targets fan out into one outcome PER MATCHED OBJECT
+			// (issue #81); two selector targets in one spec may match the
+			// same object. Delivery already ran for both — only the status
+			// entry is shared, so the first outcome in spec order wins the
+			// entry and duplicates are dropped (keys must stay unique for
+			// the merge, conditions and records contracts).
+			outcomeKey := imageflowv1alpha1.CanonicalTargetKey(outcome.ref)
+			if seenOutcomes[outcomeKey] {
+				log.FromContext(ctx).V(1).Info("skipping duplicate per-object delivery outcome",
+					"subscription", sub.Namespace+"/"+sub.Name,
+					"target", authz.FormatTarget(outcome.ref))
+				continue
+			}
+			seenOutcomes[outcomeKey] = true
+			pass.outcomes = append(pass.outcomes, outcome)
+			if outcome.err != nil {
+				pass.errs = append(pass.errs, outcome.err)
+			}
+			if outcome.requeue > 0 && (pass.requeue == 0 || outcome.requeue < pass.requeue) {
+				pass.requeue = outcome.requeue
+			}
 		}
 	}
 	return pass
 }
 
-// deliverTarget converges ONE target and returns the computed outcome. The
-// only side effect performed here is the SSA apply itself; status writes,
-// Events and metrics are planned and executed by syncDeliveryStatus /
-// emitPlannedEffects against fresh reads (dedup survives cache lag and
-// restarts because every decision is re-derived from persisted state).
+// deliverTarget converges ONE spec target and returns the computed outcomes:
+// exactly one for a named target, one per matched object for a selector
+// target (issue #81, ADR-014 decisions 2/3/6). The only side effect performed
+// here is the SSA apply itself; status writes, Events and metrics are planned
+// and executed by syncDeliveryStatus / emitPlannedEffects against fresh reads
+// (dedup survives cache lag and restarts because every decision is re-derived
+// from persisted state).
 func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
 	source sourceState,
 	target *imageflowv1alpha1.SubscriptionTarget,
 	fieldManager string,
-) deliveryOutcome {
+) []deliveryOutcome {
 	ref := target.TargetRef
 	out := deliveryOutcome{ref: ref}
 
@@ -658,20 +718,20 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	if idx := findTargetEntry(sub.Status.Targets, ref); idx >= 0 &&
 		sub.Status.Targets[idx].Reason == TargetReasonForbidden {
 		out.preserveEntry = true
-		return out
+		return []deliveryOutcome{out}
 	}
 
 	hasContainers := len(target.ContainerNames) > 0
 	hasPaths := len(target.ImageFields) > 0
 	switch {
 	case hasContainers && hasPaths:
-		return out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
+		return []deliveryOutcome{out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
 			"target %s declares both containerNames and imageFields: the locators are mutually "+
-				"exclusive (spec decision 6); zero writes", authz.FormatTarget(ref)))
+				"exclusive (spec decision 6); zero writes", authz.FormatTarget(ref)))}
 	case !hasContainers && !hasPaths:
-		return out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
+		return []deliveryOutcome{out.failed(TargetReasonInvalidTarget, fmt.Sprintf(
 			"target %s declares neither containerNames nor imageFields: no locator, no guessing; "+
-				"zero writes", authz.FormatTarget(ref)))
+				"zero writes", authz.FormatTarget(ref)))}
 	}
 
 	if source.reason != "" {
@@ -681,7 +741,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		if source.waiting {
 			out.requeue = waitingStateRequeue
 		}
-		return out
+		return []deliveryOutcome{out}
 	}
 
 	// The source resolved: the desired (formatted) reference is reportable on
@@ -694,10 +754,95 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	kindAdapter, pathAdapter, class, supported := delivery.Classify(gvk, hasPaths)
 	if !supported {
 		out = out.failed(TargetReasonUnsupported, delivery.UnsupportedMessage(gvk, class))
-		return out
+		return []deliveryOutcome{out}
 	}
 
-	plan, obj, failure := r.planDelivery(ctx, out, target, source, gvk,
+	if ref.LabelSelector != nil && ref.Name == "" {
+		return r.deliverSelectorTarget(ctx, sub, source, target, out, fieldManager,
+			kindAdapter, pathAdapter, hasPaths)
+	}
+	return []deliveryOutcome{r.deliverObjectTarget(ctx, sub, source, target, ref, out, fieldManager,
+		kindAdapter, pathAdapter, hasPaths)}
+}
+
+// deliverSelectorTarget fans one selector target out over its current match
+// set (issue #81, spec D3): the resolver's per-tuple informer cache decides
+// membership (server-side label filtering, terminal objects excluded), and
+// every matched object goes through the exact same per-object write contract
+// as a named target. Zero matches produce zero outcomes — no entry, no
+// event (the NoMatches status surface is #82's scope).
+func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
+	ctx context.Context,
+	sub *imageflowv1alpha1.ImageSubscription,
+	source sourceState,
+	target *imageflowv1alpha1.SubscriptionTarget,
+	base deliveryOutcome,
+	fieldManager string,
+	kindAdapter delivery.KindAdapter,
+	pathAdapter delivery.PathAdapter,
+	hasPaths bool,
+) []deliveryOutcome {
+	ref := target.TargetRef
+	if r.matcher == nil {
+		return []deliveryOutcome{base.failed(TargetReasonInvalidTarget, fmt.Sprintf(
+			"selector target %s requires the match-resolution informers and this engine was built "+
+				"without them (registration bug); zero writes", authz.FormatTarget(ref)))}
+	}
+	names, err := r.matcher.resolveSelector(ctx, ref)
+	if err != nil {
+		if meta.IsNoMatchError(err) {
+			base = base.failed(TargetReasonKindNotInstalled, fmt.Sprintf(
+				"selector target %s: no REST mapping for the kind (KindNotInstalled); "+
+					"delivery replays when the CRD is installed", authz.FormatTarget(ref)))
+			base.requeue = waitingStateRequeue
+			return []deliveryOutcome{base}
+		}
+		return []deliveryOutcome{base.transient(TargetReasonApplyFailed,
+			fmt.Sprintf("resolving the match set of selector target %s: %v", authz.FormatTarget(ref), err))}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	outcomes := make([]deliveryOutcome, 0, len(names))
+	for _, name := range names {
+		objectRef := ref
+		objectRef.Name = name
+		objectRef.LabelSelector = nil
+		out := base
+		out.ref = objectRef
+		// T8 frozen contract, per object: a persisted name-form Forbidden
+		// entry wins for that object alone; the rest of the match set is
+		// unaffected.
+		if idx := findTargetEntry(sub.Status.Targets, objectRef); idx >= 0 &&
+			sub.Status.Targets[idx].Reason == TargetReasonForbidden {
+			out.preserveEntry = true
+			outcomes = append(outcomes, out)
+			continue
+		}
+		outcomes = append(outcomes, r.deliverObjectTarget(ctx, sub, source, target, objectRef, out,
+			fieldManager, kindAdapter, pathAdapter, hasPaths))
+	}
+	return outcomes
+}
+
+// deliverObjectTarget converges ONE concrete object (named target, or one
+// member of a selector target's match set) under the per-object write
+// contract: fresh read → field plan → ownership inspection → SSA apply.
+func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
+	ctx context.Context,
+	sub *imageflowv1alpha1.ImageSubscription,
+	source sourceState,
+	target *imageflowv1alpha1.SubscriptionTarget,
+	ref imageflowv1alpha1.TargetReference,
+	out deliveryOutcome,
+	fieldManager string,
+	kindAdapter delivery.KindAdapter,
+	pathAdapter delivery.PathAdapter,
+	hasPaths bool,
+) deliveryOutcome {
+	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
+
+	plan, obj, failure := r.planDelivery(ctx, out, target, source, ref, gvk,
 		kindAdapter, pathAdapter, hasPaths)
 	if failure != nil {
 		return *failure
@@ -718,7 +863,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	ownership := delivery.InspectOwnership(obj.GetManagedFields(), plan.Fields, fieldManager)
 	conflicted := conflictingPaths(ownership)
 	if len(conflicted) > 0 {
-		if claimant, live := r.findLiveClaimant(ctx, sub, ref, conflicted); live {
+		if claimant, live := r.findLiveClaimant(ctx, sub, ref, conflicted, obj.GetLabels()); live {
 			// First-wins: a LIVE subscription owns and still claims the
 			// field. Terminal Conflict, ZERO writes (the later subscriber).
 			out = out.failed(TargetReasonConflict, fmt.Sprintf(
@@ -772,7 +917,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		}
 		reowned := delivery.InspectOwnership(fresh.GetManagedFields(), plan.Fields, fieldManager)
 		reconflicted := conflictingPaths(reowned)
-		if _, live := r.findLiveClaimant(ctx, sub, ref, reconflicted); live {
+		if _, live := r.findLiveClaimant(ctx, sub, ref, reconflicted, fresh.GetLabels()); live {
 			out = out.failed(TargetReasonConflict, fmt.Sprintf(
 				"image field(s) %s of target %s were claimed by another subscription while this "+
 					"apply was in flight (field manager %s): first-wins exclusivity (ADR-008), "+
@@ -845,12 +990,12 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 	out deliveryOutcome,
 	target *imageflowv1alpha1.SubscriptionTarget,
 	source sourceState,
+	ref imageflowv1alpha1.TargetReference,
 	gvk schema.GroupVersionKind,
 	kindAdapter delivery.KindAdapter,
 	pathAdapter delivery.PathAdapter,
 	hasPaths bool,
 ) (*delivery.Plan, *unstructured.Unstructured, *deliveryOutcome) {
-	ref := target.TargetRef
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
 	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, obj); err != nil {
@@ -1125,6 +1270,7 @@ func (r *SubscriptionDeliveryReconciler) findLiveClaimant(
 	self *imageflowv1alpha1.ImageSubscription,
 	ref imageflowv1alpha1.TargetReference,
 	contested []string,
+	objLabels map[string]string,
 ) (claimant string, live bool) {
 	if len(contested) == 0 {
 		return "", false
@@ -1149,6 +1295,18 @@ func (r *SubscriptionDeliveryReconciler) findLiveClaimant(
 		}
 		for j := range other.Spec.Targets {
 			t := &other.Spec.Targets[j]
+			if t.TargetRef.LabelSelector != nil && t.TargetRef.Name == "" {
+				// Selector-form target (issue #81): it claims this object
+				// when the class lines up (same GVK + namespace) and the
+				// selector matches the object's labels.
+				if t.TargetRef.APIVersion == ref.APIVersion && t.TargetRef.Kind == ref.Kind &&
+					t.TargetRef.Namespace == ref.Namespace &&
+					selectorMatchesLabels(t.TargetRef.LabelSelector, objLabels) &&
+					claimsOverlap(t, contested) {
+					return other.Namespace + "/" + other.Name, true
+				}
+				continue
+			}
 			if imageflowv1alpha1.CanonicalTargetKey(t.TargetRef) != refKey {
 				continue
 			}

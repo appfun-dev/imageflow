@@ -2918,3 +2918,232 @@ func TestHealthVerdictD6MessageFormats(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #81 (v1.7-04): selector-target entries are observed per object
+// ---------------------------------------------------------------------------
+
+// t11uSelectorTarget renders a selector-form target in the built-in
+// Deployment class (issue #81): Name empty, LabelSelector set.
+func t11uSelectorTarget(matchLabels map[string]string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t11uAppsAPI,
+			Kind:          kindDeployment,
+			Namespace:     t11uNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: []string{t11uContainer},
+	}
+}
+
+// t11uNamedDeployment clones the standard deployment under a custom name —
+// selector targets fan out to per-object entries, so fixtures need several
+// objects of the same class.
+func t11uNamedDeployment(name, image string, st appsv1.DeploymentStatus) *appsv1.Deployment {
+	d := t11uDeployment(image, st)
+	d.Name = name
+	return d
+}
+
+func t11uEntryByName(sub *imageflowv1alpha1.ImageSubscription, name string) *imageflowv1alpha1.TargetDeliveryStatus {
+	for i := range sub.Status.Targets {
+		if sub.Status.Targets[i].TargetRef.Name == name {
+			return &sub.Status.Targets[i]
+		}
+	}
+	return nil
+}
+
+// TestObserverSelectorEntriesObservedPerObject pins the issue-#81 observe
+// contract for built-in kinds: the engine wrote one name-form entry per
+// matched object; the observer synthesizes an effective target per entry
+// (selector target's locators + policy, entry's name-form ref) and judges
+// each object's native status independently — web-1 Succeeded, web-2 still
+// Progressing, aggregate worst-state Progressing with the poll requeue.
+func TestObserverSelectorEntriesObservedPerObject(t *testing.T) {
+	web1Ref := t11uDeployRef()
+	web1Ref.Name = "web-1"
+	web2Ref := t11uDeployRef()
+	web2Ref.Name = "web-2"
+	succeeded := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2, AvailableReplicas: 2, ReadyReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}},
+	}
+	progressing := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           3, UpdatedReplicas: 1, AvailableReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}, {
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue,
+			Reason: "ReplicaSetUpdated",
+		}},
+	}
+	sub := t11uSub(
+		[]imageflowv1alpha1.SubscriptionTarget{t11uSelectorTarget(map[string]string{"app": "web"})},
+		imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions: t11uAuthorizedConditions(),
+			Targets: []imageflowv1alpha1.TargetDeliveryStatus{
+				t11uSeededEntry(web1Ref, t11uRefA),
+				t11uSeededEntry(web2Ref, t11uRefA),
+			},
+			RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+				t11uSeededRecord(web1Ref, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+				t11uSeededRecord(web2Ref, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+			},
+			RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+			ObservedGeneration: 1,
+		})
+	f := newT11uFixture(t, config.Config{},
+		t11uNamedDeployment("web-1", t11uRefA, succeeded),
+		t11uNamedDeployment("web-2", t11uRefA, progressing),
+		sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("one object still in flight must keep the bounded poll requeue, got %v", res.RequeueAfter)
+	}
+	got := f.getSub()
+
+	// Entries stay name-form (per object) and are judged independently.
+	e1 := t11uEntryByName(got, "web-1")
+	if e1 == nil {
+		t.Fatal("web-1 entry disappeared")
+	}
+	if e1.TargetRef.LabelSelector != nil || e1.TargetRef.Name != "web-1" {
+		t.Fatalf("web-1 entry ref must stay name-form: %+v", e1.TargetRef)
+	}
+	if !e1.ImageApplied || e1.RolloutStatus != imageflowv1alpha1.RolloutSucceeded {
+		t.Fatalf("web-1 = %+v, want imageApplied + Succeeded", e1)
+	}
+	if e1.Reason != TargetReasonApplied || e1.Message != t11uEngineSteadyMessage {
+		t.Fatalf("web-1 Reason/Message must stay engine-owned: %q/%q", e1.Reason, e1.Message)
+	}
+	e2 := t11uEntryByName(got, "web-2")
+	if e2 == nil {
+		t.Fatal("web-2 entry disappeared")
+	}
+	if e2.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("web-2 = %q, want still Progressing", e2.RolloutStatus)
+	}
+
+	// Worst-state aggregate: Progressing outranks Succeeded.
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate = %q, want Progressing", got.Status.RolloutStatus)
+	}
+
+	// The web-1 record healed to its terminal result; web-2 stays in flight.
+	var rec1, rec2 *imageflowv1alpha1.DeliveryResult
+	for i := range got.Status.RecentDeliveries {
+		switch got.Status.RecentDeliveries[i].TargetRef.Name {
+		case "web-1":
+			rec1 = &got.Status.RecentDeliveries[i]
+		case "web-2":
+			rec2 = &got.Status.RecentDeliveries[i]
+		}
+	}
+	if rec1 == nil || rec1.RolloutResult != imageflowv1alpha1.RolloutSucceeded || rec1.Reason != TargetReasonRolloutSucceeded {
+		t.Fatalf("web-1 record = %+v, want healed Succeeded/RolloutSucceeded", rec1)
+	}
+	if rec2 == nil || rec2.RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("web-2 record = %+v, want in-flight Progressing", rec2)
+	}
+
+	// Dual-namespace audit events fired exactly for the object that reached
+	// its terminal result, naming that object.
+	events := f.drainEvents()
+	succeededEvents := t11uEventsWith(events, EventReasonRolloutSucceeded)
+	if len(succeededEvents) != 2 {
+		t.Fatalf("events = %v, want exactly two RolloutSucceeded (subscription + target side)", events)
+	}
+	for _, ev := range succeededEvents {
+		if !strings.Contains(ev, "web-1") {
+			t.Fatalf("event %q must name the judged object web-1", ev)
+		}
+	}
+	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindDeployment, observerResultSucceeded)); v != 1 {
+		t.Fatalf("rollout metric = %v, want 1", v)
+	}
+}
+
+// TestObserverSelectorThirdPartyEntryHonestUnknown pins issue-#81 ADR-014
+// decision 6 / D11 on the observe side: a selector target in a third-party
+// CRD class synthesizes per-object effective targets exactly like built-in
+// kinds, and the observation stays honestly Unknown — no polling, no
+// fabricated verdict, engine-owned Reason/Message untouched.
+func TestObserverSelectorThirdPartyEntryHonestUnknown(t *testing.T) {
+	edgeRef := t11uEdgeRef()
+	edgeRef.Name = "edge-1"
+	selectorRef := t11uEdgeRef()
+	selectorRef.Name = ""
+	selectorRef.LabelSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge"}}
+	selectorTarget := imageflowv1alpha1.SubscriptionTarget{
+		TargetRef:      selectorRef,
+		ContainerNames: []string{t11uContainer},
+	}
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{selectorTarget}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions: t11uAuthorizedConditions(),
+		Targets:    []imageflowv1alpha1.TargetDeliveryStatus{t11uSeededEntry(edgeRef, t11uRefA)},
+		RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+			t11uSeededRecord(edgeRef, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+		},
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		ObservedGeneration: 1,
+	})
+	f := newT11uFixture(t, config.Config{}, sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("honest Unknown must not poll: RequeueAfter = %v", res.RequeueAfter)
+	}
+	got := f.getSub()
+	entry := t11uEntryByName(got, "edge-1")
+	if entry == nil {
+		t.Fatal("per-object entry disappeared")
+	}
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("rolloutStatus = %q, want honest Unknown", entry.RolloutStatus)
+	}
+	if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
+	}
+	if !entry.ImageApplied {
+		t.Fatalf("imageApplied must stay independent: %+v", entry)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("aggregate = %q, want Unknown", got.Status.RolloutStatus)
+	}
+	// The record stays in flight — no terminal result was observed.
+	if got.Status.RecentDeliveries[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("record = %q, want in-flight Progressing", got.Status.RecentDeliveries[0].RolloutResult)
+	}
+	// Subscription-side honest-Unknown event only (target side skips: the
+	// third-party kind is not in the scheme).
+	events := f.drainEvents()
+	unknownEvents := t11uEventsWith(events, EventReasonRolloutUnknown)
+	if len(unknownEvents) != 1 {
+		t.Fatalf("events = %v, want exactly one subscription-side RolloutUnknown", events)
+	}
+	for _, want := range []string{"edge-1", "never fabricated"} {
+		if !strings.Contains(unknownEvents[0], want) {
+			t.Fatalf("event %q must name the object and carry the honest-Unknown determination (%q)", unknownEvents[0], want)
+		}
+	}
+	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindOther, observerResultUnknown)); v != 1 {
+		t.Fatalf("rollout outcome metric = %v, want 1", v)
+	}
+}

@@ -693,3 +693,59 @@ Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -ski
 - **隐藏验收点（#78 扩展点兑现）**：selector target 进控制器前（#81），`CanonicalTargetKey` 已能区分两种定位形态且键确定性由排序保证；
 - **校验落点**：name/labelSelector 校验与 T3 containerNames/imageFields 互斥同处 `validateTarget`，风格一致（field.ErrorList 聚合、Invalid 422 面），CRD 层不加 CEL（沿用 spec decision 6 分工）；
 - **已知环境限制**：`test/integration` 的 `Admission webhooks [BeforeAll]`（webhook server StartedChecker 20s 超时）在 base commit 55c3e07e 上同样失败，属本机环境既有问题，与本改动无关；e2e 需 Podman，本机不跑。
+
+## 匹配解析 + 投递核心（v1.7-04，#81）
+
+### 匹配解析单元测试（`internal/controller/subscription_delivery_match_resolver_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestMatchResolverExcludesTerminalPodsAndForeignObjects` | 服务端过滤工厂收到 `pods\|<ns>\|app=checkout` 元组；Succeeded/Failed Pod、异 label、异 namespace 对象全部排除出匹配集（ADR-014 决策 13、spec D5） | 已实现 |
+| `TestMatchResolverExcludesCompletedJobs` | Job `Complete=True` / `Failed=True` 排除，`False` 保留 | 已实现 |
+| `TestMatchResolverReusesInformerPerCanonicalTuple` | 同 (GVK, namespace, selector) 元组复用同一 informer（factory 只调 1 次、informers map 长度 1）；异 selector、异 namespace 各新建 | 已实现 |
+| `TestNewDynamicListerWatcherCarriesSelectorServerSide` | dynamic fake + reactor 捕获 List/Watch options：`LabelSelector == "app=checkout"`、namespace 正确——selector 进 ListWatch options 而非客户端过滤（ADR-014 决策 12） | 已实现 |
+| `TestMatchResolverOnChangeForwardsEventsIncludingTombstones` | Add/Modify/Delete 事件到达 onChange sink；`DeletedFinalStateUnknown` tombstone 解包后转发；非对象载荷丢弃 | 已实现 |
+| `TestMatchResolverGuards` | named 形态 ref 拒绝（"selector-form"）；Start 前 resolve 拒绝（"not started"）；坏 selector 报 "invalid label selector" | 已实现 |
+| `TestIsCompletedObject` | 表驱动 10 例：Pod phase Succeeded/Failed → true；Job Complete/Failed=True → true、False → false；Deployment 无结束态语义 → false | 已实现 |
+| `TestTargetRefMatchesObject` / `TestSelectorMatchesLabels` | named 精确匹配、selector 按 labels 匹配、ns/kind/apiVersion 差异不匹配、selector+Name 并存按 named、坏/nil selector fail closed | 已实现 |
+
+### 投递扇出单元测试（`internal/controller/subscription_delivery_controller_test.go`，"Selector targets: per-object fan-out delivery" 节）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySelectorFanOutPerObjectSSA` | 匹配集 2 对象各 1 次 SSA apply（applies=2、statusWrites=1、otherWrites=0）；status 条目为逐对象 name 形态（永不出现 selector 形态条目）；records/事件/指标按对象计数；稳态零写入 | 已实现 |
+| `TestSubscriptionDeliverySelectorConflictSkipsOnlyContestedObject` | web-1 被 rival 独占 → 零写入、entry Conflict（消息含冲突方订阅名）、Conflict condition True、Warning `DeliveryConflict` 事件；web-2 照常投递（applies=1）；聚合 worst-state Conflict（ADR-014 决策 9） | 已实现 |
+| `TestSubscriptionDeliverySelectorZeroMatchesZeroSurface` | 空匹配集：零条目、零 records、零事件、聚合空、对象零写入（NoMatches Condition 属 #82） | 已实现 |
+| `TestSubscriptionDeliverySelectorWithoutResolverIsHonest` | 未接线 resolver → entry InvalidTarget、聚合 Unknown、零写入（registration bug 如实上报） | 已实现 |
+| `TestSubscriptionDeliverySelectorResolveErrorMapping` | `NoKindMatchError` → KindNotInstalled + waitingStateRequeue；一般解析错误 → ApplyFailed transient（RetryCount=1）+ reconcile 报错 | 已实现 |
+| `TestSubscriptionDeliverySelectorOverlapDeduplicatesEntry` | 两个 selector target 匹配同一对象：resolve 各跑一次、apply 只 1 次、1 个条目、1 条 record（spec 顺序 first-wins 去重） | 已实现 |
+| `TestSubscriptionDeliverySelectorLabelRemovalPrunesEntryKeepsImage` | 摘 label 后条目被 stale-pruning 剪除、已写镜像保留（不回收、零回滚写入）、records append-only 不变（ADR-014 决策 3） | 已实现 |
+| `TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject` | 逐对象 T8 冻结契约：预置 web-1 name 形态 Forbidden 条目 → 该对象零写入、条目 DeepEqual 保留，web-2 正常投递 | 已实现 |
+
+### Watch 映射单元测试（`internal/controller/subscription_delivery_watches_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubsForMatchedObjectMapsCoveringSelectorSubs` | match-informer 通道事件只映射 selector 形态覆盖它的订阅（同 GVK+ns+labels）；named 订阅、异 ns、异 GVK 不误映射；摘 label/无 label 对象映射空（DELETE tombstone 诚实性）；typed 载荷与无 GVK 载荷拒绝 | 已实现 |
+| `TestSubsForWorkloadSelectorFormMapsWholeClass` | typed workload 事件：selector 订阅映射整个类（labels 满足即映射）、named 订阅保持精确名匹配、两者可同映射、无 label 陌生人映射空 | 已实现 |
+
+### Observer 单元测试（`internal/controller/subscription_observer_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestObserverSelectorEntriesObservedPerObject` | 引擎写入的 name 形态条目经合成 target（selector 的 locators/policy + 条目的 name ref）逐对象独立观察：web-1 Succeeded（record 治愈、双命名空间事件、指标）、web-2 仍 Progressing、聚合 worst-state Progressing + 有界轮询 requeue | 已实现 |
+| `TestObserverSelectorThirdPartyEntryHonestUnknown` | 第三方 CRD（EdgeService）selector 条目如实 Unknown：不轮询、不伪造裁决、Reason/Message 保持引擎所有、聚合 Unknown、仅订阅侧 1 条 RolloutUnknown 事件（ADR-014 决策 6、spec D11） | 已实现 |
+
+### envtest 集成（`test/integration/subscription_delivery_test.go`，manager lane）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `t81s-envtest-selector-fan-out-per-object-ssa-conflict-skip-and-label-driven-reconcile` | 生产接线（`RegisterSubscriptionDelivery` 含真实 matchResolver + dynamic informer）：rival 先独占 web-2 → selector 订阅扇出，web-1 真实 SSA 投递（真实 managedFields 归 selector 订阅所有）、web-2 冲突跳过（rival 所有权不变、镜像不变、entry Conflict 含冲突方名、Warning `DeliveryConflict` 事件落在订阅上）；给 web-3 打 label → 服务端过滤 informer 事件驱动 reconcile、新成员即时投递；全程 status 只有 name 形态条目 | 已实现 |
+
+### 覆盖率要点
+
+- **服务端过滤**：selector 进 ListWatch options（reactor 捕获证明）；informer 按 `CanonicalTargetKey` 元组复用，事件经 `source.Channel` + `EnqueueRequestsFromMapFunc(subsForMatchedObject)` 驱动 reconcile；
+- **逐对象纪律**：SSA/冲突/T8 冻结/stale-pruning 全部按对象独立（把 named 路径的「单 ref」泛化为「解析出的对象列表」，复用既有写契约）；
+- **诚实性**：结束态对象（Completed Pod/Job）在匹配解析层排除；零匹配零 status 面；未接线 resolver 如实 InvalidTarget；第三方 CRD 观察如实 Unknown；
+- **范围边界**：status 聚合精化/matched 计数/NoMatches Condition 属 #82，匹配数上限属 #83，本票不实现；
+- **已知环境限制**：`test/integration` webhook lane 的 `[BeforeAll]` 超时与 e2e Podman 依赖为本机既有环境问题（同 v1.7-02 小节说明）。

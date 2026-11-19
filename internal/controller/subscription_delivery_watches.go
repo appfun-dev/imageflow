@@ -16,17 +16,25 @@ package controller
 //     target spec edited (user reverted the image / added a container) and
 //     target deleted (honest TargetNotFound report). Rollout status churn is
 //     ignored via the generation gate — rollout observation is T11's lane and
-//     must not drive delivery passes.
+//     must not drive delivery passes. Selector targets (issue #81) map these
+//     events for every object whose labels satisfy the selector.
+//   - match-informer channel (issue #81): membership events of the per-tuple
+//     selector informers (any GVK, server-side label filtered). A label
+//     change enters/leaves the filtered set as add/delete, enqueuing exactly
+//     the subscriptions whose selector targets cover the object.
 //
-// Third-party kinds (T10's generic resolver lane) have no watch surface by
-// design: their convergence rides the waiting-state requeue bounds of the
-// engine, exactly like unwatchable events on built-in kinds.
+// Third-party kinds named directly (T10's generic resolver lane) have no
+// typed watch surface by design: their convergence rides the waiting-state
+// requeue bounds of the engine, exactly like unwatchable events on built-in
+// kinds. Selector targets are the exception — the match informers ARE their
+// watch surface, for built-in and third-party kinds alike.
 
 import (
 	"context"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -201,8 +209,52 @@ func (r *SubscriptionDeliveryReconciler) subsForWorkload(
 	for i := range subs {
 		for j := range subs[i].Spec.Targets {
 			ref := subs[i].Spec.Targets[j].TargetRef
-			if ref.APIVersion == apiVersion && ref.Kind == kind &&
-				ref.Namespace == obj.GetNamespace() && ref.Name == obj.GetName() {
+			// Named targets map the exact object; selector targets (issue
+			// #81) map every object in their class — workload create/delete
+			// and generation changes re-converge the whole match set.
+			if targetRefMatchesObject(ref, apiVersion, kind, obj) {
+				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
+					Namespace: subs[i].Namespace,
+					Name:      subs[i].Name,
+				}})
+				break
+			}
+		}
+	}
+	return requests
+}
+
+// subsForMatchedObject maps one match-informer event (any GVK, already
+// server-side filtered per tuple) to every subscription whose selector
+// target covers the object: same GVK + namespace, labels matching. The
+// client-side re-check is what makes DELETE events honest — the informer
+// tombstone carries the labels the object had while it matched, which is
+// exactly the set of subscriptions that must re-converge now that it left
+// the match set (ADR-014 decision 3).
+func (r *SubscriptionDeliveryReconciler) subsForMatchedObject(
+	ctx context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return nil
+	}
+	gvk := u.GroupVersionKind()
+	if gvk.Kind == "" {
+		return nil
+	}
+	subs, err := r.listSubscriptions(ctx)
+	if err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range subs {
+		for j := range subs[i].Spec.Targets {
+			ref := subs[i].Spec.Targets[j].TargetRef
+			if ref.LabelSelector == nil || ref.Name != "" {
+				continue
+			}
+			if targetRefMatchesObject(ref, gvk.GroupVersion().String(), gvk.Kind, obj) {
 				requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
 					Namespace: subs[i].Namespace,
 					Name:      subs[i].Name,
