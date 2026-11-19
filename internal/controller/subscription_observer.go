@@ -57,6 +57,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -69,6 +70,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -245,6 +247,21 @@ func RegisterSubscriptionObserver(mgr ctrl.Manager, name string, opts Options) e
 		sharedObserverMetrics(),
 		evaluator,
 	)
+	// Selector targets (issue #82, ADR-014 decision 5/8): the observer
+	// resolves live match sets through its own shared-informer resolver.
+	// Membership changes reach this controller without a dedicated channel —
+	// the engine rewrites matchedObjects on the aggregate entry (subscription
+	// status predicate) and the workload watches cover status changes.
+	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("build dynamic client for observer selector match resolution: %w", err)
+	}
+	resolver := newMatchResolver(mgr.GetRESTMapper(), newDynamicListerWatcher(dyn),
+		mgr.GetLogger().WithName(name).WithName("match-resolver"))
+	if err := mgr.Add(resolver); err != nil {
+		return err
+	}
+	r.SetMatchResolver(resolver)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		For(&imageflowv1alpha1.ImageSubscription{}, builder.WithPredicates(observerSubscriptionPredicate{})).
@@ -269,6 +286,16 @@ type SubscriptionObserverReconciler struct {
 	config    config.Config
 	metrics   *observerMetrics
 	evaluator *cueeval.Evaluator // T3: CUE status evaluator for ConfigMap-triggered re-evaluation (ADR-013 D5)
+	matcher   matchResolverAPI   // selector-target match sets (issue #82); nil in legacy unit tests
+}
+
+// SetMatchResolver installs the selector-target match resolver (issue #82).
+// Production wires the shared-informer matchResolver from
+// RegisterSubscriptionObserver; unit tests substitute a fake matcher. Without
+// it, selector observation stays silent — the engine owns the honest
+// InvalidTarget WHY on the aggregate entry.
+func (r *SubscriptionObserverReconciler) SetMatchResolver(m matchResolverAPI) {
+	r.matcher = m
 }
 
 // NewSubscriptionObserverReconciler builds the reconciler. A nil apiReader
@@ -428,8 +455,6 @@ type rolloutTransition struct {
 func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *imageflowv1alpha1.ImageSubscription) observerPass {
 	pass := observerPass{}
 	seen := map[string]struct{}{}
-	namedKeys := map[string]struct{}{}
-	var selectorTargets []*imageflowv1alpha1.SubscriptionTarget
 	for i := range sub.Spec.Targets {
 		target := &sub.Spec.Targets[i]
 		targetKey := imageflowv1alpha1.CanonicalTargetKey(target.TargetRef)
@@ -438,21 +463,14 @@ func (r *SubscriptionObserverReconciler) observe(ctx context.Context, sub *image
 		}
 		seen[targetKey] = struct{}{}
 		if target.TargetRef.LabelSelector != nil && target.TargetRef.Name == "" {
-			selectorTargets = append(selectorTargets, target)
-		} else {
-			namedKeys[targetKey] = struct{}{}
+			// Issue #82: a selector target holds ONE aggregate status entry
+			// (selector-form ref). Observe the live match set per object and
+			// fold the verdicts worst-case onto that entry (ADR-014
+			// decision 5/8, spec v1.7 D8).
+			r.observeSelectorTarget(ctx, sub, target, &pass)
+			continue
 		}
 		r.observeOneTarget(ctx, sub, target, &pass)
-	}
-	// Issue #81: selector targets produce one per-object status entry each
-	// (name-form ref). Observe each engine-written entry as if it were a
-	// named spec target carrying the selector target's locators and policy —
-	// third-party kinds and imageFields locators fall into the existing
-	// honest-Unknown path, built-in containerNames targets get native
-	// observation. Entries whose object left the match set are pruned by the
-	// engine's stale-pruning, not here.
-	if len(selectorTargets) > 0 {
-		r.observeSelectorEntries(ctx, sub, selectorTargets, namedKeys, &pass)
 	}
 	return pass
 }
@@ -494,53 +512,281 @@ func (r *SubscriptionObserverReconciler) observeOneTarget(
 	}
 }
 
-// observeSelectorEntries observes every per-object status entry the engine
-// wrote for a selector target (issue #81). An entry belongs to a selector
-// target when it is name-form (per-object), not owned by a named spec
-// target, and shares the selector target's class (apiVersion/kind/namespace)
-// — label matching happened at delivery time and is not re-checked here.
-// First selector target in spec order wins, mirroring the engine's
-// first-wins status-entry rule for overlapping selectors.
-func (r *SubscriptionObserverReconciler) observeSelectorEntries(
+// selectorObjectVerdict is the ephemeral per-object observation inside the
+// selector aggregate (issue #82). Verdicts are never persisted per object —
+// only the worst-case aggregate lands on the selector-form entry, and the
+// per-object detail rides the audit Event (ADR-014 decision 5, spec v1.7 D8).
+type selectorObjectVerdict struct {
+	name          string
+	rollout       imageflowv1alpha1.RolloutStatus
+	health        imageflowv1alpha1.HealthStatus
+	healthReason  string
+	healthMessage string
+	detMessage    string
+	evalErrClass  cueeval.ErrorClass
+	evalErrReason string
+}
+
+// observeSelectorTarget observes one selector target as its single aggregate
+// entry (issue #82, ADR-014 decision 5/8, spec v1.7 D8): resolve the live
+// match set, determine every matched object freshly through the SAME
+// per-object pipeline as named targets, then fold the verdicts worst-case
+// into one CAS-guarded transition plan on the selector-form entry.
+func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
-	selectorTargets []*imageflowv1alpha1.SubscriptionTarget,
-	namedKeys map[string]struct{},
+	target *imageflowv1alpha1.SubscriptionTarget,
 	pass *observerPass,
 ) {
-	seenEntries := map[string]struct{}{}
-	for i := range sub.Status.Targets {
-		ref := sub.Status.Targets[i].TargetRef
-		if ref.Name == "" {
-			continue // not a per-object entry
+	pass.targetCount++
+	if target.StatusPolicyRef != nil {
+		pass.policyRefs++
+	}
+	idx := findTargetEntry(sub.Status.Targets, target.TargetRef)
+	if idx < 0 {
+		return // engine has not written the aggregate entry yet — its domain
+	}
+	entry := sub.Status.Targets[idx]
+	// The same frozen gates as observeTarget: T8-owned, never-delivered and
+	// engine-terminal entries are not observable by this lane.
+	if entry.Reason == TargetReasonForbidden ||
+		entry.DesiredImage == "" ||
+		entry.RolloutStatus == imageflowv1alpha1.RolloutConflict ||
+		entry.Reason == TargetReasonConflict ||
+		entry.RolloutStatus == imageflowv1alpha1.RolloutSuperseded {
+		return
+	}
+
+	gvk := schema.FromAPIVersionAndKind(target.TargetRef.APIVersion, target.TargetRef.Kind)
+	kindLabel, observable := observableBuiltinKind(gvk, *target)
+	if !observable {
+		// Policy-dependent or third-party class: the metric label follows the
+		// named-target flow (observerKindOther), never an empty string.
+		kindLabel = observerKindOther
+	}
+	out := &observerOutcome{ref: target.TargetRef, kindLabel: kindLabel, rollout: entry.RolloutStatus}
+
+	if r.matcher == nil {
+		// No match-resolution informers: the engine owns the honest
+		// InvalidTarget WHY on the entry; observation stays silent (never
+		// fabricate a verdict).
+		return
+	}
+	names, err := r.matcher.resolveSelector(ctx, target.TargetRef)
+	if err != nil {
+		// Resolver failures are the engine's surface (KindNotInstalled /
+		// transient ApplyFailed with backoff). The observer logs, skips this
+		// pass and re-judges on the next trigger.
+		log.FromContext(ctx).V(1).Info("selector match resolution failed; observation skipped",
+			"target", authz.FormatTarget(target.TargetRef), "error", err)
+		return
+	}
+
+	verdicts := make([]selectorObjectVerdict, 0, len(names))
+	skipped := 0
+	for _, name := range names {
+		objectRef := target.TargetRef
+		objectRef.Name = name
+		objectRef.LabelSelector = nil
+		// Synthetic single-object subscription view: the per-object pipeline
+		// (gates, CUE, native determination, health) runs UNCHANGED. The
+		// object entry carries the aggregate's DesiredImage and no persisted
+		// verdict, so observeTarget returns the fresh determination only —
+		// its own transition plans are discarded (transitions belong to the
+		// aggregate).
+		objectSub := &imageflowv1alpha1.ImageSubscription{
+			Status: imageflowv1alpha1.ImageSubscriptionStatus{
+				Targets: []imageflowv1alpha1.TargetDeliveryStatus{{
+					TargetRef:    objectRef,
+					DesiredImage: entry.DesiredImage,
+				}},
+			},
 		}
-		key := imageflowv1alpha1.CanonicalTargetKey(ref)
-		if _, named := namedKeys[key]; named {
-			continue // owned by a named spec target — observed in the main loop
-		}
-		if _, dup := seenEntries[key]; dup {
+		objectTarget := *target
+		objectTarget.TargetRef = objectRef
+		objOut := r.observeTarget(ctx, objectSub, objectTarget)
+		if objOut == nil {
+			// Defensive: the synthetic entry always passes the gates. A nil
+			// here means the object vanished mid-observation — excluded from
+			// the aggregate (the engine owns that WHY), same as the
+			// built-in-vanished branch below.
+			skipped++
 			continue
 		}
-		var cover *imageflowv1alpha1.SubscriptionTarget
-		for _, st := range selectorTargets {
-			if st.TargetRef.APIVersion == ref.APIVersion && st.TargetRef.Kind == ref.Kind &&
-				st.TargetRef.Namespace == ref.Namespace {
-				cover = st
+		if len(objOut.errs) > 0 {
+			// Transient observation failure: NO aggregate verdict this pass —
+			// partial knowledge must not move the aggregate. The errors bubble
+			// to the reconcile result (backoff + full re-judgement).
+			pass.errs = append(pass.errs, objOut.errs...)
+			return
+		}
+		verdict := objOut.rollout
+		if verdict == "" {
+			if objOut.kindLabel != observerKindOther {
+				// Built-in object vanished between match resolution and the
+				// fetch: the engine owns that WHY (TargetNotFound) and the
+				// membership informer re-delivers shortly — excluded from the
+				// aggregate, same silence as the named-target path.
+				skipped++
+				continue
+			}
+			// Honest third-party path: the verdict is Unknown — never
+			// fabricated (ADR-005 §5).
+			verdict = imageflowv1alpha1.RolloutUnknown
+		}
+		verdicts = append(verdicts, selectorObjectVerdict{
+			name:          name,
+			rollout:       verdict,
+			health:        objOut.health,
+			healthReason:  objOut.healthReason,
+			healthMessage: objOut.healthMessage,
+			detMessage:    objOut.detMessage,
+			evalErrClass:  objOut.evalErrClass,
+			evalErrReason: objOut.evalErrReason,
+		})
+	}
+	if len(verdicts) == 0 && skipped > 0 {
+		// Every matched object was unobservable this pass: keep the persisted
+		// aggregate (the engine's membership lane converges the match set).
+		return
+	}
+
+	// Worst-case fold with the engine's EXPORTED ranking — never a private
+	// re-derivation (ADR-014 decision 5). The legal empty match set
+	// aggregates to Unknown (decision 8, spec v1.7 D7): Unknown outranks
+	// Progressing, so a stale optimistic aggregate is pulled back.
+	agg := imageflowv1alpha1.RolloutUnknown
+	if len(verdicts) > 0 {
+		statuses := make([]imageflowv1alpha1.TargetDeliveryStatus, len(verdicts))
+		for i, v := range verdicts {
+			statuses[i].RolloutStatus = v.rollout
+		}
+		agg = AggregateRolloutStatus(statuses)
+	}
+	out.rollout = agg
+	switch {
+	case agg == entry.RolloutStatus:
+		// No verdict change: steady state.
+	case entry.RolloutStatus == "" && agg == imageflowv1alpha1.RolloutUnknown:
+		// The engine initializes empty rolloutStatus with its own reason
+		// surface; the observer does not race it.
+	default:
+		out.transition = &rolloutTransition{from: entry.RolloutStatus, to: agg}
+		out.detMessage = selectorAggregateDetMessage(len(names), verdicts, agg)
+	}
+
+	// Health folds worst-case (Unhealthy > Unknown > Healthy) over the object
+	// verdicts; when no object has a health opinion at all (evaluator
+	// deferred / non-native class) the aggregate keeps none — honestly.
+	if hv, ok := aggregateSelectorHealth(verdicts); ok {
+		out.health = hv.status
+		out.healthReason = hv.reason
+		out.healthMessage = hv.message
+		if entry.HealthStatus != hv.status {
+			out.healthTransition = &healthTransition{from: entry.HealthStatus, to: hv.status}
+		}
+	}
+
+	// CUE evaluation results for the StatusPolicyEvaluated Condition (T4,
+	// ADR-013 D6): one aggregated result per selector target — success only
+	// when every object's evaluation succeeded.
+	if target.StatusPolicyRef != nil && hasCUEKeys(target.StatusPolicyRef) {
+		result := targetEvalResult{ref: target.TargetRef, success: true}
+		for _, v := range verdicts {
+			if v.evalErrClass != "" {
+				result.success = false
+				result.errClass = v.evalErrClass
+				result.errReason = v.evalErrReason
+				result.message = v.detMessage
+				out.evalErrClass = v.evalErrClass
+				out.evalErrReason = v.evalErrReason
 				break
 			}
 		}
-		if cover == nil {
-			continue
+		pass.evalResults = append(pass.evalResults, result)
+	} else {
+		for _, v := range verdicts {
+			if v.evalErrClass != "" {
+				out.evalErrClass = v.evalErrClass
+				out.evalErrReason = v.evalErrReason
+				pass.evalResults = append(pass.evalResults, targetEvalResult{
+					ref:       target.TargetRef,
+					success:   false,
+					errClass:  v.evalErrClass,
+					errReason: v.evalErrReason,
+					message:   v.detMessage,
+				})
+				break
+			}
 		}
-		seenEntries[key] = struct{}{}
-		synthetic := &imageflowv1alpha1.SubscriptionTarget{
-			TargetRef:       ref,
-			ContainerNames:  cover.ContainerNames,
-			ImageFields:     cover.ImageFields,
-			StatusPolicyRef: cover.StatusPolicyRef,
-		}
-		r.observeOneTarget(ctx, sub, synthetic, pass)
 	}
+
+	pass.outcomes = append(pass.outcomes, *out)
+	if agg == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
+		// Poll fallback: an in-flight aggregate rollout is re-judged on a
+		// bounded cadence until it reaches a terminal result.
+		pass.requeue = waitingStateRequeue
+	}
+}
+
+// selectorDetMessageMaxObjects bounds the per-object verdict list inside the
+// aggregate transition Event (the status stays bounded 3/5/5 — per-object
+// detail is Event material, ADR-008/ADR-014 decision 5).
+const selectorDetMessageMaxObjects = 5
+
+// selectorAggregateDetMessage summarizes the match set for the aggregate
+// transition Event: the worst-case verdict plus a bounded per-object list.
+func selectorAggregateDetMessage(matched int, verdicts []selectorObjectVerdict, agg imageflowv1alpha1.RolloutStatus) string {
+	if len(verdicts) == 0 {
+		return fmt.Sprintf("selector target matched zero live objects; worst-case aggregate is %s "+
+			"(legal empty match set, ADR-014 decision 8)", agg)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "worst-case aggregate %s over %d matched object(s):", agg, matched)
+	for i, v := range verdicts {
+		if i == selectorDetMessageMaxObjects {
+			fmt.Fprintf(&b, " +%d more", len(verdicts)-i)
+			break
+		}
+		fmt.Fprintf(&b, " %s=%s;", v.name, v.rollout)
+	}
+	return strings.TrimSuffix(b.String(), ";")
+}
+
+// aggregateSelectorHealth folds the per-object health verdicts worst-case
+// (Unhealthy > Unknown > Healthy); an object without an opinion counts as
+// Unknown inside the fold. ok=false means no object carried a health opinion
+// at all, and the aggregate honestly keeps its persisted health.
+func aggregateSelectorHealth(verdicts []selectorObjectVerdict) (healthVerdict, bool) {
+	rank := func(s imageflowv1alpha1.HealthStatus) int {
+		switch s {
+		case imageflowv1alpha1.HealthHealthy:
+			return 0
+		case imageflowv1alpha1.HealthUnhealthy:
+			return 2
+		default: // Unknown and "" (no opinion) fold as Unknown
+			return 1
+		}
+	}
+	anyOpinion := false
+	worst, worstIdx := -1, -1
+	for i := range verdicts {
+		if verdicts[i].health != "" {
+			anyOpinion = true
+		}
+		if r := rank(verdicts[i].health); r > worst {
+			worst, worstIdx = r, i
+		}
+	}
+	if !anyOpinion || worstIdx < 0 {
+		return healthVerdict{}, false
+	}
+	v := verdicts[worstIdx]
+	status := v.health
+	if status == "" {
+		status = imageflowv1alpha1.HealthUnknown
+	}
+	return healthVerdict{status: status, reason: v.healthReason, message: v.healthMessage}, true
 }
 
 // hasCUEKeys reports whether the statusPolicyRef has at least one of

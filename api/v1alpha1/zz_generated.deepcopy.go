@@ -1040,6 +1040,11 @@ func (in *TagReference) DeepCopy() *TagReference {
 func (in *TargetDeliveryStatus) DeepCopyInto(out *TargetDeliveryStatus) {
 	*out = *in
 	in.TargetRef.DeepCopyInto(&out.TargetRef)
+	if in.MatchedObjects != nil {
+		in, out := &in.MatchedObjects, &out.MatchedObjects
+		*out = new(int32)
+		**out = **in
+	}
 	if in.LastTransitionTime != nil {
 		in, out := &in.LastTransitionTime, &out.LastTransitionTime
 		*out = (*in).DeepCopy()

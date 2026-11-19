@@ -1217,21 +1217,21 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 			t9iAuthorize(t81sSubName)
 			Eventually(func(g Gomega) {
 				got := t9iGetSub(t81sSubName)
-				// Per-object name-form entries only — never a selector-form entry.
-				for _, entry := range got.Status.Targets {
-					g.Expect(entry.TargetRef.Name).NotTo(BeEmpty())
-					g.Expect(entry.TargetRef.LabelSelector).To(BeNil())
-				}
-				e1 := t9iEntry(got, t81sWeb1)
-				g.Expect(e1).NotTo(BeNil())
-				g.Expect(e1.Reason).To(Equal(controller.TargetReasonApplied))
-				g.Expect(e1.ImageApplied).To(BeTrue())
-				e2 := t9iEntry(got, t81sWeb2)
-				g.Expect(e2).NotTo(BeNil())
-				g.Expect(e2.Reason).To(Equal(controller.TargetReasonConflict),
+				// #82: exactly one aggregated selector-form entry — the
+				// per-object detail lives in Events, never in status.
+				g.Expect(got.Status.Targets).To(HaveLen(1))
+				agg := got.Status.Targets[0]
+				g.Expect(agg.TargetRef.Name).To(BeEmpty())
+				g.Expect(agg.TargetRef.LabelSelector).NotTo(BeNil())
+				g.Expect(agg.MatchedObjects).NotTo(BeNil(),
+					"selector entries carry the match-set size")
+				g.Expect(*agg.MatchedObjects).To(Equal(int32(2)))
+				g.Expect(agg.Reason).To(Equal(controller.TargetReasonConflict),
 					"the contested object must be skipped, not force-applied")
-				g.Expect(e2.Message).To(ContainSubstring(t81sRivalSubName),
-					"the conflict entry must name the claimant")
+				g.Expect(agg.Message).To(ContainSubstring(t81sRivalSubName),
+					"the aggregated conflict message must name the claimant")
+				g.Expect(agg.Message).To(ContainSubstring(t81sWeb2),
+					"the aggregated conflict message must name the contested object")
 				g.Expect(got.Status.RolloutStatus).To(Equal(imageflowv1alpha1.RolloutConflict))
 				cond := t9iCondition(got, imageflowv1alpha1.ConditionTypeConflict)
 				g.Expect(cond).NotTo(BeNil())
@@ -1286,9 +1286,12 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 			Eventually(func(g Gomega) {
 				g.Expect(t9iGetDeploy(t81sWeb3).Spec.Template.Spec.Containers[0].Image).
 					To(Equal(t9iDigestA), "the label event must drive a reconcile that delivers the new member")
-				entry := t9iEntry(t9iGetSub(t81sSubName), t81sWeb3)
-				g.Expect(entry).NotTo(BeNil())
-				g.Expect(entry.Reason).To(Equal(controller.TargetReasonApplied))
+				got := t9iGetSub(t81sSubName)
+				g.Expect(got.Status.Targets).To(HaveLen(1))
+				agg := got.Status.Targets[0]
+				g.Expect(agg.MatchedObjects).NotTo(BeNil())
+				g.Expect(*agg.MatchedObjects).To(Equal(int32(3)),
+					"the match-set count must grow with the new member")
 			}, 90*time.Second, 250*time.Millisecond).Should(Succeed())
 
 			By("the contested object stays untouched by the losing subscription")

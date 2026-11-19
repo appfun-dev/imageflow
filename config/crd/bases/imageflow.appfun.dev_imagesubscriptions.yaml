@@ -578,6 +578,16 @@ spec:
                         rollout/health state.
                       format: date-time
                       type: string
+                    matchedObjects:
+                      description: |-
+                        MatchedObjects is the number of live objects in this selector target's
+                        match set at the last delivery pass (ADR-014 decision 5/8, spec v1.7
+                        D8). Set for selector-form targets only — including the legal empty
+                        match set (0, Reason=NoMatches); named targets leave it nil. Per-object
+                        detail never enters status: it travels on Events (spec v1.7 D8).
+                      format: int32
+                      minimum: 0
+                      type: integer
                     message:
                       description: Message is a human-readable explanation.
                       maxLength: 32768
