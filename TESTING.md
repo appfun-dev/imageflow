@@ -693,3 +693,49 @@ Run: `GOCACHE="$PWD/.gocache" go test ./internal/controller/... -run Health -ski
 - **隐藏验收点（#78 扩展点兑现）**：selector target 进控制器前（#81），`CanonicalTargetKey` 已能区分两种定位形态且键确定性由排序保证；
 - **校验落点**：name/labelSelector 校验与 T3 containerNames/imageFields 互斥同处 `validateTarget`，风格一致（field.ErrorList 聚合、Invalid 422 面），CRD 层不加 CEL（沿用 spec decision 6 分工）；
 - **已知环境限制**：`test/integration` 的 `Admission webhooks [BeforeAll]`（webhook server StartedChecker 20s 超时）在 base commit 55c3e07e 上同样失败，属本机环境既有问题，与本改动无关；e2e 需 Podman，本机不跑。
+
+## Selector Target 的 namespace 级 SAR（v1.7-03，#80）
+
+### 准入校验单元测试（`internal/webhook/webhook_test.go`）
+
+selector 语法深度校验（#79 review c3 移交），复用 apimachinery `ValidateLabelSelector`，与 API server 同一套规则：
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestValidateSubscriptionShapeRejects/selector with unknown operator` | 未知 operator 拒绝（"not a valid selector operator"） | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector In with empty values` | In 空 values 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector NotIn with empty values` | NotIn 空 values 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector Exists carrying values` | Exists 带 values 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector DoesNotExist carrying values` | DoesNotExist 带 values 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector matchLabels with invalid key` | matchLabels 脏 key 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector matchLabels with invalid value` | matchLabels 脏 value 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector matchExpressions with invalid key` | matchExpressions 脏 key 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeRejects/selector In with invalid value` | matchExpressions 脏 value 拒绝 | 已实现 |
+| `TestValidateSubscriptionShapeAccepts/selector target using all four operators validly (v1.7-03, #80)` | In/NotIn/Exists/DoesNotExist 合法混用通过 | 已实现 |
+
+### SAR 授权单元测试（`internal/webhook/subscription_authorize_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestValidateCreateSelectorTargetChecksNamespaceScope` | selector target 产出不点名 SAR（`ResourceAttributes.Name==""`、verb=update、resource=deployments），allow 零警告 | 已实现 |
+| `TestValidateCreateSelectorTargetDeniedRejectsAdmission` | selector deny → 拒入（IsForbidden），消息点名创建者、deny 原因与 selector 规范键 | 已实现 |
+| `TestValidateCreateSelectorTargetsShareCachedNamespaceSAR` | 同 subject+GVK+namespace 的不同 selector 共享一次 SAR（缓存键含 `name=""`）；第二个订阅命中缓存零新增 SAR | 已实现 |
+| `TestValidateUpdateSelectorTargetsUnchangedSkipsSAR` | spec.targets 未变化的更新零 SAR（selector 形态钉住既有短路） | 已实现 |
+| `TestValidateUpdateSelectorTargetChangeDeniedRejects` | targets 变更后 deny → 拒入，消息含新 selector 规范键 | 已实现 |
+| `TestValidateCreateMixedDeniedNamedWarnsSelectorRejects` | 混合 targets：named deny 保留 ADR-003 警告语义（"ZERO writes"），selector deny 拒入 | 已实现 |
+| `TestValidateCreateSelectorTargetUnresolvedWarnsWithoutRejection` | selector SAR 未决（限流）只警告不拒入，交控制器周期复核兜底 | 已实现 |
+
+### envtest（`internal/webhook/subscription_authorize_envtest_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSelectorTargetSARAdmission/denied namespace-level SAR rejects the admission as Forbidden` | 真实 RBAC 下创建者无 deployments update → 403 Forbidden（vimagesubscription.kb.io 路由，消息点名创建者与 selector 规范键） | 已实现 |
+| `TestSelectorTargetSARAdmission/allowed namespace-level SAR admits the subscription` | 授予 deployments update 后准入通过、对象持久化、mutating 钉入创建者身份 | 已实现 |
+
+### 覆盖率要点
+
+- **deny 拒入只作用于 selector 形态**：named target 维持 ADR-003 警告语义（运行期 per-object 闸仍在）；selector target 面向动态对象集，准入是唯一不点名闸口（ADR-014 决策 4），未决（限流/SAR 失败/Kind 未装）维持警告 + 控制器周期复核 fail closed；
+- **SAR 复用既有 TTL 缓存**：selector 形态以 `name=""` 入既有缓存键，同 subject+GVK+namespace 的不同 selector 共享一次 SAR，未新增缓存路径；
+- **语法校验复用 apimachinery**：`metav1validation.ValidateLabelSelector`（零 options）落 `validateTarget` 同缝，field.ErrorList 风格、Invalid 422 面，与 T3/v1.7-02 校验一致；脏 key/value 不再流入规范键；
+- **envtest 缝扩展**：共享环境暴露 `envtestEnv`/`envtestCfg` 包级 var，`AddUser` 产非 admin 身份，deny/allow 用不同用户隔离 SAR 缓存键；
+- **已知环境限制**：同 v1.7-02（`test/integration` webhook BeforeAll 20s 超时系本机既有问题；e2e 需 Podman 不跑）。envtest 需 `KUBEBUILDER_ASSETS`（`make test` 经 setup-envtest 提供）；本机以 `./bin/setup-envtest use 1.33` 备齐后两方向用例实跑通过。

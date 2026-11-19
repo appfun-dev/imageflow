@@ -4,9 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strings"
 	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -21,21 +24,30 @@ import (
 // identity holds the update verb on every target.
 //
 // Enforcement split (ADR-003: "不满足 → 订阅报 Forbidden Condition 且对该
-// 目标零写入"): the authoritative consequence of a denial is the persisted
-// Forbidden condition plus the zero-write guarantee, both owned by the
-// controller-side gate (internal/controller subscription-authz). This
-// admission half is the immediate-feedback surface: findings are returned as
-// admission WARNINGS (visible in kubectl apply output), never as denials, so
+// 目标零写入"): for NAMED targets the authoritative consequence of a denial
+// is the persisted Forbidden condition plus the zero-write guarantee, both
+// owned by the controller-side gate (internal/controller subscription-authz).
+// For them this admission half is the immediate-feedback surface: findings
+// are returned as admission WARNINGS (visible in kubectl apply output), never
+// as denials, so
 //
 //   - a subscription may legitimately be created before its RBAC grant or
 //     before its target kind/object exists (ADR-003 double insurance) and
 //     self-heals into delivery once the grant lands — no recreate needed;
 //   - the security property ("写不动创建者无权的 Workload") never depends on
-//     the webhook: the controller gate fails closed independently;
-//   - the T3 shape rules keep sole ownership of admission rejection.
+//     the webhook: the controller gate fails closed independently.
 //
-// Warning cases: denied targets (naming them and the RBAC remedy), a missing
-// or malformed created-by identity (the controller will report
+// SELECTOR targets (#80, ADR-014 决策 4) follow the stricter namespace-level
+// contract: their SAR carries no resourceName (the matched object set is
+// dynamic), and a definitive DENY rejects the admission with Forbidden —
+// admission is the only unnamed gate for a delivery surface that fans out to
+// whatever the selector matches. Unresolved checks (rate-limited, SAR
+// failure, kind not installed) stay advisory for both location forms: the
+// controller's periodic re-verification still fails closed on anything
+// admission could not settle.
+//
+// Warning cases: denied named targets (naming them and the RBAC remedy), a
+// missing or malformed created-by identity (the controller will report
 // Forbidden/MissingIdentity), rate-limited or failed SAR checks (the
 // controller re-verifies and fails closed), and target kinds the cluster does
 // not serve yet.
@@ -60,8 +72,9 @@ import (
 const sarRecheckPeriodFlag = "sar-recheck-period"
 
 // subscriptionAuthorizer performs the admission-time SAR checks through a
-// cached, rate-limited authz.Gate and maps every non-allowed finding to an
-// admission warning.
+// cached, rate-limited authz.Gate: denied named targets and unresolved checks
+// map to admission warnings, while a denied selector target rejects the
+// admission with Forbidden (#80, ADR-014 决策 4).
 type subscriptionAuthorizer struct {
 	gate *authz.Gate
 }
@@ -112,10 +125,20 @@ func (a *subscriptionAuthorizer) authorizeUpdate(
 	return a.authorizeTargets(ctx, newSub)
 }
 
-// authorizeTargets runs the gate over every target and renders the findings
-// as admission warnings. It never denies: the persisted Forbidden surface
-// and the zero-write guarantee are enforced by the controller-side gate
-// regardless of what happens here.
+// subscriptionGR identifies the ImageSubscription resource in the Forbidden
+// error that a denied selector target produces (#80).
+var subscriptionGR = schema.GroupResource{
+	Group:    imageflowv1alpha1.GroupVersion.Group,
+	Resource: "imagesubscriptions",
+}
+
+// authorizeTargets runs the gate over every target. Denied NAMED targets and
+// unresolved checks render as admission warnings (the controller-side gate
+// enforces the persisted Forbidden surface and the zero-write guarantee
+// regardless of what happens here); a denied SELECTOR target rejects the
+// admission with Forbidden (#80, ADR-014 决策 4) — its SAR is namespace-level
+// and unnamed, and admission is the only gate that sees the definitive deny
+// before delivery fans out to the dynamic matched set.
 func (a *subscriptionAuthorizer) authorizeTargets(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
@@ -135,32 +158,69 @@ func (a *subscriptionAuthorizer) authorizeTargets(
 	verdicts := a.gate.CheckTargets(ctx, subject, refs)
 
 	var warnings admission.Warnings
-	var denied, unresolved []authz.TargetVerdict
+	var deniedNamed, deniedSelector, unresolved []authz.TargetVerdict
 	for _, verdict := range verdicts {
 		switch verdict.Verdict {
 		case authz.VerdictDenied:
-			denied = append(denied, verdict)
+			if verdict.Target.LabelSelector != nil {
+				deniedSelector = append(deniedSelector, verdict)
+			} else {
+				deniedNamed = append(deniedNamed, verdict)
+			}
 		case authz.VerdictUnknown:
 			unresolved = append(unresolved, verdict)
 		}
 	}
 
-	if len(denied) > 0 {
+	if len(deniedNamed) > 0 {
 		warnings = append(warnings, fmt.Sprintf(
 			"[imageflow] creator %q lacks update permission on %d of %d target(s): %s. "+
 				"The subscription reports Forbidden and ImageFlow performs ZERO writes to these "+
 				"targets (ADR-003); grant standard RBAC update in the target namespace(s) and "+
 				"the periodic re-verification flips the state without a recreate.",
-			subject.Username, len(denied), len(refs), authz.FormatDeniedTargets(denied)))
+			subject.Username, len(deniedNamed), len(refs), authz.FormatDeniedTargets(deniedNamed)))
 	}
 	for _, verdict := range unresolved {
 		warnings = append(warnings, fmt.Sprintf(
 			"[imageflow] target %s could not be authorization-checked at admission (%s). "+
 				"The subscription controller re-verifies it periodically and performs zero "+
 				"writes until it is authorized.",
-			authz.FormatTarget(verdict.Target), summarizeUnresolved(verdict.Reason)))
+			formatAdmissionTarget(verdict.Target), summarizeUnresolved(verdict.Reason)))
+	}
+	if len(deniedSelector) > 0 {
+		return warnings, apierrors.NewForbidden(subscriptionGR, sub.Name, fmt.Errorf(
+			"creator %q lacks namespace-wide update permission required by %d selector "+
+				"target(s): %s. Selector targets deliver to a dynamic object set, so admission "+
+				"rejects them when the namespace-level SubjectAccessReview denies (#80, "+
+				"ADR-014 决策 4); grant the creator update on the target resource in the "+
+				"namespace and retry",
+			subject.Username, len(deniedSelector), formatDeniedSelectorTargets(deniedSelector)))
 	}
 	return warnings, nil
+}
+
+// formatAdmissionTarget renders a target for admission messages. Selector
+// targets use the canonical target key so the rendered identity names the
+// selector itself; authz.FormatTarget is name-shaped and would render an
+// empty object name for them.
+func formatAdmissionTarget(ref imageflowv1alpha1.TargetReference) string {
+	if ref.LabelSelector != nil {
+		return imageflowv1alpha1.CanonicalTargetKey(ref)
+	}
+	return authz.FormatTarget(ref)
+}
+
+// formatDeniedSelectorTargets renders the denied selector list for the
+// Forbidden message, one "target (reason)" entry per verdict; each reason is
+// capped at the shared MaxTargetReasonLength bound (the same vocabulary the
+// named-denial list uses via FormatDeniedTargets).
+func formatDeniedSelectorTargets(verdicts []authz.TargetVerdict) string {
+	parts := make([]string, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		parts = append(parts, formatAdmissionTarget(verdict.Target)+
+			" ("+authz.TruncateMessage(verdict.Reason, authz.MaxTargetReasonLength)+")")
+	}
+	return strings.Join(parts, "; ")
 }
 
 // summarizeUnresolved caps an unresolved-verdict reason for the warning text;
