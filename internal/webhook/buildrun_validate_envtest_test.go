@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -44,6 +45,12 @@ import (
 var (
 	envtestClient client.Client
 	envtestNS     string
+	// envtestEnv/envtestCfg expose the shared environment so suites can
+	// provision non-admin users (env.AddUser): the selector-target SAR
+	// admission suite (#80) needs a non-cluster-admin identity for RBAC to
+	// evaluate the creator for real.
+	envtestEnv *envtest.Environment
+	envtestCfg *rest.Config
 )
 
 func TestMain(m *testing.M) {
@@ -89,6 +96,8 @@ func startBuildRunAdmissionEnv() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("start envtest: %w", err)
 	}
+	envtestEnv = env
+	envtestCfg = cfg
 	fail := func(err error) (func(), error) {
 		_ = env.Stop()
 		return nil, err
