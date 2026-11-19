@@ -795,3 +795,34 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **诚实性**：结束态对象（Completed Pod/Job）在匹配解析层排除；零匹配零 status 面；未接线 resolver 如实 InvalidTarget；第三方 CRD 观察如实 Unknown；
 - **范围边界**：status 聚合精化/matched 计数/NoMatches Condition 属 #82，匹配数上限属 #83，本票不实现；
 - **已知环境限制**：`test/integration` webhook lane 的 `[BeforeAll]` 超时与 e2e Podman 依赖为本机既有环境问题（同 v1.7-02 小节说明）。
+
+## 匹配数硬上限（v1.7-06，#83）
+
+### 配置单元测试（`internal/config/config_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSelectorMatchLimitFlag` | `--selector-match-limit` 默认值 = 50 = `config.DefaultSelectorMatchLimit`（ADR-014 决策 7）；`=7` 解析生效且 Validate 通过；0 / 负值被 Validate 拒绝（"must be positive"） | 已实现 |
+
+### 引擎单元测试（`internal/controller/subscription_delivery_controller_test.go`，"Selector targets: match-count hard limit" 节）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports` | limit=2、匹配 3（名字排序）：只投递前 2 个（applies=2、statusWrites=1；web-3 零写入、无条目）；selector 键出现 `MatchLimitExceeded` 条目（Failed、消息含观测数 3 与上限 2）；聚合 Failed；恰好 1 条 Warning 事件（含 flag 名与两个数量）；`failures{match_limit_exceeded}`=1；稳态第二次 pass 零写入零事件、条目 Message 不变（事件去重免费获得） | 已实现 |
+| `TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded` | 恰等于上限（2/2）不触发：正常扇出 applies=2、无 selector 键条目（Targets 全为 name 形态）、无 Warning、聚合 Progressing | 已实现 |
+| `TestSubscriptionDeliverySelectorMatchLimitDefaultFifty` | 零值 `config.Config{}` 经构造器归一化回退默认 50：51 个匹配（web-000..web-050）只投递前 50、web-050 零写入无条目；selector 键条目消息含 51/50 | 已实现 |
+| `TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects` | 配额针对「有效匹配集」（ADR-014 决策 13）：Job 类 target、3 个匹配其一 `Complete=True`，fake-client lister 替身（resolver 接口注释钦定模式）排除后有效集 2 = limit → 不超限（applies=2、无 selector 键条目、无 Warning）；Completed Job 零写入 | 已实现 |
+
+### Observer 单元测试（`internal/controller/subscription_observer_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestObserverSkipsMatchLimitExceededSelectorEntry` | selector 键条目是引擎所有的 target 级终态报告：observer 跳过（不轮询、不改写、不报错——interceptor 注入真实 API 对空 name Get 的 "resource name may not be empty" 非 NotFound 错误形态，裸 fake client 会把它退化为 NotFound，故无守卫时本测试为真 RED）；name 形态条目照常观察（web-1 Succeeded、web-2 Progressing）；有界轮询 requeue；聚合保持 worst-state Failed | 已实现 |
+
+### 覆盖率要点
+
+- **判定时机**：上限检查位于 `deliverSelectorTarget` 中 matchResolver 返回有效匹配集（已排除结束态对象）之后、逐对象扇出之前；截断按名字排序取前 `limit` 个，行为确定；超限部分不投递、不 requeue、不报错（终态语义同 Conflict）；
+- **报告路径**：selector 键条目 Failed + Reason `MatchLimitExceeded`（rolloutSet 强制终态）；Warning 事件经 `planEffects` reasonChanged 路径自动发出（消息含上限值与实际观测数量），第二次 pass 持久化 reason 相同即不重发；`deliveryFailureLabel` 新增 `match_limit_exceeded`（指标 reason 词汇 11→12）；
+- **归一化单点**：`NewSubscriptionDeliveryReconciler` 对 `SelectorMatchLimit <= 0` 回退 `config.DefaultSelectorMatchLimit`——零值配置（存量测试、嵌入方）不会以 limit=0 误伤全部匹配；flag 层 Validate 另行拒绝非正值；
+- **与 v1.7-04 的关系**：其「永不出现 selector 形态条目」断言自 #83 起仅在未超限时成立；超限 target 例外出现 selector 键条目，observer 以结构式守卫（`LabelSelector != nil && Name == ""`）跳过——该守卫同时覆盖 #82 未来的 selector 键聚合条目；超限 target 的最终聚合状态呈现由 #82 最坏态规则接管，本票未改聚合逻辑；
+- **已知环境限制**：同 v1.7-04 小节（e2e Podman、`test/integration` webhook `[BeforeAll]`、Manager metrics 单跑 flake 均为本机既有环境问题）。

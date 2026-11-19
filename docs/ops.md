@@ -49,8 +49,8 @@ Deployment 默认 limits `500m/128Mi`、requests `10m/64Mi`，restricted PSS
 
 ## 2. Flags 全量清单
 
-默认部署（`config/manager/manager.yaml`）已把全部 13 个基础 flags 显式写进 args
-（含 webhook 4 个追加 flags，共 17 个）。默认值以 `cmd/main.go` +
+默认部署（`config/manager/manager.yaml`）已把全部 14 个基础 flags 显式写进 args
+（含 webhook 4 个追加 flags，共 18 个）。默认值以 `cmd/main.go` +
 `internal/config/config.go` 为准。
 
 ### ImageFlow 业务 flags（internal/config）
@@ -65,6 +65,7 @@ Deployment 默认 limits `500m/128Mi`、requests `10m/64Mi`，restricted PSS
 | `--stream-tag-history-limit` | `3` | 每 tag 历史镜像上限；溢出条目走 `TagHistoryOverflow` 事件（ADR-008 状态有界） |
 | `--subscription-delivery-limit` | `5` | `recentDeliveries` 上限（§12.9）；截断发 `DeliveryHistoryTruncated` 事件并计 `imageflow_deliveries_truncated_total` |
 | `--mirror-event-limit` | `5` | 镜像视图 `status.events[]` 上限；截断发 `EventSummaryTruncated` 事件并计 `imageflow_mirror_events_truncated_total` |
+| `--selector-match-limit` | `50` | 单个 label-selector target 的有效匹配数硬上限（ADR-014 决策 7，#83）：超限部分不投递（按名字排序取前 N），该 target 报 Failed/`MatchLimitExceeded` + Warning 事件（含上限与实际观测数量）；结束态对象（Completed Pod/Job）不占配额。必须为正（Validate 拒绝 0/负值） |
 | `--registry-allowlist` | 空（= 放行全部） | 逗号分隔的 Registry 主机白名单；**非空即 fail-closed**：名单外主机在发起任何 IO 前拒绝（`RegistryDenied`，ADR-007 SSRF 面）。生产强烈建议显式配置 |
 | `--enable-buildrun-watcher` | `false` | 启用 BuildRun Watcher controller（v1.1）。启用后前置检测 Shipwright CRD 存在性，不存在则报错退出。详见 §9 |
 
@@ -193,6 +194,7 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 | `InvalidTarget` | targetRef 非法（apiVersion/kind/name 缺失等） |
 | `InvalidImageField` | imageFields 路径无效（不存在/非字符串/选择不到元素/原子列表/系统字段/只读/不唯一——message 有按类判别） |
 | `KindNotInstalled` | 目标 Kind 未安装（CRD 缺失） |
+| `MatchLimitExceeded` | selector target 有效匹配数超过 `--selector-match-limit`（默认 50，ADR-014 决策 7）：超限部分不投递（按名字排序取前 N），条目为 selector 形态终态报告（Failed）；处置 = 收窄 selector / 拆分订阅 / 调大 flag。结束态对象不占配额 |
 | `Forbidden` | T8 授权门拒绝（创建者缺 update 权限）→ 补授权等复核 |
 
 **观察器（T11）**：
@@ -215,7 +217,8 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 `TaskGarbageCollected`；授权：`TargetsForbidden`、`TargetsAuthorized`、
 `MissingCreatorIdentity`；投递：`ImageApplied`（订阅侧+目标侧各一份，目标侧含
 "previous field value: …" 前置值审计）、`DeliveryConflict`、`UnsupportedTarget`、
-`DeliveryHistoryTruncated`、`DeliverySuperseded`；观察：`RolloutSucceeded`(Normal)、
+`DeliveryHistoryTruncated`、`DeliverySuperseded`、`MatchLimitExceeded`（selector
+匹配数超硬上限，Warning，含上限与实际观测数量，#83）；观察：`RolloutSucceeded`(Normal)、
 `RolloutFailed`(Warning)、`RolloutUnknown`、`RolloutProgressing`（message 带
 `Determination:` 四阶段审计）；镜像视图：`EventSummaryTruncated`。
 

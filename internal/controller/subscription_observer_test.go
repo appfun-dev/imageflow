@@ -52,6 +52,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/clock"
@@ -3145,5 +3146,149 @@ func TestObserverSelectorThirdPartyEntryHonestUnknown(t *testing.T) {
 	}
 	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindOther, observerResultUnknown)); v != 1 {
 		t.Fatalf("rollout outcome metric = %v, want 1", v)
+	}
+}
+
+// TestObserverSkipsMatchLimitExceededSelectorEntry pins the observer-side
+// contract of issue #83: the delivery engine reports a selector target whose
+// match set exceeded --selector-match-limit as a SELECTOR-KEYED entry with
+// Reason MatchLimitExceeded (ADR-014 decision 7). The entry is a terminal
+// engine-owned report — the observer must skip it (there is no object name to
+// poll) while the per-object name-form entries keep being observed and judged
+// normally.
+//
+// The stock fake client degrades an empty-name Get into NotFound, which the
+// observer would silently swallow; the real API machinery rejects it
+// client-side ("resource name may not be empty"), a non-NotFound error that
+// surfaces as an observer pass error on every reconcile for as long as the
+// report persists. This test injects that production error shape so the skip
+// contract is pinned against real behaviour, not a fake-client artefact.
+func TestObserverSkipsMatchLimitExceededSelectorEntry(t *testing.T) {
+	selectorTarget := t11uSelectorTarget(map[string]string{"app": "web"})
+	limitEntry := imageflowv1alpha1.TargetDeliveryStatus{
+		TargetRef:     selectorTarget.TargetRef,
+		DesiredImage:  t11uRefA,
+		RolloutStatus: imageflowv1alpha1.RolloutFailed,
+		HealthStatus:  imageflowv1alpha1.HealthUnknown,
+		Reason:        TargetReasonMatchLimitExceeded,
+		Message: "selector target matched 3 objects, over the hard limit of 2 " +
+			"(--selector-match-limit): the remaining 1 are NOT delivered",
+	}
+	web1Ref := t11uDeployRef()
+	web1Ref.Name = "web-1"
+	web2Ref := t11uDeployRef()
+	web2Ref.Name = "web-2"
+	succeeded := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2, AvailableReplicas: 2, ReadyReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}},
+	}
+	progressing := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           3, UpdatedReplicas: 1, AvailableReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}, {
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue,
+			Reason: "ReplicaSetUpdated",
+		}},
+	}
+	sub := t11uSub(
+		[]imageflowv1alpha1.SubscriptionTarget{selectorTarget},
+		imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions: t11uAuthorizedConditions(),
+			Targets: []imageflowv1alpha1.TargetDeliveryStatus{
+				limitEntry,
+				t11uSeededEntry(web1Ref, t11uRefA),
+				t11uSeededEntry(web2Ref, t11uRefA),
+			},
+			RolloutStatus:      imageflowv1alpha1.RolloutFailed,
+			ObservedGeneration: 1,
+		})
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := imageflowv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add imageflow scheme: %v", err)
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			t11uNamedDeployment("web-1", t11uRefA, succeeded),
+			t11uNamedDeployment("web-2", t11uRefA, progressing),
+			sub,
+		).
+		WithStatusSubresource(&imageflowv1alpha1.ImageSubscription{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if key.Name == "" {
+					return fmt.Errorf("resource name may not be empty")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	// The fake strips status from Create for subresource-registered kinds;
+	// persist the seeded status through the subresource, as the fixture does.
+	if err := cl.Status().Update(t11uCtx, sub); err != nil {
+		t.Fatalf("persist seeded status: %v", err)
+	}
+	r := NewSubscriptionObserverReconciler(cl, nil, record.NewFakeRecorder(256),
+		clock.NewFake(t11uStart), config.Config{}, newObserverMetrics(), nil)
+
+	res, err := r.Reconcile(t11uCtx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: t11uNamespace, Name: t11uSubName,
+	}})
+	if err != nil {
+		t.Fatalf("the observer must skip the nameless match-limit report, got error: %v", err)
+	}
+	if res.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("the in-flight object must keep the bounded poll requeue, got %v", res.RequeueAfter)
+	}
+	got := &imageflowv1alpha1.ImageSubscription{}
+	if err := cl.Get(t11uCtx, types.NamespacedName{Namespace: t11uNamespace, Name: t11uSubName}, got); err != nil {
+		t.Fatalf("get sub: %v", err)
+	}
+
+	// The terminal report survives the observer's status write untouched.
+	var after *imageflowv1alpha1.TargetDeliveryStatus
+	for i := range got.Status.Targets {
+		if got.Status.Targets[i].Reason == TargetReasonMatchLimitExceeded {
+			after = &got.Status.Targets[i]
+		}
+	}
+	if after == nil {
+		t.Fatal("the match-limit entry disappeared")
+	}
+	if after.TargetRef.Name != "" || after.TargetRef.LabelSelector == nil {
+		t.Fatalf("the match-limit entry must stay selector-keyed, got %+v", after.TargetRef)
+	}
+	if after.RolloutStatus != imageflowv1alpha1.RolloutFailed || after.Message != limitEntry.Message ||
+		after.DesiredImage != t11uRefA {
+		t.Fatalf("the observer must not rewrite the terminal report, got %+v", after)
+	}
+
+	// Per-object observation still runs: web-1 healed to Succeeded, web-2
+	// stays in flight.
+	e1 := t11uEntryByName(got, "web-1")
+	if e1 == nil || e1.RolloutStatus != imageflowv1alpha1.RolloutSucceeded {
+		t.Fatalf("web-1 = %+v, want observed Succeeded", e1)
+	}
+	e2 := t11uEntryByName(got, "web-2")
+	if e2 == nil || e2.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("web-2 = %+v, want still Progressing", e2)
+	}
+
+	// Worst-state aggregate stays Failed — the limit report outranks the
+	// healthy objects (the aggregate presentation itself is #82's rule).
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("aggregate = %q, want Failed", got.Status.RolloutStatus)
 	}
 }

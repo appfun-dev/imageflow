@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -2251,5 +2252,305 @@ func TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject(t *testing
 	// The selector target itself is NOT gated by a per-object entry.
 	if entry := t9cEntryByKey(got, selectorKey); entry != nil {
 		t.Fatalf("selector-form entries must never appear in status, got %+v", entry)
+	}
+}
+
+// --- Selector targets: match-count hard limit (issue #83, ADR-014
+// decisions 7/13, spec D6) ---
+//
+// The bound is a controller startup flag (config.SelectorMatchLimit,
+// --selector-match-limit, default 50). The engine applies it to the RESOLVED
+// (effective) match set immediately before fan-out: members beyond the bound
+// see zero writes and get no entry; the selector target itself reports
+// Failed with Reason MatchLimitExceeded on a selector-keyed entry plus one
+// Warning Event naming the limit and the observed count; completed-state
+// objects never consume quota (they are excluded upstream, before the bound
+// applies).
+
+const t9cWeb3 = "web-3"
+
+// TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports pins spec D6:
+// three matches under a limit of two deliver the first two in sorted name
+// order, the third sees zero writes; the target reports
+// Failed/MatchLimitExceeded with a Warning Event naming both numbers; the
+// failure is metered; the next pass stays silent (terminal report, no
+// re-emit, no churn).
+func TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web3 := t9cLabeledDeploy(t9cWeb3, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2, t9cWeb3}}}
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2, web3)
+	f.reconciler.SetMatchResolver(matcher)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("over-limit pass must stay a terminal report: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 2 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("only the first two matches may be applied, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb3), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the match beyond the limit must see zero writes, image is %s", image)
+	}
+
+	got := f.getSub(t)
+	if entry := t9cEntry(got, t9cWeb3); entry != nil {
+		t.Fatalf("the truncated object must not get a status entry, got %+v", entry)
+	}
+	limit := t9cEntryByKey(got, selectorKey)
+	if limit == nil {
+		t.Fatal("the over-limit target must report on a selector-keyed entry")
+	}
+	if limit.Reason != TargetReasonMatchLimitExceeded || limit.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("selector entry = %s/%s, want %s/Failed",
+			limit.Reason, limit.RolloutStatus, TargetReasonMatchLimitExceeded)
+	}
+	if !strings.Contains(limit.Message, "3") || !strings.Contains(limit.Message, "2") {
+		t.Fatalf("message must name the observed count and the limit, got %q", limit.Message)
+	}
+	for _, name := range []string{t9cWeb1, t9cWeb2} {
+		assertT9cDeliveredEntry(t, t9cEntry(got, name))
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("aggregate = %q, want Failed (worst state)", got.Status.RolloutStatus)
+	}
+	// MatchLimitExceeded is an entry Reason + Event, not a new Condition type.
+	assertT9cCleanConditions(t, got)
+
+	events := drainT9cEvents(f.recorder)
+	warnings := t9cEventsWith(events, TargetReasonMatchLimitExceeded)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one %s Warning event, got %v", TargetReasonMatchLimitExceeded, events)
+	}
+	if !strings.HasPrefix(warnings[0], "Warning") || !strings.Contains(warnings[0], "--selector-match-limit") {
+		t.Fatalf("warning event must carry severity and the bound, got %q", warnings[0])
+	}
+	if applied := t9cEventsWith(events, EventReasonImageApplied); len(applied) != 4 {
+		t.Fatalf("the two delivered objects still fire their dual-namespace events, got %v", events)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelMatchLimitExceeded); v != 1 {
+		t.Fatalf("failures{match_limit_exceeded} = %v, want 1", v)
+	}
+
+	// Steady state: same match set, same bound — zero writes, zero events,
+	// the terminal report persists unchanged.
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady state must be silent, got %+v", f.audit)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("steady state must not re-emit events, got %v", events)
+	}
+	still := f.getSub(t)
+	after := t9cEntryByKey(still, selectorKey)
+	if after == nil || after.Reason != TargetReasonMatchLimitExceeded ||
+		after.RolloutStatus != imageflowv1alpha1.RolloutFailed || after.Message != limit.Message {
+		t.Fatalf("the terminal report must persist unchanged, got %+v", after)
+	}
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded pins the
+// boundary: a match set exactly AT the limit stays inside the quota — full
+// fan-out, no selector-keyed entry, no warning, normal aggregate.
+func TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("boundary pass errored: %v", err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("every match within the limit must be delivered, got %+v", f.audit)
+	}
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 2 {
+		t.Fatalf("expected the two name-form entries only, got %+v", got.Status.Targets)
+	}
+	if entry := t9cEntryByKey(got, selectorKey); entry != nil {
+		t.Fatalf("at the limit no selector-keyed entry may appear, got %+v", entry)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate = %q, want Progressing", got.Status.RolloutStatus)
+	}
+	if warnings := t9cEventsWith(drainT9cEvents(f.recorder), TargetReasonMatchLimitExceeded); len(warnings) != 0 {
+		t.Fatalf("no warning at the boundary, got %v", warnings)
+	}
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitDefaultFifty pins the ADR-014
+// default engine-side: a zero-value config normalizes to 50, so of 51
+// matching objects exactly the 51st (sorted last) is not delivered.
+func TestSubscriptionDeliverySelectorMatchLimitDefaultFifty(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	names := make([]string, 0, config.DefaultSelectorMatchLimit+1)
+	objs := []client.Object{sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute))}
+	for i := 0; i <= config.DefaultSelectorMatchLimit; i++ {
+		name := fmt.Sprintf("web-%03d", i) // web-000..web-050, sorted order
+		names = append(names, name)
+		objs = append(objs, t9cLabeledDeploy(name, t9cAppCheckout,
+			[2]string{t9cContainer, t9cInitialImage}))
+	}
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: names}}
+	f := newT9cFixture(t, config.Config{}, objs...)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("default-limit pass errored: %v", err)
+	}
+	if f.audit.applies != config.DefaultSelectorMatchLimit {
+		t.Fatalf("expected exactly %d applies, got %+v", config.DefaultSelectorMatchLimit, f.audit)
+	}
+	overflow := names[config.DefaultSelectorMatchLimit]
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, overflow), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the match beyond the default limit saw a write, image %s", image)
+	}
+	got := f.getSub(t)
+	limit := t9cEntryByKey(got, selectorKey)
+	if limit == nil || limit.Reason != TargetReasonMatchLimitExceeded ||
+		limit.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("over-limit report missing: %+v", limit)
+	}
+	if !strings.Contains(limit.Message, "51") || !strings.Contains(limit.Message, "50") {
+		t.Fatalf("message must name observed 51 and limit 50, got %q", limit.Message)
+	}
+	if entry := t9cEntry(got, overflow); entry != nil {
+		t.Fatalf("the truncated object must not get an entry, got %+v", entry)
+	}
+}
+
+// t83LabeledJob builds a batch/v1 Job in the shape the engine delivers
+// (spec.template.spec.containers), optionally Completed (Complete=True —
+// the Job terminal state of ADR-014 decision 13).
+func t83LabeledJob(name string, objLabels map[string]string, completed bool, images ...[2]string) *unstructured.Unstructured {
+	containers := make([]any, 0, len(images))
+	for _, pair := range images {
+		containers = append(containers, map[string]any{"name": pair[0], "image": pair[1]})
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": t9cAPIBatch,
+		"kind":       t9cKindJob,
+		"metadata":   map[string]any{"namespace": t9cNamespace, "name": name},
+		"spec": map[string]any{
+			"template": map[string]any{"spec": map[string]any{"containers": containers}},
+		},
+	}}
+	u.SetLabels(objLabels)
+	if completed {
+		if err := unstructured.SetNestedSlice(u.Object, []any{
+			map[string]any{"type": "Complete", "status": "True"},
+		}, "status", "conditions"); err != nil {
+			panic(err)
+		}
+	}
+	return u
+}
+
+func t83JobSelectorTarget(matchLabels map[string]string, containers ...string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t9cAPIBatch,
+			Kind:          t9cKindJob,
+			Namespace:     t9cNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: containers,
+	}
+}
+
+func t83JobByName(t *testing.T, f *t9cFixture, name string) *unstructured.Unstructured {
+	t.Helper()
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(t9cAPIBatch)
+	u.SetKind(t9cKindJob)
+	key := types.NamespacedName{Namespace: t9cNamespace, Name: name}
+	if err := f.client.Get(context.Background(), key, u); err != nil {
+		t.Fatalf("get job %s: %v", name, err)
+	}
+	return u
+}
+
+// t83ListerMatcher is the unit-test double sanctioned by the matchResolverAPI
+// interface comment: it lists through the fake client and applies the same
+// label match and completed-state exclusion as the production resolveSelector
+// (ADR-014 decision 13), so the engine sees the EFFECTIVE match set.
+type t83ListerMatcher struct{ cl client.Client }
+
+func (m t83ListerMatcher) resolveSelector(ctx context.Context, ref imageflowv1alpha1.TargetReference) ([]string, error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gv.WithKind(ref.Kind))
+	if err := m.cl.List(ctx, list, client.InNamespace(ref.Namespace)); err != nil {
+		return nil, err
+	}
+	var names []string
+	for i := range list.Items {
+		obj := &list.Items[i]
+		if !selectorMatchesLabels(ref.LabelSelector, obj.GetLabels()) || isCompletedObject(obj) {
+			continue
+		}
+		names = append(names, obj.GetName())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects
+// pins AC ③: the quota counts the EFFECTIVE match set — completed-state
+// objects are excluded before the bound applies (ADR-014 decision 13). Three
+// Jobs physically carry the label, one is Complete=True → effective set of
+// two ≤ limit two → everything live is delivered, no over-limit surface
+// appears anywhere, and the completed Job sees zero writes.
+func TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects(t *testing.T) {
+	sub := t9cAuthorizedSub(t83JobSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)),
+		t83LabeledJob("batch-1", t9cAppCheckout, false, [2]string{t9cContainer, t9cInitialImage}),
+		t83LabeledJob("batch-2", t9cAppCheckout, false, [2]string{t9cContainer, t9cInitialImage}),
+		t83LabeledJob("batch-done", t9cAppCheckout, true, [2]string{t9cContainer, t9cInitialImage}),
+	)
+	f.reconciler.SetMatchResolver(t83ListerMatcher{cl: f.client})
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("quota pass errored: %v", err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("the two live Jobs must be delivered, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t83JobByName(t, f, "batch-done"), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the completed Job must see zero writes, image is %s", image)
+	}
+	for _, name := range []string{"batch-1", "batch-2"} {
+		if image := t9cContainerImage(t, t83JobByName(t, f, name), t9cContainer); image != t9cDigestA {
+			t.Fatalf("%s image = %s, want digest %s", name, image, t9cDigestA)
+		}
+	}
+	got := f.getSub(t)
+	if entry := t9cEntryByKey(got, selectorKey); entry != nil {
+		t.Fatalf("an effective set within the limit must not produce a selector-keyed entry, got %+v", entry)
+	}
+	if entry := t9cEntry(got, "batch-done"); entry != nil {
+		t.Fatalf("the completed Job is outside the match set entirely, got %+v", entry)
+	}
+	if warnings := t9cEventsWith(drainT9cEvents(f.recorder), TargetReasonMatchLimitExceeded); len(warnings) != 0 {
+		t.Fatalf("quota counts effective matches only, no warning expected, got %v", warnings)
 	}
 }

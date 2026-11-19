@@ -660,6 +660,8 @@ func deliveryFailureLabel(reason string) (label string, ok bool) {
 		return failureLabelKindNotInstalled, true
 	case TargetReasonConflict:
 		return failureLabelConflict, true
+	case TargetReasonMatchLimitExceeded:
+		return failureLabelMatchLimitExceeded, true
 	}
 	return "", false
 }

@@ -572,6 +572,14 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 	if entry.RolloutStatus == imageflowv1alpha1.RolloutSuperseded {
 		return nil // defensive: entry-level Superseded is terminal
 	}
+	if ref.LabelSelector != nil && ref.Name == "" {
+		// Selector-keyed entries are engine-owned target-level reports (the
+		// MatchLimitExceeded report of issue #83; the same shape #82 will use
+		// for its aggregate entry), not observable objects: there is no name
+		// to poll, and a real API client rejects an empty-name Get. The
+		// per-object name-form entries are observed by observeSelectorEntries.
+		return nil
+	}
 
 	out := &observerOutcome{ref: ref, kindLabel: observerKindOther, rollout: entry.RolloutStatus}
 	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)

@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// DefaultSelectorMatchLimit is the hard bound on how many objects one
+// label-selector subscription target may match per delivery pass (ADR-014
+// decision 7, issue #83). Matches beyond the bound are not delivered; the
+// target reports Failed/MatchLimitExceeded with a Warning Event.
+const DefaultSelectorMatchLimit = 50
+
 // Config holds all controller-manager flags so they can be injected into controllers.
 type Config struct {
 	MappingTTLSuccess         time.Duration
@@ -17,6 +23,7 @@ type Config struct {
 	StreamTagHistoryLimit     int
 	SubscriptionDeliveryLimit int
 	MirrorEventLimit          int
+	SelectorMatchLimit        int
 	RegistryAllowlist         []string
 	EnableBuildRunWatcher     bool
 }
@@ -40,6 +47,10 @@ func (c *Config) BindFlags(fs *flag.FlagSet) {
 		"Maximum number of recent delivery results kept in an ImageSubscription status.")
 	fs.IntVar(&c.MirrorEventLimit, "mirror-event-limit", 5,
 		"Maximum number of recent events kept in mirror (ImageStreamTag/ImageTag) statuses.")
+	fs.IntVar(&c.SelectorMatchLimit, "selector-match-limit", DefaultSelectorMatchLimit,
+		"Hard bound on how many objects one label-selector subscription target may "+
+			"match per delivery pass; matches beyond the bound are not delivered "+
+			"(ADR-014 decision 7).")
 	fs.Var(&stringSliceValue{dst: &c.RegistryAllowlist}, "registry-allowlist",
 		"Comma-separated list of allowed registry hostnames (empty = allow all).")
 	fs.BoolVar(&c.EnableBuildRunWatcher, "enable-buildrun-watcher", false,
@@ -56,6 +67,9 @@ func (c *Config) Validate() error {
 	}
 	if c.StreamTagHistoryLimit <= 0 || c.SubscriptionDeliveryLimit <= 0 || c.MirrorEventLimit <= 0 {
 		return fmt.Errorf("status bounds must be positive")
+	}
+	if c.SelectorMatchLimit <= 0 {
+		return fmt.Errorf("--selector-match-limit must be positive")
 	}
 	return nil
 }

@@ -71,3 +71,51 @@ func TestDefaultsMatchADR008(t *testing.T) {
 			cfg.StreamTagHistoryLimit, cfg.SubscriptionDeliveryLimit, cfg.MirrorEventLimit)
 	}
 }
+
+// v1.7-06 (#83): the hard bound on how many objects one label-selector
+// target may match per delivery pass — flag default 50 (ADR-014 decision 7),
+// configurable at startup, non-positive rejected.
+func TestSelectorMatchLimitFlag(t *testing.T) {
+	if DefaultSelectorMatchLimit != 50 {
+		t.Errorf("DefaultSelectorMatchLimit = %d, want 50 (ADR-014 decision 7)", DefaultSelectorMatchLimit)
+	}
+
+	var cfg Config
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cfg.BindFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if cfg.SelectorMatchLimit != DefaultSelectorMatchLimit {
+		t.Errorf("--selector-match-limit default = %d, want %d",
+			cfg.SelectorMatchLimit, DefaultSelectorMatchLimit)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate failed with flag defaults: %v", err)
+	}
+
+	var custom Config
+	customFS := flag.NewFlagSet("test", flag.ContinueOnError)
+	custom.BindFlags(customFS)
+	if err := customFS.Parse([]string{"--selector-match-limit=7"}); err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if custom.SelectorMatchLimit != 7 {
+		t.Errorf("--selector-match-limit = %d, want 7", custom.SelectorMatchLimit)
+	}
+	if err := custom.Validate(); err != nil {
+		t.Fatalf("validate rejected a configured positive limit: %v", err)
+	}
+
+	for _, value := range []string{"0", "-1"} {
+		var bad Config
+		badFS := flag.NewFlagSet("test", flag.ContinueOnError)
+		bad.BindFlags(badFS)
+		if err := badFS.Parse([]string{"--selector-match-limit=" + value}); err != nil {
+			t.Fatalf("parse %s failed: %v", value, err)
+		}
+		if err := bad.Validate(); err == nil {
+			t.Errorf("Validate() accepted --selector-match-limit=%s, want an error", value)
+		}
+	}
+}
