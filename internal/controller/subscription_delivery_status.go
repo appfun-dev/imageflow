@@ -535,8 +535,10 @@ func mergeRecentDeliveries(
 				// T11 (AC5/AC6): the supersede itself is audited with a
 				// dual-namespace Event carrying source, old/new image,
 				// target and the per-stage results at supersede time.
+				// v1.7-07 #84: selector-form targets audit the flip per
+				// object (ADR-014 decision 10).
 				transition.events = append(transition.events,
-					supersededEvent(*entry, inFlight, record, outcomes))
+					supersededEvents(*entry, inFlight, record, outcomes)...)
 			}
 		}
 		merged = append([]imageflowv1alpha1.DeliveryResult{record}, merged...)
@@ -578,6 +580,81 @@ func supersededEvent(
 		}
 	}
 	return ev
+}
+
+// supersededEvents generalizes the Superseded audit to the per-object
+// dimension for selector-shape targets (v1.7-07 #84, ADR-014 decision 10,
+// spec D9):
+//
+//   - The record flip itself stays aggregate latest-wins — mergeRecentDeliveries
+//     flips the same-key in-flight record regardless of the target shape.
+//   - The named shape keeps its single per-target event verbatim (T11
+//     vocabulary, pinned by TestSupersededEventPlannedOnLatestWins).
+//   - The selector shape emits one event per object ACTUALLY overwritten by
+//     the newer tag in this pass (a value-changing apply landed:
+//     objectOutcomes.delivered), each riding that object dual-namespace.
+//     Conflict-skipped, converged and immutable objects are not overwritten
+//     and record nothing. Objects that left the match set (label removed)
+//     never appear in this pass's objectOutcomes at all, so they are never
+//     named — they simply keep their last delivered image.
+//   - A selector-shape supersede pass that overwrote zero objects (e.g. a
+//     conflict-lane record) still audits the aggregate flip, falling back to
+//     a single subscription-side event that says so honestly.
+func supersededEvents(
+	entry imageflowv1alpha1.DeliveryResult,
+	inFlight imageflowv1alpha1.RolloutStatus,
+	record imageflowv1alpha1.DeliveryResult,
+	outcomes []deliveryOutcome,
+) []plannedEvent {
+	ref := entry.TargetRef
+	if ref.LabelSelector == nil || ref.Name != "" {
+		return []plannedEvent{supersededEvent(entry, inFlight, record, outcomes)}
+	}
+	entryKey := imageflowv1alpha1.CanonicalTargetKey(ref)
+	var aggregate *deliveryOutcome
+	for i := range outcomes {
+		if imageflowv1alpha1.CanonicalTargetKey(outcomes[i].ref) == entryKey {
+			aggregate = &outcomes[i]
+			break
+		}
+	}
+	var events []plannedEvent
+	if aggregate != nil {
+		for i := range aggregate.objectOutcomes {
+			obj := &aggregate.objectOutcomes[i]
+			if !obj.delivered {
+				continue
+			}
+			message := fmt.Sprintf(
+				"Delivery superseded per object (latest-wins, ADR-008; per-object Superseded, ADR-014 decision 10): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished — this object was actually overwritten by the newer tag; objects that left the match set keep their last delivered image and are NOT superseded. Terminal: no retry, no cross-target rollback; the native rollout controller converges the workload on its own. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+				entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+				authz.FormatTarget(obj.ref), record.NewImage,
+				entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+			ev := plannedEvent{
+				eventType: corev1.EventTypeNormal,
+				reason:    EventReasonDeliverySuperseded,
+				message:   authz.TruncateMessage(message, 1024),
+			}
+			if obj.targetObject != nil {
+				ev.targetSide = true
+				ev.targetObject = obj.targetObject
+			}
+			events = append(events, ev)
+		}
+	}
+	if len(events) > 0 {
+		return events
+	}
+	message := fmt.Sprintf(
+		"Delivery superseded at target level (latest-wins, ADR-008; per-object Superseded, ADR-014 decision 10): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished; zero matched objects were actually overwritten by the newer tag in this pass, so no object records a per-object Superseded fact; label-removed objects keep their last delivered image and are NOT superseded. Terminal: no retry, no cross-target rollback. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+		entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+		authz.FormatTarget(ref), record.NewImage,
+		entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+	return []plannedEvent{{
+		eventType: corev1.EventTypeNormal,
+		reason:    EventReasonDeliverySuperseded,
+		message:   authz.TruncateMessage(message, 1024),
+	}}
 }
 
 // healthOrUnknown renders an unset health result honestly as Unknown.

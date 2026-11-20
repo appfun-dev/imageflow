@@ -2462,6 +2462,226 @@ func TestSubscriptionDeliverySelectorLabelRemovalShrinksMatchedKeepsImage(t *tes
 	}
 }
 
+// TestSubscriptionDeliverySelectorDynamicSetLifecycle pins issue #84
+// (ADR-014 decisions 3/10, spec D9) across the full dynamic-set lifecycle of
+// one selector target:
+//
+//	phase 0: legal empty set (zero matches, zero writes);
+//	phase 1: a member JOINS → the very next pass delivers the current
+//	         desired image immediately (no extra trigger, no wait);
+//	phase 2: a second member joins a converged target → immediate delivery
+//	         of the same digest to the new member only;
+//	phase 3: web-1 loses its label → keeps its image, leaves the count,
+//	         zero churn (label-removal retention);
+//	phase 4: a NEW TAG arrives → only in-set members are overwritten; the
+//	         in-flight records flip to Superseded (aggregate latest-wins)
+//	         and the per-object audit names the overwritten object ONLY —
+//	         the departed web-1 keeps digestA and is never named;
+//	phase 5: web-3 joins after the tag move → it receives the CURRENT
+//	         digest immediately (new-member pickup in its strongest form).
+func TestSubscriptionDeliverySelectorDynamicSetLifecycle(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web3 := t9cLabeledDeploy(t9cWeb3, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2, web3)
+	f.reconciler.SetMatchResolver(matcher)
+
+	imageOf := func(name string) string {
+		t.Helper()
+		return t9cContainerImage(t, t9cDeployByName(t, f, name), t9cContainer)
+	}
+	matchedOf := func() int32 {
+		t.Helper()
+		entry := t9cEntryByKey(f.getSub(t), selectorKey)
+		if entry == nil || entry.MatchedObjects == nil {
+			t.Fatalf("aggregate entry missing: %+v", f.getSub(t).Status.Targets)
+		}
+		return *entry.MatchedObjects
+	}
+	advance := func() {
+		t.Helper()
+		f.clock.Advance(time.Minute)
+		f.audit.reset()
+		if _, err := f.reconcile(t); err != nil {
+			t.Fatalf("pass failed: %v", err)
+		}
+	}
+
+	// Phase 0 — legal empty set: nothing matches, nothing is written.
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("empty-set pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("zero matches must not write any workload, got %+v", f.audit)
+	}
+	if matchedOf() != 0 {
+		t.Fatalf("empty set must report matched=0, got %d", matchedOf())
+	}
+	if entry := t9cEntryByKey(f.getSub(t), selectorKey); entry.Reason != TargetReasonNoMatches {
+		t.Fatalf("empty set must surface NoMatches, got %+v", entry)
+	}
+	drainT9cEvents(f.recorder)
+
+	// Phase 1 — web-1 gains the label: immediate delivery of the current
+	// desired image on the very next pass.
+	matcher.byKey[selectorKey] = []string{t9cWeb1}
+	advance()
+	if f.audit.applies != 1 {
+		t.Fatalf("the new member must be delivered immediately, got %+v", f.audit)
+	}
+	if imageOf(t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 must hold the current digest immediately, got %s", imageOf(t9cWeb1))
+	}
+	if imageOf(t9cWeb2) != t9cInitialImage || imageOf(t9cWeb3) != t9cInitialImage {
+		t.Fatalf("non-members must stay untouched: web2=%s web3=%s", imageOf(t9cWeb2), imageOf(t9cWeb3))
+	}
+	if matchedOf() != 1 {
+		t.Fatalf("matched must be 1, got %d", matchedOf())
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry.Reason != TargetReasonApplied || !entry.ImageApplied || entry.ObservedImage != t9cDigestA {
+		t.Fatalf("phase-1 entry = %+v, want Applied/digestA", entry)
+	}
+	if len(got.Status.RecentDeliveries) != 1 || got.Status.RecentDeliveries[0].NewImage != t9cDigestA ||
+		got.Status.RecentDeliveries[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-1 window = %+v, want one in-flight digestA record", got.Status.RecentDeliveries)
+	}
+	if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, EventReasonImageApplied)) != 2 || len(events) != 2 {
+		t.Fatalf("phase-1 events = %v, want the dual-namespace ImageApplied pair", events)
+	}
+
+	// Phase 2 — web-2 joins a converged target: immediate delivery of the
+	// SAME digest to the new member only; web-1 sees zero writes.
+	matcher.byKey[selectorKey] = []string{t9cWeb1, t9cWeb2}
+	advance()
+	if f.audit.applies != 1 {
+		t.Fatalf("only the joining member is delivered, got %+v", f.audit)
+	}
+	if imageOf(t9cWeb2) != t9cDigestA {
+		t.Fatalf("web-2 must hold digestA immediately after joining, got %s", imageOf(t9cWeb2))
+	}
+	if matchedOf() != 2 {
+		t.Fatalf("matched must be 2, got %d", matchedOf())
+	}
+	if recs := f.getSub(t).Status.RecentDeliveries; len(recs) != 2 ||
+		recs[0].NewImage != t9cDigestA || recs[1].NewImage != t9cDigestA ||
+		recs[1].RolloutResult == imageflowv1alpha1.RolloutSuperseded {
+		t.Fatalf("same-digest delivery to a new member must not flip history, got %+v", recs)
+	}
+	events := drainT9cEvents(f.recorder)
+	applied := t9cEventsWith(events, EventReasonImageApplied)
+	if len(applied) != 2 || len(events) != 2 {
+		t.Fatalf("phase-2 events = %v, want the web-2 ImageApplied pair only", events)
+	}
+
+	// Phase 3 — web-1 loses its label: image retained, count shrinks, no
+	// record churn, no events.
+	matcher.byKey[selectorKey] = []string{t9cWeb2}
+	advance()
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("a departing member must not be written to, got %+v", f.audit)
+	}
+	if imageOf(t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 must KEEP its delivered image, got %s", imageOf(t9cWeb1))
+	}
+	if matchedOf() != 1 {
+		t.Fatalf("matched must shrink to 1, got %d", matchedOf())
+	}
+	if recs := f.getSub(t).Status.RecentDeliveries; len(recs) != 2 {
+		t.Fatalf("label removal must not churn history, got %+v", recs)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("label removal is event-free, got %v", events)
+	}
+
+	// Phase 4 — a new tag arrives: only the in-set member (web-2) is
+	// overwritten; the departed web-1 keeps digestA and is NEVER named in
+	// the per-object Superseded audit.
+	f.updateStream(t, t9cDigestB, t9cStart.Add(-5*time.Minute))
+	f.clock.Advance(time.Minute)
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("tag-move pass failed: %v", err)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("the tag move must overwrite in-set members only, got %+v", f.audit)
+	}
+	if imageOf(t9cWeb2) != t9cDigestB {
+		t.Fatalf("web-2 must hold digestB, got %s", imageOf(t9cWeb2))
+	}
+	if imageOf(t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 departed: it keeps digestA and is NOT superseded, got %s", imageOf(t9cWeb1))
+	}
+	if imageOf(t9cWeb3) != t9cInitialImage {
+		t.Fatalf("web-3 is not a member, got %s", imageOf(t9cWeb3))
+	}
+	got = f.getSub(t)
+	entry = t9cEntryByKey(got, selectorKey)
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 1 ||
+		entry.ObservedImage != t9cDigestB || entry.Reason != TargetReasonApplied ||
+		entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-4 entry = %+v, want matched=1/digestB/Applied/Progressing", entry)
+	}
+	recs := got.Status.RecentDeliveries
+	if len(recs) != 3 || recs[0].NewImage != t9cDigestB ||
+		recs[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-4 window head = %+v, want the digestB delivery in flight", recs)
+	}
+	for i := 1; i <= 2; i++ {
+		if recs[i].NewImage != t9cDigestA || recs[i].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("phase-4 record %d = %+v, want digestA Superseded (aggregate latest-wins)", i, recs[i])
+		}
+	}
+	events = drainT9cEvents(f.recorder)
+	superseded := t9cEventsWith(events, EventReasonDeliverySuperseded)
+	// Two flipped records × one overwritten object × dual namespace.
+	if len(superseded) != 4 {
+		t.Fatalf("phase-4 superseded events = %v, want 4 (2 flips × web-2 × dual namespace)", superseded)
+	}
+	for _, e := range superseded {
+		if !strings.Contains(e, t9cWeb2) {
+			t.Fatalf("per-object superseded audit must name the overwritten object: %s", e)
+		}
+		if strings.Contains(e, t9cWeb1) {
+			t.Fatalf("the departed object must never be named superseded: %s", e)
+		}
+	}
+	if appliedEvents := t9cEventsWith(events, EventReasonImageApplied); len(appliedEvents) != 2 {
+		t.Fatalf("phase-4 ImageApplied events = %v, want the web-2 pair", appliedEvents)
+	}
+
+	// Phase 5 — web-3 joins after the tag move: it receives the CURRENT
+	// digest immediately; web-2 (converged) sees zero writes and the same
+	// image does not re-flip history.
+	matcher.byKey[selectorKey] = []string{t9cWeb2, t9cWeb3}
+	advance()
+	if f.audit.applies != 1 {
+		t.Fatalf("only the joining member is delivered, got %+v", f.audit)
+	}
+	if imageOf(t9cWeb3) != t9cDigestB {
+		t.Fatalf("web-3 must receive the CURRENT digest immediately, got %s", imageOf(t9cWeb3))
+	}
+	if matchedOf() != 2 {
+		t.Fatalf("matched must be 2, got %d", matchedOf())
+	}
+	recs = f.getSub(t).Status.RecentDeliveries
+	if len(recs) != 4 || recs[0].NewImage != t9cDigestB || recs[1].NewImage != t9cDigestB ||
+		recs[1].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-5 window = %+v, want the second digestB record prepended without a flip", recs)
+	}
+	if recs[2].RolloutResult != imageflowv1alpha1.RolloutSuperseded ||
+		recs[3].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+		t.Fatalf("phase-5 superseded tail must stay terminal, got %+v", recs)
+	}
+	events = drainT9cEvents(f.recorder)
+	if len(t9cEventsWith(events, EventReasonImageApplied)) != 2 || len(events) != 2 {
+		t.Fatalf("phase-5 events = %v, want the web-3 ImageApplied pair only", events)
+	}
+}
+
 // TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject pins the
 // T8 frozen contract at per-object granularity under aggregation: a
 // persisted name-form Forbidden entry freezes THAT object (zero writes,
