@@ -254,7 +254,8 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // `make manifests`. The delivery engine holds the ADR-003 controller-SA
 // write surface: cluster-level update/patch on the whitelisted built-in
 // workload kinds ONLY (SSA writes use patch; update is included per the
-// frozen ADR-003 wording), plus the subscription status subresource and
+// frozen ADR-003 wording) — since v1.8 including argoproj.io rollouts
+// (ADR-015 decision 8) — plus the subscription status subresource and
 // Events in both namespaces (dual-namespace audit, ADR-003 §4). No wildcard
 // verbs, no other workload kinds.
 //
@@ -263,6 +264,7 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreams,verbs=get;list;watch
