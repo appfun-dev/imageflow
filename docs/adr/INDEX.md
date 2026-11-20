@@ -11,7 +11,7 @@
 | 授权、跨 namespace、ImageSubscription | ADR-003 | ImageSubscription 模式与跨 namespace 授权 | Accepted |
 | 变化检测、Mapping、Import、BuildRun | ADR-004 | 变化检测与登记路径 | Accepted |
 | 写入合约、imageFields、digest-only、CUE 推迟 | ADR-005 | 第三方写入合约与 CUE 状态策略推迟 | Accepted |
-| Workload Kind、Deployment、StatefulSet、DaemonSet | ADR-006 | 内建 Workload 首批 Kind | Accepted |
+| Workload Kind、Deployment、StatefulSet、DaemonSet | ADR-006 | 内建 Workload 首批 Kind | Amended (v1.8) |
 | Registry、Quay、OCI | ADR-007 | 外部 Registry = Quay | Accepted |
 | 投递语义、字段级独占、最坏态聚合、Superseded | ADR-008 | 投递语义 | Accepted |
 | 测试策略、Allure、可追溯性 | ADR-009 | 测试策略与 Allure 可追溯性基线 | Amended (v1.7) |
@@ -21,6 +21,7 @@
 | CUE Status Evaluator、状态评估、healthKey | ADR-013 | CUE Status Evaluator 实现 | Amended (v1.5) |
 | 原生健康判定、Pod 就绪、重启计数 | ADR-013 | （见上方 CUE Status Evaluator） | Amended (v1.5) |
 | Label Selector、多目标、Selector Target、动态匹配 | ADR-014 | Label Selector 多目标（Selector Target） | Accepted (v1.7) |
+| Argo Rollouts、渐进交付、Kruise 评估、AwaitingPromotion | ADR-015 | Argo Rollouts 采纳评估（渐进交付负载） | Accepted (v1.8) |
 
 ## 按版本查找
 
@@ -34,6 +35,7 @@
 | v1.5 | ADR-013 修订 (Native Health Determination) |
 | v1.6 | ADR-006 修订 (Job/CronJob 内建 Kind) |
 | v1.7 | ADR-014 (Label Selector 多目标 / Selector Target)；ADR-009 修订（internal/controller 纯单测 lane 豁免，#89） |
+| v1.8 | ADR-015 (Argo Rollouts 采纳评估)；ADR-006 修订（内建 Kind 清单 + Rollout） |
 
 ## 使用说明
 

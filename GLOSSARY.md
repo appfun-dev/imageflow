@@ -61,6 +61,10 @@ _Avoid_: 裸用 Ready 作总体状态
 批处理 Workload（Job / CronJob）的终态判定语义，区别于长期运行服务的 Rollout。基于 condition-based 完成状态（Job conditions.type=Complete/Failed、completionTime）而非 replica-based rollout；Outcome Stages 中对应命名为 Completion（Succeeded/Failed/Unknown）。CronJob 的 Completion 跟踪其最近一次 Job 实例。详见 ADR-006 v1.6 修订。
 _Avoid_: 对 Job/CronJob 使用 Rollout 描述终态
 
+**Progressive Delivery Workload**:
+由渐进交付控制器管理的长期运行 Workload，更新过程分阶段推进（canary 步骤、pause、人工 promote），策略字段由其专属控制器自治——ImageFlow 只写 pod template image 并观察终态（ADR-015）。v1.8 内建实例 = Argo Rollouts 的 **Rollout**（argoproj.io/v1alpha1）：终态判定 = observedGeneration（字符串）== generation 且 phase == Healthy 且 stableRS == currentPodHash；`pause: {}` 无限期步映射 Progressing + Reason `AwaitingPromotion`（合法稳态，非故障）；Outcome Stage 使用 Rollout。OpenKruise CloneSet 暂不属此类（spec.template 为 schemaless 原子字段，SSA 细粒度写入不可行，ADR-015 决策 13）。
+_Avoid_: 灰度负载（含糊，且 ImageFlow 不管灰度策略）
+
 **Business Validation**:
 由外部验证/交付系统提供的端到端业务验收；不等同于 Kubernetes 健康状态。
 _Avoid_: 健康检查、readiness
@@ -91,7 +95,7 @@ _Avoid_: 变化检测器（作组件名时）
 协调订阅声明并更新目标 Workload 镜像字段的控制器；与 ImageSubscription 资源本身严格区分。
 
 **Built-in Workload Adapter**:
-在明确支持并测试过的内建 Workload Kind 中按容器名定位镜像字段的适配器；不得声称支持未实现/未测试的 GVK。v1.6 内建 Kind = Deployment / StatefulSet / DaemonSet / Job / CronJob（ADR-006，v1.6 修订）；其余 Kind 如实报告 `Unsupported`。
+在明确支持并测试过的内建 Workload Kind 中按容器名定位镜像字段的适配器；不得声称支持未实现/未测试的 GVK。v1.6 内建 Kind = Deployment / StatefulSet / DaemonSet / Job / CronJob（ADR-006，v1.6 修订）；v1.8 新增 Rollout（argoproj.io/v1alpha1，ADR-006 v1.8 修订 / ADR-015）；其余 Kind 如实报告 `Unsupported`。
 
 **Generic Image Field Resolver**:
 按配置的字段路径解析第三方 Workload 镜像字段的组件；不推断任意对象的语义正确性。

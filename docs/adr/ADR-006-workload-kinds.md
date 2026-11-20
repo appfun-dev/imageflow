@@ -1,7 +1,7 @@
 # ADR-006：内建 Workload Kind —— Deployment / StatefulSet / DaemonSet / Job / CronJob
 
-- 状态：Amended (v1.6)
-- 日期：2026-10-16（初版）；2026-11-12（修订）
+- 状态：Amended (v1.8)
+- 日期：2026-10-16（初版）；2026-11-12（修订）；2026-11-20（v1.8 修订）
 - 决策人：项目负责人（grilling 第 2 轮 Q12=B）；v1.6 修订由架构评审通过
 - 关联：D-009 / FR-010 / FR-013；`ImageFlow-Project-Startup-Design.md`（首批清单须立新 ADR 的要求，编号 006 为本轮补位）；`docs/research/2026-10-16-upstream-fact-check.md` §4；ADR-001；ADR-005（Outcome Stages）
 
@@ -15,13 +15,13 @@ v1 初版仅纳入 Deployment / StatefulSet / DaemonSet（长期运行服务）�
 
 ### 内建 Kind 清单
 
-v1.6 内建 Workload Adapter = **Deployment、StatefulSet、DaemonSet、Job、CronJob**：
+v1.6 内建 Workload Adapter = **Deployment、StatefulSet、DaemonSet、Job、CronJob**；v1.8 新增 **Rollout**（argoproj.io/v1alpha1，渐进交付负载，见 ADR-015）：
 
 1. **长期运行服务 Kind**（Deployment / StatefulSet / DaemonSet）具原生 rollout 状态可观察性——Deployment（observedGeneration / conditions / updatedReplicas）、StatefulSet（updateRevision / currentRevision）、DaemonSet（desiredNumberScheduled / updatedNumberScheduled）——支撑 Outcome Stages 的 Rollout 阶段（FR-013）。
 2. **批处理 Kind**（Job / CronJob）具原生完成状态可观察性——Job（conditions.type=Complete/Failed、active/succeeded/failed 计数、completionTime）、CronJob（lastScheduleTime、lastSuccessfulTime、active Job 引用）——支撑 Outcome Stages 的 Completion 阶段（见下文语义区分）。
 3. 定位方式 = 按容器名，写入 pod template 的 container image 字段。CronJob 嵌套路径为 `.spec.jobTemplate.spec.template.spec.containers[name].image`，其余 Kind 为 `.spec.template.spec.containers[name].image`。
 4. 非内建 Kind（Pod / ReplicationController / 任意第三方 CRD）：内建适配器拒绝处理，如实报告 `Unsupported` Condition，不猜测语义；第三方 Kind 可走 Generic Image Field Resolver + `imageFields[]`（FR-010，v1 仅字段写入，状态默认 `Unknown`，见 ADR-005）。
-5. 扩充内建 Kind（如 Argo Rollouts、Kruise CloneSet）必须修订本 ADR，不得默认继承。
+5. 扩充内建 Kind（如 Argo Rollouts、Kruise CloneSet）必须修订本 ADR，不得默认继承。→ **v1.8 已按此流程评估并修订**：Argo Rollouts 采纳（ADR-015），OpenKruise 暂不采纳（理由见 ADR-015 决策 13）。
 
 ### Completion 与 Rollout 语义区分
 
@@ -65,7 +65,7 @@ Label Selector 多目标（一个 Subscription 通过 label selector 匹配多�
 ## 未解决问题
 
 - v1.7 Label Selector 多目标支持（一个 Subscription 匹配多个同 Kind Workload）。→ **已由 ADR-014 解决**（v1.7，2026-11-20）。
-- v1.7+ 是否纳入 Argo Rollouts / Kruise 等渐进交付负载 —— 届时评估并修订本 ADR。
+- v1.7+ 是否纳入 Argo Rollouts / Kruise 等渐进交付负载。→ **已裁决**（v1.8，2026-11-20）：Argo Rollouts 采纳为内建 Kind、OpenKruise 暂不采纳，见 ADR-015。
 
 ## 修订记录
 
@@ -95,3 +95,15 @@ v1.6 核心目标是扩展内建 Kind 覆盖至批处理工作负载。Job/CronJ
 **修订理由：** v1.7 grilling（Wave A/B/C，15 题）完成，ADR-014（Label Selector 多目标 / Selector Target）Accepted；补注指针保持决策溯源链完整。
 
 **兼容性：** 纯文档指针补注，不改变任何现有行为。
+
+### v1.8 修订（2026-11-20）
+
+**变更内容：**
+
+1. 内建 Kind 清单新增 **Rollout**（argoproj.io/v1alpha1，渐进交付负载）——采纳评估与接入形态决策见 ADR-015。
+2. 决策 5 加 v1.8 履行记录（扩充流程已按「必须修订本 ADR」执行）。
+3. 未解决问题中「Argo Rollouts / Kruise」项标注已裁决，指针到 ADR-015。
+
+**修订理由：** v1.8 grilling（Wave A/B/C，15 题）完成渐进交付负载评估：Rollout 满足内建 Kind 双标准（镜像字段可写 + 原生 rollout 可观察）采纳；Kruise CloneSet 因 spec.template 为 schemaless 原子字段、SSA 细粒度写入不可行而暂不采纳（ADR-015 决策 13）。
+
+**兼容性：** 纯文档修订；Rollout 支持的代码落地由 v1.8 spec/tickets 交付，不改变任何现有行为。
