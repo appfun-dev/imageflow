@@ -932,3 +932,42 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **私有 registry 收集缝**：`prometheus.NewPedanticRegistry()` + `collectors()`/`registerDeliveryMetrics`/`registerObserverMetrics` 既有缝，不污染进程级 `ctrlmetrics.Registry`；fixture 的 metrics 每测试独立构造，series 不串台；
 - **与 #84 并行边界**：本小节零行为代码改动（唯一实现侧 diff 是 Help 字符串文案）；`observerResultLabel` 对 Superseded/Conflict 的折叠在词汇层已断言，#84 改动行为路径不影响本约束；
 - **已知环境限制**：同 v1.7-02 小节（e2e 需 Podman，本机不跑；`test/integration` webhook lane `[BeforeAll]` 超时为本机既有环境问题）；本小节全部为纯单元测试，不依赖 envtest/Podman。
+
+## Selector Target 全场景 E2E（v1.7-09，#86）
+
+### kind E2E 车道（`test/e2e/selector_e2e_test.go`）
+
+> 车道设计：`Describe(..., Label("t86"), Ordered)`，双命名空间（订阅侧 `t86-selector-e2e` + 工作负载侧 `t86-selector-e2e-wl`），完全沿用 t11 车道协议——生产 manager 镜像以裸 Pod 启动并绑定**生成的** `manager-role`（车道级 ClusterRoleBinding，绝不手写规则）、webhook 不活跃（无 `--webhook-cert-path`）故 `created-by` 注解手工注入、creator SA 在两个命名空间持有 update 级 Role（selector 的运行时 T8 SAR 是命名空间级、无 resourceName，ADR-014 决策 2，凭该 grant 得 Allowed）。manager 额外带 `--selector-match-limit=3`：US-9 的启动旋钮（出厂默认 50 由 `internal/config` 单测钉住），超限场景用 4 个对象即可触达 MatchLimitExceeded。全部工作负载为 replicas=0 Deployment + 虚构 digest（t12 硬化车道模式）：永不拉镜像，原生控制器确定性地把 rollout 收敛到 Succeeded。匹配域是对象 metadata 上的 `t86s-app=<场景>` 标签；Pod selector 用独立的 `t86s-name` 标签——摘 label 场景因此永不触碰不可变的 `spec.selector`。
+
+| 场景 | 用例（It） | 关键断言 | 状态 |
+|---|---|---|---|
+| 多匹配投递 | `t86-e2e-selector-fanout-delivers-one-digest-to-every-matched-deployment` | 恰好 3 个成员（=limit，`observed > limit` 才超限，等值是合法边界，US-1）：3 个 Deployment 全部持有 digest；status 仅**一条**聚合条目（D8）——`targetRef.name` 为空、`labelSelector` 原样回显、无第二条 per-object 条目；`matchedObjects=3`（US-16）、Reason=Applied、imageApplied=true；observer 把 per-object 判定折叠为 Succeeded 聚合（US-15）；每个对象双命名空间 ImageApplied 审计、消息含 `previous field value: registry.k8s.io/pause:3.9`（US-17）；聚合 RolloutSucceeded 事件只在订阅侧、对象侧为空（selector 聚合无单一宿主对象） | 已实现（本机未实跑） |
+| 扩容拾取 | `t86-e2e-scale-out-new-member-picks-up-current-digest-without-a-trigger` | 2 个创始成员收敛后新建第 3 个同标签 Deployment：server-side-filtered informer 拾取（无轮询、无任何人工触发，US-2/US-25），自动拿到**当前** desired digest；`matchedObjects` 增长到 3；迟到者获双命名空间 ImageApplied；observer 对扩大的集合重新折叠回 Succeeded | 已实现（本机未实跑） |
+| 摘 label 保留 | `t86-e2e-label-removal-retains-image-shrinks-matched-never-supersedes-departed` | 3 成员收敛（**门控在 observer 的 Succeeded 治愈之后**）→ `kubectl label ... t86s-app-` 摘标签：`matchedObjects` 收缩为 2、Reason 保持 Applied（US-4）；离开者镜像**保留不回收**且 managedFields 仍持有订阅的 field manager（引擎无 recall 路径，US-3）；任何位置（事件/交付窗口）都**没有** Superseded（US-18：Superseded 只属于被实际覆盖的对象）；随后 retag 只覆盖在册成员——离开者保持旧 digest、在册者拿到新 digest、聚合窗口最新记录为 retag 且仍无 Superseded 翻转（创始记录已终态，latest-wins 无可翻转对象；**在途翻转**由 envtest t84 车道在假时钟下确定性覆盖，本车道不与之抢竞态） | 已实现（本机未实跑） |
+| 零匹配（NoMatches） | `t86-e2e-zero-match-reports-unknown-nomatches-warning-and-unblocks-siblings` | 组合订阅 `[具名 sibling, ghost selector]`（status.targets 按 spec 序）：sibling 正常投递且条目形如 `name\|\|Applied\|`（具名目标 matchedObjects 恒 nil——只有 selector 计数）；ghost 条目 `\|0\|NoMatches\|Unknown`（合法空集，US-11）；订阅级聚合折叠为 **Unknown 而非 Failed**（D7：NoMatches 不参与降级为失败）；订阅侧 **Warning** 事件 reason=NoMatches，消息含 `matched zero live objects`、`legal empty match set`、`ADR-014 decision 8`；ghost 不阻塞 sibling——sibling 治愈到 Succeeded 而聚合诚实保持 Unknown（US-12） | 已实现（本机未实跑） |
+| 超限（MatchLimitExceeded） | `t86-e2e-match-limit-breach-delivers-sorted-prefix-and-reports-failed` | 4 个成员 > limit 3：仅按名字典序前缀（flood-1..3）投递，第 4 个对象镜像保持 pause:3.9 且 **managedFields 中无订阅 field manager**（零写入用 SSA 所有权证明，不只看镜像字段；格式断言双侧锚定——已投递成员必含、越限成员必不含）；`matchedObjects=4` 报告**完整观测数**；Reason=MatchLimitExceeded、条目与聚合 rolloutStatus 均 **Failed**（Failed 是最坏折叠，US-10/US-15）；订阅侧 **Warning** 事件消息含 `matched 4 objects, over the hard limit of 3`、`--selector-match-limit`、`remaining 1 are NOT delivered`；前缀成员照常获双命名空间 ImageApplied 审计且越限对象的名字从不出现在任何投递审计里；observer 永不改写该判定（MatchLimitExceeded 条目在其 gate 之外） | 已实现（本机未实跑） |
+
+### Allure 可追溯标签（ADR-009）
+
+既有 e2e 车道为 Ginkgo 套件、尚无 allure-go 运行器；按 TESTING.md §Allure 记录的过渡约定，标签映射以文件头与逐 It 注释块形式**全量声明**（套件迁移时机械附加），与 `ao.*`（`test/utils/allure/options`）词汇一一对应：
+
+| Allure 维度 | 取值 |
+|---|---|
+| AllureID | `IF-86` |
+| TMS | `IF-86` → https://github.com/appfun-dev/imageflow/issues/86；`SPEC-77` → https://github.com/appfun-dev/imageflow/issues/77 |
+| Epic | `Phase 1.7: Label Selector Multi-Target` |
+| Feature | `ADR-014 Selector Target` |
+| ParentSuite / Suite | `e2e` / `t86-selector` |
+| Link（docs） | `docs/spec/imageflow-v1.7-label-selector-multi-target.md`、`docs/adr/ADR-014-label-selector-multi-target.md` |
+| Story（按场景） | fanout `US-1, US-15, US-16, US-17`；scale-out `US-2, US-25`；label-removal `US-3, US-4, US-18`；zero-match `US-11, US-12`；limit-breach `US-9, US-10` |
+
+### 覆盖率要点
+
+- **恰好等限是合法集**：引擎的越限判定是 `observed > limit`（严格大于），fanout 场景用 3 成员对 limit 3 钉住这个边界——少一个对象都不算覆盖；
+- **聚合形态钉死（D8）**：每个 selector 目标恒一条 status 条目——无名、回显 selector、`matchedObjects` 计数；per-object 细节只走 Events（US-17），fanout 场景同时断言「无第二条条目」；
+- **聚合 transition 事件只落订阅侧**：selector 聚合无单一宿主对象（`ev.ref.Name` 为空 → 对象侧拷贝跳过），fanout 场景以「订阅侧 RolloutSucceeded 非空 + 对象侧为空」双向钉住；
+- **matchedObjects 语义分叉**：selector 条目计数（含合法 0）、具名条目恒 nil——零匹配场景的 targets 转储（`name|matched|reason|rolloutStatus` 逐行、序无关）同时验证两种形态；
+- **摘 label 的确定性策略**：retag 门控在 observer Succeeded 治愈之后，使「latest-wins 无在途记录可翻」成为确定性语义而非竞态；在途 Superseded 翻转与双命名空间 DeliverySuperseded 审计归 envtest t84 车道（假时钟）——两层互补、互不重复；
+- **零写入的证明强度**：越限场景不止断言镜像未变，还断言 managedFields 中**不存在**订阅的 field manager（`imageflow.appfun.dev/sub-<ns>-<name>`，与 `internal/delivery.FieldManagerFor` 同构，<128 字符故无哈希后缀）；
+- **NoMatches/MatchLimitExceeded 事件断言同时钉住类型与文案**：`type|message` 行断言 Warning 类型 + 引擎消息的稳定子串（`matched zero live objects`/`legal empty match set`/`ADR-014 decision 8`；`over the hard limit of 3`/`--selector-match-limit`/`remaining 1 are NOT delivered`），文案漂移会 RED；
+- **本机未实跑声明**：本机 Podman socket 拒连、kind 集群无法创建（同 v1.7-02/07/08 小节），本车道**首跑在 CI/有 Podman 的环境**；本机验收为编译级证据——`go build ./...`、`go vet ./test/e2e/...`、`gofmt -l .` 全清洁，`go test -c ./test/e2e/ -o /dev/null` 编译通过，`go test ./test/e2e/ -run xxx -count=1` 返回 `ok ... [no tests to run]`。
