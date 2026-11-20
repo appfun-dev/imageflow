@@ -73,6 +73,23 @@ Allure 标注：AllureID **IF-86** · TMS **IF-86** / **SPEC-77**（issues/86、
 | 零匹配（NoMatches） | `t86-e2e-zero-match-reports-unknown-nomatches-warning-and-unblocks-siblings` | ghost selector 条目 `matchedObjects=0` + Unknown/NoMatches；订阅侧恰一条 Warning；聚合保持 Unknown 不降级 Failed（ADR-014 决策 8）；具名 sibling 正常治愈、不被阻塞 |
 | 超限（MatchLimitExceeded） | `t86-e2e-match-limit-breach-delivers-sorted-prefix-and-reports-failed` | 4 成员 > limit 3：仅字典序前缀投递，第 4 个零写入（managedFields 无订阅 field manager 为证）；`matchedObjects=4` 报全量观测数；条目与聚合均 Failed + MatchLimitExceeded；Warning 消息含 limit 与 `--selector-match-limit` 指引 |
 
+## v1.8 Argo Rollouts 场景（spec #91 / ADR-015，非 §15 编号）
+
+v1.8 把 Argo Rollout（`argoproj.io/v1alpha1`）纳入内建 Kind（ADR-015）。CI e2e 安装 argo-rollouts
+（pin install.yaml，版本与 ADR-015 一致）后由 **t87 车道**承载两场景（spec D11 / ADR-015 决策 15）；
+envtest 无 rollouts-controller、投递-收敛闭环无法形成，故收敛判定只在 kind e2e。命名与 Allure 标注
+沿用 t86 先例（ADR-009）。**本表为占位登记（v1.8-03，#94），命名用例由 v1.8-04（#95）实填。**
+
+| 场景 | 命名用例（kind · test/e2e/） | 覆盖要点 |
+|---|---|---|
+| 无 pause canary 收敛 Succeeded | （占位：t87-e2e 车道，#95 实填） | 无 pause 的 basic canary Rollout 写入 image 后，observer 判定闭环收敛 Succeeded（status + Event 断言） |
+| `pause: {}` 停 AwaitingPromotion | （占位：t87-e2e 车道，#95 实填） | canary `pause: {}` 步中途观测为 rollout Progressing + per-target Health Reason `AwaitingPromotion`，不进入 Succeeded（status + Event 断言；合法稳态非故障，ADR-015 决策 8） |
+
+- SSA 409 升级（spec D11 (c)）明确**不进 e2e**：由 v1.8-01（#92）单测覆盖
+  （`TestSubscriptionDeliverySSAConflictEscalatesForceOnce` / `TestSubscriptionDeliverySSAConflictPersistentFailsHonestly`，
+  见 `TESTING.md` v1.8-01 小节）。
+- observer 判定矩阵与提取的 unit/envtest 覆盖已由 v1.8-02（#93）登记在场景 11（Argo Rollout 车道）。
+
 ## 附加证据（CI 跳过、可选启用）
 
 设置 `IMAGEFLOW_E2E_REGISTRY_HOST/_REPO/_TAG`（+可选 `_PULL_SECRET/_REGISTRY_CA/_PUSH_USERNAME/_PUSH_PASSWORD`）后，
