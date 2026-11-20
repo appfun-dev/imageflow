@@ -195,6 +195,18 @@ func TestValidateSubscriptionShapeAccepts(t *testing.T) {
 			}
 			sub.Spec.Targets = []imageflowv1alpha1.SubscriptionTarget{target}
 		},
+		"selector target using all four operators validly (v1.7-03, #80)": func(sub *imageflowv1alpha1.ImageSubscription) {
+			sub.Spec.Targets[0].TargetRef.Name = ""
+			sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+				MatchLabels: map[string]string{"team": "billing"},
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"payments-api", "billing-api"}},
+					{Key: "tier", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"legacy"}},
+					{Key: "tracked", Operator: metav1.LabelSelectorOpExists},
+					{Key: "frozen", Operator: metav1.LabelSelectorOpDoesNotExist},
+				},
+			}
+		},
 	}
 	for name, mutate := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -334,6 +346,104 @@ func TestValidateSubscriptionShapeRejects(t *testing.T) {
 				}
 			},
 			"must not be empty",
+		},
+		// v1.7-03 (#80): deep selector syntax — dirty selectors must be
+		// rejected at admission because their key/value bytes flow into the
+		// canonical target key (#79 review handoff).
+		"selector with unknown operator": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: "Matches", Values: []string{"payments-api"}},
+					},
+				}
+			},
+			"not a valid selector operator",
+		},
+		"selector In with empty values": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: metav1.LabelSelectorOpIn},
+					},
+				}
+			},
+			"must be specified when `operator` is 'In' or 'NotIn'",
+		},
+		"selector NotIn with empty values": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: metav1.LabelSelectorOpNotIn, Values: []string{}},
+					},
+				}
+			},
+			"must be specified when `operator` is 'In' or 'NotIn'",
+		},
+		"selector Exists carrying values": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: metav1.LabelSelectorOpExists, Values: []string{"payments-api"}},
+					},
+				}
+			},
+			"may not be specified when `operator` is 'Exists' or 'DoesNotExist'",
+		},
+		"selector DoesNotExist carrying values": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: metav1.LabelSelectorOpDoesNotExist, Values: []string{"payments-api"}},
+					},
+				}
+			},
+			"may not be specified when `operator` is 'Exists' or 'DoesNotExist'",
+		},
+		"selector matchLabels with invalid key": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchLabels: map[string]string{"app name": "payments-api"},
+				}
+			},
+			"must consist of",
+		},
+		"selector matchLabels with invalid value": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchLabels: map[string]string{"app": "payments api"},
+				}
+			},
+			"valid label",
+		},
+		"selector matchExpressions with invalid key": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app name", Operator: metav1.LabelSelectorOpExists},
+					},
+				}
+			},
+			"must consist of",
+		},
+		"selector In with invalid value": {
+			func(sub *imageflowv1alpha1.ImageSubscription) {
+				sub.Spec.Targets[0].TargetRef.Name = ""
+				sub.Spec.Targets[0].TargetRef.LabelSelector = &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"payments api"}},
+					},
+				}
+			},
+			"valid label",
 		},
 	}
 	for name, tc := range rejected {

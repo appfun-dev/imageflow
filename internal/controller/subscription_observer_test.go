@@ -52,6 +52,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/clock"
@@ -1907,6 +1908,207 @@ func TestSupersededEventPlannedOnLatestWins(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// v1.7-07 #84 (unit): per-object Superseded for selector targets (ADR-014
+// decision 10, spec D9). The record flip stays aggregate latest-wins; the
+// per-object audit rides one dual-namespace Event per object actually
+// overwritten by the newer tag. Label-removed objects keep their last image
+// and are never named; a supersede pass that overwrote zero objects still
+// audits the aggregate flip honestly on the subscription side.
+// ---------------------------------------------------------------------------
+
+// t11uSelectorRef is the selector-shape target reference the per-object
+// supersede lane keys on (LabelSelector set, Name empty).
+func t11uSelectorRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uAppsAPI, Kind: kindDeployment,
+		Namespace:     t11uNamespace,
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+	}
+}
+
+// t11uObjectNameRef is the per-object name-shape reference the engine's
+// fan-out carries in each object outcome.
+func t11uObjectNameRef(name string) imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uAppsAPI, Kind: kindDeployment,
+		Namespace: t11uNamespace, Name: name,
+	}
+}
+
+// t11uObjectOutcome builds one per-object fan-out outcome: delivered marks an
+// object actually overwritten by the newer tag in this pass; a conflict-skipped
+// or converged object carries delivered=false (zero value-changing writes).
+func t11uObjectOutcome(name string, delivered bool) deliveryOutcome {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind(kindDeployment))
+	obj.SetNamespace(t11uNamespace)
+	obj.SetName(name)
+	return deliveryOutcome{ref: t11uObjectNameRef(name), delivered: delivered, targetObject: obj}
+}
+
+func TestSupersededEventsPerObjectForSelectorTargets(t *testing.T) {
+	selectorRef := t11uSelectorRef()
+	// In-flight record: delivery of RefA never finished its rollout.
+	oldRecord := t11uSeededRecord(selectorRef, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute))
+	// The superseding pass delivers RefB.
+	newRecord := t11uSeededRecord(selectorRef, t11uRefA, t11uRefB, t11uStart)
+	commonFragments := []string{
+		"latest-wins", "ADR-008", "ADR-014 decision 10", "Superseded",
+		t11uRefA, t11uRefB, t11uSourceLogical,
+		"no retry", "no cross-target rollback",
+	}
+	assertFragments := func(t *testing.T, msg string, frags []string) {
+		t.Helper()
+		for _, want := range frags {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("message %q missing audit fragment %q", msg, want)
+			}
+		}
+	}
+
+	t.Run("every overwritten object gets its own dual-namespace event", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref: selectorRef,
+			objectOutcomes: []deliveryOutcome{
+				t11uObjectOutcome("web-1", true),
+				t11uObjectOutcome("web-2", true),
+			},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 2 {
+			t.Fatalf("planned events = %+v, want one per overwritten object", transition.events)
+		}
+		for i, want := range []string{"web-1", "web-2"} {
+			ev := transition.events[i]
+			if ev.eventType != "Normal" || ev.reason != EventReasonDeliverySuperseded {
+				t.Fatalf("event %d = %+v, want Normal %s", i, ev, EventReasonDeliverySuperseded)
+			}
+			if !ev.targetSide || ev.targetObject == nil {
+				t.Fatalf("event %d must ride the overwritten object (dual namespace): %+v", i, ev)
+			}
+			rode, ok := ev.targetObject.(*unstructured.Unstructured)
+			if !ok || rode.GetName() != want {
+				t.Fatalf("event %d rides %+v, want the %s object", i, ev.targetObject, want)
+			}
+			assertFragments(t, ev.message, append(commonFragments,
+				"apps/v1 Deployment "+t11uNamespace+"/"+want))
+		}
+	})
+
+	t.Run("a label-removed object is never named superseded", func(t *testing.T) {
+		// web-1 left the match set before RefB arrived: the fan-out only
+		// reports web-2, so only web-2 may be recorded as overwritten.
+		outcomes := []deliveryOutcome{{
+			ref:            selectorRef,
+			objectOutcomes: []deliveryOutcome{t11uObjectOutcome("web-2", true)},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want exactly the web-2 supersede", transition.events)
+		}
+		ev := transition.events[0]
+		assertFragments(t, ev.message, append(commonFragments,
+			"apps/v1 Deployment "+t11uNamespace+"/web-2"))
+		if strings.Contains(ev.message, "web-1") {
+			t.Fatalf("the departed object must not be named superseded: %q", ev.message)
+		}
+	})
+
+	t.Run("a conflict-skipped object was not overwritten", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref: selectorRef,
+			objectOutcomes: []deliveryOutcome{
+				t11uObjectOutcome("web-1", true),
+				t11uObjectOutcome("web-2", false), // conflict skip: zero writes
+			},
+		}}
+		transition := &deliveryTransition{}
+		mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want only the overwritten web-1", transition.events)
+		}
+		ev := transition.events[0]
+		assertFragments(t, ev.message, append(commonFragments,
+			"apps/v1 Deployment "+t11uNamespace+"/web-1"))
+		if strings.Contains(ev.message, "web-2") {
+			t.Fatalf("the conflict-skipped object must not be named superseded: %q", ev.message)
+		}
+	})
+
+	t.Run("zero overwritten objects still audit the aggregate flip", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref:            selectorRef,
+			objectOutcomes: []deliveryOutcome{t11uObjectOutcome("web-2", false)},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want the honest aggregate fallback", transition.events)
+		}
+		ev := transition.events[0]
+		if ev.targetSide || ev.targetObject != nil {
+			t.Fatalf("the aggregate-only supersede must stay subscription-side: %+v", ev)
+		}
+		assertFragments(t, ev.message, append(commonFragments, "zero"))
+	})
+
+	t.Run("the named form keeps its per-target event verbatim", func(t *testing.T) {
+		// The named shape is the regression anchor (full vocabulary pinned by
+		// TestSupersededEventPlannedOnLatestWins): one event, target-side,
+		// and it must NOT mutate into the per-object wording.
+		named := t11uDeployRef()
+		targetObj := &unstructured.Unstructured{}
+		targetObj.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind(kindDeployment))
+		targetObj.SetNamespace(t11uNamespace)
+		targetObj.SetName(t11uDeployName)
+		outcomes := []deliveryOutcome{{ref: named, targetObject: targetObj}}
+		transition := &deliveryTransition{}
+		mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{t11uSeededRecord(named, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute))},
+			[]imageflowv1alpha1.DeliveryResult{t11uSeededRecord(named, t11uRefA, t11uRefB, t11uStart)},
+			5, outcomes, transition,
+		)
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want exactly one", transition.events)
+		}
+		ev := transition.events[0]
+		if !strings.HasPrefix(ev.message, "Delivery superseded (latest-wins, ADR-008):") {
+			t.Fatalf("named message must stay verbatim: %q", ev.message)
+		}
+		if !ev.targetSide || ev.targetObject == nil {
+			t.Fatalf("named event must stay dual-namespace: %+v", ev)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Engine steady state preserves the observer's rollout verdict (T9 mergeEntry
 // contract — rolloutSet == nil keeps the persisted value; R3: reasons stay
 // engine-owned on both sides)
@@ -1943,7 +2145,7 @@ func TestEngineSteadyStatePreservesObserverRolloutVerdict(t *testing.T) {
 		if !merged.LastTransitionTime.Time.Equal(t11uStart.Add(-time.Hour)) {
 			t.Fatalf("LastTransitionTime moved without a state change: %v", merged.LastTransitionTime)
 		}
-		if plan.record != nil || len(plan.events) != 0 || plan.failureLabel != "" {
+		if plan.record != nil || len(plan.events) != 0 || len(plan.failureLabels) != 0 {
 			t.Fatalf("steady state must plan nothing: %+v", plan)
 		}
 	})
@@ -1974,7 +2176,7 @@ func TestEngineSteadyStatePreservesObserverRolloutVerdict(t *testing.T) {
 		if merged.RetryCount != base.RetryCount+1 || merged.NextRetryTime == nil {
 			t.Fatalf("retry bookkeeping = %+v, want delta applied", merged)
 		}
-		if plan.failureLabel == "" {
+		if len(plan.failureLabels) == 0 {
 			t.Fatal("failure must plan its metric label")
 		}
 	})
@@ -2916,5 +3118,493 @@ func TestHealthVerdictD6MessageFormats(t *testing.T) {
 				t.Errorf("message = %q, want %q", tc.verdict.message, tc.wantMsg)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #82 (v1.7-05): one per-target aggregate entry per selector target,
+// observed by observeSelectorTarget (worst-case fold over per-object verdicts)
+// ---------------------------------------------------------------------------
+
+// t11uSelectorTarget renders a selector-form target in the built-in
+// Deployment class (issue #81): Name empty, LabelSelector set.
+func t11uSelectorTarget(matchLabels map[string]string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t11uAppsAPI,
+			Kind:          kindDeployment,
+			Namespace:     t11uNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: []string{t11uContainer},
+	}
+}
+
+// t11uNamedDeployment clones the standard deployment under a custom name —
+// selector targets fan out to per-object entries, so fixtures need several
+// objects of the same class.
+func t11uNamedDeployment(name, image string, st appsv1.DeploymentStatus) *appsv1.Deployment {
+	d := t11uDeployment(image, st)
+	d.Name = name
+	return d
+}
+
+// TestObserverSelectorTargetAggregateWorstCase is the table-driven observe
+// contract for selector targets (issue #82, ADR-014 decisions 5/8, spec v1.7
+// D7/D8): every matched object is determined freshly through the SAME
+// per-object pipeline as a named target, and the selector-form entry carries
+// ONE worst-case aggregate (Failed > Unknown > Progressing > Succeeded) with
+// a CAS-guarded transition, per-target healing of the in-flight record and a
+// single subscription-side audit Event whose determination names the bounded
+// per-object verdicts. The legal empty match set folds to Unknown with the
+// NoMatches wording and never polls.
+func TestObserverSelectorTargetAggregateWorstCase(t *testing.T) {
+	selectorRef := t11uDeployRef()
+	selectorRef.Name = ""
+	selectorRef.LabelSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(selectorRef)
+
+	succeeded := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2, AvailableReplicas: 2, ReadyReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}},
+	}
+	progressing := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           3, UpdatedReplicas: 1, AvailableReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}, {
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionTrue,
+			Reason: "ReplicaSetUpdated",
+		}},
+	}
+	deadlineFailed := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentProgressing, Status: corev1.ConditionFalse,
+			Reason:  progressDeadlineExceededReason,
+			Message: "ReplicaSet t11u-rs has timed out progressing",
+		}},
+	}
+	reportedNothing := appsv1.DeploymentStatus{}
+
+	cases := []struct {
+		name              string
+		objects           []*appsv1.Deployment
+		matches           []string
+		wantAgg           imageflowv1alpha1.RolloutStatus
+		wantRequeue       time.Duration
+		wantEventReason   string // "" = the pass must be event-free
+		wantEventContains []string
+		wantRecord        imageflowv1alpha1.RolloutStatus
+		wantRecordReason  string
+		wantMetricResult  string // "" = no rollout outcome metric
+	}{
+		{
+			name: "all Succeeded fold to Succeeded",
+			objects: []*appsv1.Deployment{
+				t11uNamedDeployment("web-1", t11uRefA, succeeded),
+				t11uNamedDeployment("web-2", t11uRefA, succeeded),
+			},
+			matches:           []string{"web-1", "web-2"},
+			wantAgg:           imageflowv1alpha1.RolloutSucceeded,
+			wantEventReason:   EventReasonRolloutSucceeded,
+			wantEventContains: []string{"worst-case aggregate Succeeded over 2 matched object(s)", "web-1=Succeeded", "web-2=Succeeded"},
+			wantRecord:        imageflowv1alpha1.RolloutSucceeded,
+			wantRecordReason:  TargetReasonRolloutSucceeded,
+			wantMetricResult:  observerResultSucceeded,
+		},
+		{
+			name: "one Failed object dominates the fold",
+			objects: []*appsv1.Deployment{
+				t11uNamedDeployment("web-1", t11uRefA, succeeded),
+				t11uNamedDeployment("web-2", t11uRefA, deadlineFailed),
+			},
+			matches:           []string{"web-1", "web-2"},
+			wantAgg:           imageflowv1alpha1.RolloutFailed,
+			wantEventReason:   EventReasonRolloutFailed,
+			wantEventContains: []string{"worst-case aggregate Failed over 2 matched object(s)", "web-1=Succeeded", "web-2=Failed"},
+			wantRecord:        imageflowv1alpha1.RolloutFailed,
+			wantRecordReason:  TargetReasonRolloutFailed,
+			wantMetricResult:  observerResultFailed,
+		},
+		{
+			name: "an Unknown object outranks its Succeeded sibling",
+			objects: []*appsv1.Deployment{
+				t11uNamedDeployment("web-1", t11uRefA, succeeded),
+				t11uNamedDeployment("web-2", t11uRefA, reportedNothing),
+			},
+			matches:           []string{"web-1", "web-2"},
+			wantAgg:           imageflowv1alpha1.RolloutUnknown,
+			wantEventReason:   EventReasonRolloutUnknown,
+			wantEventContains: []string{"worst-case aggregate Unknown over 2 matched object(s)", "web-2=Unknown"},
+			wantRecord:        imageflowv1alpha1.RolloutProgressing, // in-flight: Unknown never heals
+			wantRecordReason:  TargetReasonApplied,
+			wantMetricResult:  observerResultUnknown,
+		},
+		{
+			name: "a still-Progressing object keeps the aggregate and the poll requeue",
+			objects: []*appsv1.Deployment{
+				t11uNamedDeployment("web-1", t11uRefA, succeeded),
+				t11uNamedDeployment("web-2", t11uRefA, progressing),
+			},
+			matches:          []string{"web-1", "web-2"},
+			wantAgg:          imageflowv1alpha1.RolloutProgressing,
+			wantRequeue:      waitingStateRequeue,
+			wantRecord:       imageflowv1alpha1.RolloutProgressing,
+			wantRecordReason: TargetReasonApplied,
+		},
+		{
+			name:              "zero matches aggregate to Unknown without polling",
+			objects:           []*appsv1.Deployment{t11uNamedDeployment("web-1", t11uRefA, succeeded)},
+			matches:           nil, // legal empty match set (ADR-014 decision 8)
+			wantAgg:           imageflowv1alpha1.RolloutUnknown,
+			wantEventReason:   EventReasonRolloutUnknown,
+			wantEventContains: []string{"matched zero live objects", "ADR-014 decision 8"},
+			wantRecord:        imageflowv1alpha1.RolloutProgressing,
+			wantRecordReason:  TargetReasonApplied,
+			wantMetricResult:  observerResultUnknown,
+		},
+		{
+			name:              "single-object match set degenerates to its verdict",
+			objects:           []*appsv1.Deployment{t11uNamedDeployment("web-1", t11uRefA, succeeded)},
+			matches:           []string{"web-1"},
+			wantAgg:           imageflowv1alpha1.RolloutSucceeded,
+			wantEventReason:   EventReasonRolloutSucceeded,
+			wantEventContains: []string{"over 1 matched object(s)", "web-1=Succeeded"},
+			wantRecord:        imageflowv1alpha1.RolloutSucceeded,
+			wantRecordReason:  TargetReasonRolloutSucceeded,
+			wantMetricResult:  observerResultSucceeded,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := t11uSub(
+				[]imageflowv1alpha1.SubscriptionTarget{t11uSelectorTarget(map[string]string{"app": "web"})},
+				imageflowv1alpha1.ImageSubscriptionStatus{
+					Conditions: t11uAuthorizedConditions(),
+					Targets: []imageflowv1alpha1.TargetDeliveryStatus{
+						t11uSeededEntry(selectorRef, t11uRefA),
+					},
+					RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+						t11uSeededRecord(selectorRef, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+					},
+					RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+					ObservedGeneration: 1,
+				})
+			objs := make([]client.Object, 0, len(tc.objects)+1)
+			for _, d := range tc.objects {
+				objs = append(objs, d)
+			}
+			objs = append(objs, sub)
+			f := newT11uFixture(t, config.Config{}, objs...)
+			f.reconciler.SetMatchResolver(&t9cFakeMatcher{
+				byKey: map[string][]string{selectorKey: tc.matches},
+			})
+			f.applyStatus(sub, func() {})
+
+			res, err := f.reconcileSub()
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.RequeueAfter != tc.wantRequeue {
+				t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, tc.wantRequeue)
+			}
+			got := f.getSub()
+
+			entry := t9cEntryByKey(got, selectorKey)
+			if entry == nil {
+				t.Fatalf("selector-form entry disappeared: %+v", got.Status.Targets)
+			}
+			if len(got.Status.Targets) != 1 {
+				t.Fatalf("the selector target keeps exactly ONE aggregate entry, got %+v", got.Status.Targets)
+			}
+			if entry.RolloutStatus != tc.wantAgg {
+				t.Fatalf("aggregate entry rollout = %q, want %q", entry.RolloutStatus, tc.wantAgg)
+			}
+			// Engine-owned surfaces stay untouched and the matched count is
+			// engine-owned too — the observer never writes it.
+			if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
+				t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
+			}
+			if !entry.ImageApplied || entry.MatchedObjects != nil {
+				t.Fatalf("observer must not touch ImageApplied/MatchedObjects: %+v", entry)
+			}
+			if got.Status.RolloutStatus != tc.wantAgg {
+				t.Fatalf("subscription aggregate = %q, want %q", got.Status.RolloutStatus, tc.wantAgg)
+			}
+
+			if len(got.Status.RecentDeliveries) != 1 {
+				t.Fatalf("per-target history must stay one record, got %+v", got.Status.RecentDeliveries)
+			}
+			rec := got.Status.RecentDeliveries[0]
+			if rec.RolloutResult != tc.wantRecord || rec.Reason != tc.wantRecordReason {
+				t.Fatalf("record = (%q, %q), want (%q, %q)", rec.RolloutResult, rec.Reason, tc.wantRecord, tc.wantRecordReason)
+			}
+
+			events := f.drainEvents()
+			if tc.wantEventReason == "" {
+				if len(events) != 0 {
+					t.Fatalf("steady aggregate must be event-free, got %v", events)
+				}
+			} else {
+				withReason := t11uEventsWith(events, tc.wantEventReason)
+				if len(events) != 1 || len(withReason) != 1 {
+					t.Fatalf("want exactly one subscription-side %s event (selector ref has no target side), got %v", tc.wantEventReason, events)
+				}
+				for _, want := range tc.wantEventContains {
+					if !strings.Contains(withReason[0], want) {
+						t.Fatalf("event %q must contain %q", withReason[0], want)
+					}
+				}
+				if !strings.HasPrefix(withReason[0], "Normal") && tc.wantAgg != imageflowv1alpha1.RolloutFailed {
+					t.Fatalf("non-Failed transitions announce Normal events: %s", withReason[0])
+				}
+				if tc.wantAgg == imageflowv1alpha1.RolloutFailed && !strings.HasPrefix(withReason[0], "Warning") {
+					t.Fatalf("Failed transitions announce Warning events: %s", withReason[0])
+				}
+			}
+
+			if tc.wantMetricResult != "" {
+				if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindDeployment, tc.wantMetricResult)); v != 1 {
+					t.Fatalf("rollout metric {deployment, %s} = %v, want 1", tc.wantMetricResult, v)
+				}
+			}
+		})
+	}
+}
+
+// TestObserverSelectorThirdPartyAggregateHonestUnknown pins ADR-014 decision
+// 6 / D11 on the aggregated observe side: a selector target in a third-party
+// CRD class determines every matched object through the same per-object
+// pipeline, and the aggregate stays honestly Unknown — no polling, no
+// fabricated verdict, engine-owned Reason/Message untouched, matched count
+// left to the engine.
+func TestObserverSelectorThirdPartyAggregateHonestUnknown(t *testing.T) {
+	selectorRef := t11uEdgeRef()
+	selectorRef.Name = ""
+	selectorRef.LabelSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge"}}
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(selectorRef)
+	selectorTarget := imageflowv1alpha1.SubscriptionTarget{
+		TargetRef:      selectorRef,
+		ContainerNames: []string{t11uContainer},
+	}
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{selectorTarget}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions: t11uAuthorizedConditions(),
+		Targets:    []imageflowv1alpha1.TargetDeliveryStatus{t11uSeededEntry(selectorRef, t11uRefA)},
+		RecentDeliveries: []imageflowv1alpha1.DeliveryResult{
+			t11uSeededRecord(selectorRef, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute)),
+		},
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		ObservedGeneration: 1,
+	})
+	f := newT11uFixture(t, config.Config{}, sub)
+	f.reconciler.SetMatchResolver(&t9cFakeMatcher{
+		byKey: map[string][]string{selectorKey: {"edge-1"}},
+	})
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("honest Unknown must not poll: RequeueAfter = %v", res.RequeueAfter)
+	}
+	got := f.getSub()
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatal("selector-form entry disappeared")
+	}
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("rolloutStatus = %q, want honest Unknown", entry.RolloutStatus)
+	}
+	if entry.Reason != TargetReasonApplied || entry.Message != t11uEngineSteadyMessage {
+		t.Fatalf("entry Reason/Message must stay engine-owned: %q/%q", entry.Reason, entry.Message)
+	}
+	if !entry.ImageApplied || entry.MatchedObjects != nil {
+		t.Fatalf("observer must not touch ImageApplied/MatchedObjects: %+v", entry)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("aggregate = %q, want Unknown", got.Status.RolloutStatus)
+	}
+	// The record stays in flight — no terminal result was observed.
+	if got.Status.RecentDeliveries[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("record = %q, want in-flight Progressing", got.Status.RecentDeliveries[0].RolloutResult)
+	}
+	// Subscription-side honest-Unknown event only (target side skips: the
+	// third-party kind is not in the scheme), naming the judged object.
+	events := f.drainEvents()
+	unknownEvents := t11uEventsWith(events, EventReasonRolloutUnknown)
+	if len(unknownEvents) != 1 {
+		t.Fatalf("events = %v, want exactly one subscription-side RolloutUnknown", events)
+	}
+	for _, want := range []string{"edge-1=Unknown", "worst-case aggregate Unknown over 1 matched object(s)"} {
+		if !strings.Contains(unknownEvents[0], want) {
+			t.Fatalf("event %q must carry the bounded per-object verdict (%q)", unknownEvents[0], want)
+		}
+	}
+	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindOther, observerResultUnknown)); v != 1 {
+		t.Fatalf("rollout outcome metric = %v, want 1", v)
+	}
+}
+
+// TestObserverSkipsMatchLimitExceededSelectorEntry pins the observer-side
+// contract of issue #83 merged with the #82 aggregate surface: the delivery
+// engine reports an over-limit selector target ON its single per-target
+// aggregate entry (selector-keyed, Failed, Reason MatchLimitExceeded — the
+// breach outranks every per-object fold). The report is terminal and
+// engine-owned, so the observer skips the WHOLE target at its frozen-entry
+// gate — before match resolution: no polling of the delivered prefix, no
+// rewriting of the report, no verdict ping-pong against the engine-enforced
+// Failed rollout. Observation resumes by itself once the engine flips the
+// Reason (membership shrank back under the bound).
+//
+// The stock fake client degrades an empty-name Get into NotFound, which the
+// observer would silently swallow; the real API machinery rejects it
+// client-side ("resource name may not be empty"). The interceptor injects
+// that production error shape, so any nameless poll leaking past the gate
+// surfaces as a reconcile error instead of passing silently.
+func TestObserverSkipsMatchLimitExceededSelectorEntry(t *testing.T) {
+	selectorTarget := t11uSelectorTarget(map[string]string{"app": "web"})
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(selectorTarget.TargetRef)
+	limitEntry := imageflowv1alpha1.TargetDeliveryStatus{
+		TargetRef:      selectorTarget.TargetRef,
+		DesiredImage:   t11uRefA,
+		ObservedImage:  t11uRefA,
+		ImageApplied:   true,
+		RolloutStatus:  imageflowv1alpha1.RolloutFailed,
+		HealthStatus:   imageflowv1alpha1.HealthUnknown,
+		Reason:         TargetReasonMatchLimitExceeded,
+		MatchedObjects: func() *int32 { v := int32(3); return &v }(),
+		Message: "selector target matched 3 objects, over the hard limit of 2 " +
+			"(--selector-match-limit): the remaining 1 are NOT delivered",
+	}
+	succeeded := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2, AvailableReplicas: 2, ReadyReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}},
+	}
+	sub := t11uSub(
+		[]imageflowv1alpha1.SubscriptionTarget{selectorTarget},
+		imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{limitEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutFailed,
+			ObservedGeneration: 1,
+		})
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := imageflowv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add imageflow scheme: %v", err)
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			t11uNamedDeployment("web-1", t11uRefA, succeeded),
+			t11uNamedDeployment("web-2", t11uRefA, succeeded),
+			sub,
+		).
+		WithStatusSubresource(&imageflowv1alpha1.ImageSubscription{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if key.Name == "" {
+					return fmt.Errorf("resource name may not be empty")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	// The fake strips status from Create for subresource-registered kinds;
+	// persist the seeded status through the subresource, as the fixture does.
+	if err := cl.Status().Update(t11uCtx, sub); err != nil {
+		t.Fatalf("persist seeded status: %v", err)
+	}
+	recorder := record.NewFakeRecorder(256)
+	r := NewSubscriptionObserverReconciler(cl, nil, recorder,
+		clock.NewFake(t11uStart), config.Config{}, newObserverMetrics(), nil)
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {"web-1", "web-2", "web-3"}}}
+	r.SetMatchResolver(matcher)
+
+	res, err := r.Reconcile(t11uCtx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: t11uNamespace, Name: t11uSubName,
+	}})
+	if err != nil {
+		t.Fatalf("the observer must skip the engine-owned match-limit report, got error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("a skipped target has nothing in flight to poll, got requeue %v", res.RequeueAfter)
+	}
+	if len(matcher.calls) != 0 {
+		t.Fatalf("the gate must short-circuit before match resolution, got calls %v", matcher.calls)
+	}
+
+	got := &imageflowv1alpha1.ImageSubscription{}
+	if err := cl.Get(t11uCtx, types.NamespacedName{Namespace: t11uNamespace, Name: t11uSubName}, got); err != nil {
+		t.Fatalf("get sub: %v", err)
+	}
+	// The first pass may still bookkeep the orthogonal StatusPolicyEvaluated
+	// condition (False/NotConfigured — this target declares no CUE policy);
+	// that is every-first-pass behaviour, not a rewrite of the report. From
+	// then on the observer must be completely silent while the report
+	// persists: no polls, no writes, no events.
+	steady := got.ResourceVersion
+	if _, err := r.Reconcile(t11uCtx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: t11uNamespace, Name: t11uSubName,
+	}}); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	settled := &imageflowv1alpha1.ImageSubscription{}
+	if err := cl.Get(t11uCtx, types.NamespacedName{Namespace: t11uNamespace, Name: t11uSubName}, settled); err != nil {
+		t.Fatalf("get sub: %v", err)
+	}
+	if settled.ResourceVersion != steady {
+		t.Fatalf("the observer must be silent while the report persists: rv %s -> %s",
+			steady, settled.ResourceVersion)
+	}
+	if len(matcher.calls) != 0 {
+		t.Fatalf("the gate must keep short-circuiting before match resolution, got calls %v", matcher.calls)
+	}
+	got = settled
+
+	// The terminal report survives untouched — still selector-keyed, still
+	// Failed, still the engine's message.
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("the aggregate entry is the only entry, got %+v", got.Status.Targets)
+	}
+	after := got.Status.Targets[0]
+	if after.TargetRef.Name != "" || after.TargetRef.LabelSelector == nil {
+		t.Fatalf("the match-limit entry must stay selector-keyed, got %+v", after.TargetRef)
+	}
+	if after.RolloutStatus != imageflowv1alpha1.RolloutFailed || after.Reason != TargetReasonMatchLimitExceeded ||
+		after.Message != limitEntry.Message || after.DesiredImage != t11uRefA {
+		t.Fatalf("the observer must not rewrite the terminal report, got %+v", after)
+	}
+	if after.MatchedObjects == nil || *after.MatchedObjects != 3 {
+		t.Fatalf("the observer must not touch the engine-owned matched count, got %+v", after.MatchedObjects)
+	}
+	// Worst-state aggregate stays Failed — the limit report outranks the
+	// healthy prefix objects it is never allowed to poll.
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("aggregate = %q, want Failed", got.Status.RolloutStatus)
+	}
+	select {
+	case ev := <-recorder.Events:
+		t.Fatalf("a skipped target emits nothing, got event %q", ev)
+	default:
 	}
 }

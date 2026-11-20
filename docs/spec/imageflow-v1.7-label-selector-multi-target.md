@@ -1,6 +1,6 @@
 # Spec: Label Selector Multi-Target (v1.7)
 
-- Status: Draft
+- Status: Implemented
 - Date: 2026-11-20
 - Author: Agent (grilling → to-spec workflow)
 - Related: ADR-014, ADR-006（v1.7 指针补注）, ADR-003（SAR 授权）, ADR-008（投递语义）, ADR-005（写入合约）, ADR-010（受控标签集）, GLOSSARY.md（Selector Target, Named Target, Subscription Target, Delivery Result, Outcome Stages）

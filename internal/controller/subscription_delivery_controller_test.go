@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1735,5 +1736,1752 @@ func TestDeliveryReferenceMatchesFormat(t *testing.T) {
 		if got := referenceMatchesFormat(tc.format, tc.ref); got != tc.want {
 			t.Errorf("referenceMatchesFormat(%q, %q) = %v, want %v", tc.format, tc.ref, got, tc.want)
 		}
+	}
+}
+
+// --- Selector targets: per-object fan-out delivery with per-target status
+// aggregation (issue #81 fan-out + issue #82 aggregation, ADR-014 decisions
+// 2/3/5/6/8/9/13, spec D4/D7/D8) ---
+//
+// The match-set membership itself (server-side filtered informers, tuple
+// reuse, terminal-state exclusion) is owned by
+// subscription_delivery_match_resolver_test.go and the envtest lane; this
+// section pins what the ENGINE does with a resolved match set: one per-object
+// write contract per member (SSA, Conflict isolation), ONE aggregate status
+// entry per selector target carrying the worst-state fold and the matched
+// count, per-object detail only on the Events, the NoMatches surface for the
+// legal empty match set, label-removal shrinking the count WITHOUT rollback,
+// and the per-object T8 Forbidden freeze.
+
+const (
+	t9cWeb1 = "web-1"
+	t9cWeb2 = "web-2"
+)
+
+// t9cFakeMatcher stands in for matchResolverAPI: each selector-form
+// canonical key maps to a fixed match set (or an injected error), and every
+// call is recorded so the engine's resolution path is observable.
+type t9cFakeMatcher struct {
+	byKey map[string][]string
+	err   error
+	calls []string
+}
+
+func (m *t9cFakeMatcher) resolveSelector(_ context.Context, ref imageflowv1alpha1.TargetReference) ([]string, error) {
+	key := imageflowv1alpha1.CanonicalTargetKey(ref)
+	m.calls = append(m.calls, key)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return append([]string(nil), m.byKey[key]...), nil
+}
+
+func t9cSelectorTarget(matchLabels map[string]string, containers ...string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t9cAPIApps,
+			Kind:          t9cKindDeploy,
+			Namespace:     t9cNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: containers,
+	}
+}
+
+func t9cLabeledDeploy(name string, objLabels map[string]string, images ...[2]string) *unstructured.Unstructured {
+	u := t9cDeployment(name, images...)
+	u.SetLabels(objLabels)
+	return u
+}
+
+func t9cDeployByName(t *testing.T, f *t9cFixture, name string) *unstructured.Unstructured {
+	t.Helper()
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(t9cAPIApps)
+	u.SetKind(t9cKindDeploy)
+	key := types.NamespacedName{Namespace: t9cNamespace, Name: name}
+	if err := f.client.Get(context.Background(), key, u); err != nil {
+		t.Fatalf("get deployment %s: %v", name, err)
+	}
+	return u
+}
+
+// t9cEntryByKey finds a status entry by canonical target key — the selector
+// form has an empty Name, so t9cEntry cannot reach it.
+func t9cEntryByKey(sub *imageflowv1alpha1.ImageSubscription, key string) *imageflowv1alpha1.TargetDeliveryStatus {
+	for i := range sub.Status.Targets {
+		if imageflowv1alpha1.CanonicalTargetKey(sub.Status.Targets[i].TargetRef) == key {
+			return &sub.Status.Targets[i]
+		}
+	}
+	return nil
+}
+
+var t9cAppCheckout = map[string]string{"app": "checkout"}
+
+// TestSubscriptionDeliverySelectorFanOutPerObjectSSA pins spec D4 + D8:
+// every matched object goes through the SAME per-object write contract as a
+// named target — one SSA apply and one dual-namespace event pair each — but
+// the status surface stays per-TARGET: one aggregate selector-form entry
+// carrying the matched count, one record. The resolver is consulted with the
+// selector-form reference.
+func TestSubscriptionDeliverySelectorFanOutPerObjectSSA(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	assertT9cFanOutPass(t, f, matcher, selectorKey)
+	assertT9cFanOutObjectWrites(t, f)
+	assertT9cFanOutAggregateEntry(t, f.getSub(t), sub, selectorKey)
+	assertT9cFanOutEventsAndMetrics(t, f)
+	assertT9cFanOutSteadyState(t, f)
+}
+
+// assertT9cFanOutPass runs the initial fan-out pass and pins the per-object
+// SSA write discipline and the single resolver consultation.
+func assertT9cFanOutPass(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("fan-out pass failed: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 2 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("one apply PER OBJECT plus one status write expected, got %+v", f.audit)
+	}
+	if calls := matcher.calls; len(calls) != 1 || calls[0] != selectorKey {
+		t.Fatalf("resolver must be consulted once with the selector-form key, got %v", calls)
+	}
+}
+
+// assertT9cFanOutObjectWrites pins the per-object delivery facts on every
+// matched object: current digest, owned by the subscription's field manager.
+func assertT9cFanOutObjectWrites(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	for _, name := range []string{t9cWeb1, t9cWeb2} {
+		stored := t9cDeployByName(t, f, name)
+		if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
+			t.Fatalf("%s image = %s, want digest %s", name, image, t9cDigestA)
+		}
+		if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
+			t.Fatalf("%s image field must be owned by the subscription's field manager", name)
+		}
+	}
+}
+
+// assertT9cFanOutAggregateEntry pins the ONE per-target (selector-form)
+// aggregate entry, the subscription-level status and the single per-target
+// record (issue #82, ADR-014 decision 5).
+func assertT9cFanOutAggregateEntry(t *testing.T, got *imageflowv1alpha1.ImageSubscription,
+	sub *imageflowv1alpha1.ImageSubscription, selectorKey string) {
+	t.Helper()
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("expected ONE aggregate entry per selector target, got %+v", got.Status.Targets)
+	}
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatalf("aggregate entry must keep the selector-form ref, got %+v", got.Status.Targets)
+	}
+	assertT9cDeliveredEntry(t, entry)
+	// The entry is per-TARGET (selector form), never per-object (issue #82,
+	// ADR-014 decision 5).
+	if entry.TargetRef.Name != "" || entry.TargetRef.LabelSelector == nil {
+		t.Fatalf("aggregate entry target ref must stay selector-form, got %+v", entry.TargetRef)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("aggregate entry must carry the matched count 2, got %+v", entry.MatchedObjects)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing || got.Status.ObservedGeneration != 3 {
+		t.Fatalf("subscription-level status mismatch: %+v", got.Status)
+	}
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("expected ONE per-target record (per-object detail lives on events), got %+v", got.Status.RecentDeliveries)
+	}
+	assertT9cAppliedRecord(t, got.Status.RecentDeliveries[0], sub.Spec.Source)
+	if name := got.Status.RecentDeliveries[0].TargetRef.Name; name != "" {
+		t.Fatalf("record must reference the selector target, got name %q", name)
+	}
+	assertT9cCleanConditions(t, got)
+}
+
+// assertT9cFanOutEventsAndMetrics pins the dual-namespace per-object event
+// audit and the delivery metrics of the fan-out pass.
+func assertT9cFanOutEventsAndMetrics(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	events := drainT9cEvents(f.recorder)
+	if applied := t9cEventsWith(events, EventReasonImageApplied); len(events) != 4 || len(applied) != 4 {
+		t.Fatalf("expected dual-namespace ImageApplied events for both objects, got %v", events)
+	}
+	if v := t9cCounterVal(t, f.metrics.applies, applyResultSuccess); v != 2 {
+		t.Fatalf("applies{success} = %v, want 2", v)
+	}
+	if count, sum := t9cHistogramStats(t, f.metrics.latency); count != 2 || sum != 1200 {
+		t.Fatalf("latency histogram = (%v, %v), want (2, 1200s) — one sample per delivered object", count, sum)
+	}
+}
+
+// assertT9cFanOutSteadyState pins the converged steady state: zero writes,
+// zero events, no record churn.
+func assertT9cFanOutSteadyState(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady state must be write-free, got %+v", f.audit)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("steady state must be event-free, got %v", events)
+	}
+	if recs := f.getSub(t).Status.RecentDeliveries; len(recs) != 1 {
+		t.Fatalf("steady state must not re-record deliveries, got %+v", recs)
+	}
+}
+
+// TestSubscriptionDeliverySelectorConflictSkipsOnlyContestedObject pins
+// ADR-014 decision 9: conflict detection is per-object — the contested
+// object is skipped (zero writes, Conflict event naming the claimant) while
+// the rest of the match set delivers normally, and the aggregate surfaces
+// the worst state.
+func TestSubscriptionDeliverySelectorConflictSkipsOnlyContestedObject(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	t9cSeedOwnership(web1, t9cRivalManager, t9cContainer)
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	rival := &imageflowv1alpha1.ImageSubscription{
+		ObjectMeta: metav1.ObjectMeta{Namespace: t9cNamespace, Name: t9cRivalSubName},
+		Spec: imageflowv1alpha1.ImageSubscriptionSpec{
+			Source: imageflowv1alpha1.SubscriptionSourceRef{
+				Kind:      t9cSourceKind,
+				Name:      "rival-stream:edge",
+				Namespace: t9cNamespace,
+			},
+			Targets: []imageflowv1alpha1.SubscriptionTarget{t9cContainerTarget(t9cWeb1, t9cContainer)},
+		},
+	}
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1, web2, rival)
+	f.reconciler.SetMatchResolver(matcher)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("mixed pass must settle silently: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("only the uncontested object may be applied, got %+v", f.audit)
+	}
+
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb1), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("contested object must see ZERO writes, image is %s", image)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb2), t9cContainer); image != t9cDigestA {
+		t.Fatalf("uncontested object must deliver normally, image is %s", image)
+	}
+
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("expected ONE aggregate entry per selector target, got %+v", got.Status.Targets)
+	}
+	agg := t9cEntryByKey(got, selectorKey)
+	if agg == nil {
+		t.Fatalf("aggregate entry must keep the selector-form ref, got %+v", got.Status.Targets)
+	}
+	// Worst-state fold: the contested object's Conflict dominates the
+	// delivered sibling (ADR-014 decision 9), the message names the claimant
+	// and the first failing object in match order.
+	if agg.Reason != TargetReasonConflict || agg.RolloutStatus != imageflowv1alpha1.RolloutConflict {
+		t.Fatalf("aggregate must surface Conflict, got %+v", agg)
+	}
+	if agg.ImageApplied {
+		t.Fatalf("aggregate ImageApplied must be false while one matched object is contested, got %+v", agg)
+	}
+	if !strings.Contains(agg.Message, t9cRivalSubName) || !strings.Contains(agg.Message, t9cWeb1) {
+		t.Fatalf("aggregate message must name the claimant (%s) and the contested object (%s), got %q", t9cRivalSubName, t9cWeb1, agg.Message)
+	}
+	if agg.MatchedObjects == nil || *agg.MatchedObjects != 2 {
+		t.Fatalf("aggregate entry must count both matched objects, got %+v", agg.MatchedObjects)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutConflict {
+		t.Fatalf("aggregate must surface the worst state Conflict, got %q", got.Status.RolloutStatus)
+	}
+	cond := t9cCondition(got, imageflowv1alpha1.ConditionTypeConflict)
+	if cond == nil || cond.Status != metav1.ConditionTrue || cond.Reason != ReasonFieldOwnershipConflict {
+		t.Fatalf("Conflict condition mismatch: %+v", cond)
+	}
+
+	events := drainT9cEvents(f.recorder)
+	if n := len(t9cEventsWith(events, EventReasonDeliveryConflict)); n != 1 {
+		t.Fatalf("expected exactly one Warning %s event, got %v", EventReasonDeliveryConflict, events)
+	}
+	for _, e := range t9cEventsWith(events, EventReasonDeliveryConflict) {
+		if !strings.HasPrefix(e, "Warning") {
+			t.Fatalf("conflict event must be a Warning: %s", e)
+		}
+	}
+	if n := len(t9cEventsWith(events, EventReasonImageApplied)); n != 2 {
+		t.Fatalf("the delivered object keeps its dual-namespace ImageApplied events, got %v", events)
+	}
+	if recs := got.Status.RecentDeliveries; len(recs) != 1 ||
+		recs[0].RolloutResult != imageflowv1alpha1.RolloutConflict ||
+		recs[0].Reason != TargetReasonConflict || recs[0].ImageApplied {
+		t.Fatalf("the single per-target record must follow the worst state Conflict, got %+v", recs)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelConflict); v != 1 {
+		t.Fatalf("failures{conflict} = %v, want 1", v)
+	}
+	if v := t9cCounterVal(t, f.metrics.applies, applyResultSuccess); v != 1 {
+		t.Fatalf("applies{success} = %v, want 1", v)
+	}
+}
+
+// TestSubscriptionDeliverySelectorConflictSteadyZeroChurnAndRecovery pins the
+// conflict lifecycle of a selector aggregate (#82, ADR-014 decision 9):
+// while the contested object stays in the match set, steady-state passes are
+// completely silent (no record, no events, no status write — a contested
+// aggregate never reaches freshConverged, so re-confirming the delivered
+// siblings would churn), while a NEW member delivered into the steady
+// conflict keeps its per-object audit but records nothing over the contested
+// aggregate; when the contested object LEAVES the set, the
+// aggregate recovers — Reason flips to Applied, the persisted Conflict
+// rollout is handed back to the observer lane as Progressing (without this,
+// the observer's Conflict gate would leave the entry stuck forever), the
+// matched count shrinks, and the recovered sibling is confirmed exactly once.
+func TestSubscriptionDeliverySelectorConflictSteadyZeroChurnAndRecovery(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	t9cSeedOwnership(web1, t9cRivalManager, t9cContainer)
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web3 := t9cLabeledDeploy("web-3", t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	rival := &imageflowv1alpha1.ImageSubscription{
+		ObjectMeta: metav1.ObjectMeta{Namespace: t9cNamespace, Name: t9cRivalSubName},
+		Spec: imageflowv1alpha1.ImageSubscriptionSpec{
+			Source: imageflowv1alpha1.SubscriptionSourceRef{
+				Kind:      t9cSourceKind,
+				Name:      "rival-stream:edge",
+				Namespace: t9cNamespace,
+			},
+			Targets: []imageflowv1alpha1.SubscriptionTarget{t9cContainerTarget(t9cWeb1, t9cContainer)},
+		},
+	}
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1, web2, web3, rival)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("first pass failed: %v", err)
+	}
+	drainT9cEvents(f.recorder)
+
+	t.Run("steady conflict is completely silent", func(t *testing.T) {
+		assertT9cSteadyConflictSilent(t, f, selectorKey)
+	})
+
+	t.Run("a new member delivered into a steady conflict is audited but records nothing", func(t *testing.T) {
+		assertT9cJoinIntoSteadyConflict(t, f, matcher, selectorKey)
+	})
+
+	t.Run("contested object leaving the match set recovers the aggregate", func(t *testing.T) {
+		assertT9cConflictRecovery(t, f, matcher, selectorKey)
+	})
+}
+
+// assertT9cSteadyConflictSilent pins that while the contested object stays in
+// the match set, steady-state passes are completely silent (no record, no
+// events, no status write — a contested aggregate never reaches
+// freshConverged, so re-confirming the delivered siblings would churn).
+func assertT9cSteadyConflictSilent(t *testing.T, f *t9cFixture, selectorKey string) {
+	t.Helper()
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady conflict must not write anything, got %+v", f.audit)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("steady conflict must not re-announce anything, got %v", events)
+	}
+	got := f.getSub(t)
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("no duplicate Conflict record on a steady pass, got %+v", got.Status.RecentDeliveries)
+	}
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil || entry.Reason != TargetReasonConflict ||
+		entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("steady conflict entry unchanged, got %+v", entry)
+	}
+}
+
+// assertT9cJoinIntoSteadyConflict pins that a NEW member delivered into the
+// steady conflict keeps its per-object audit but records nothing over the
+// contested aggregate.
+func assertT9cJoinIntoSteadyConflict(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb1, t9cWeb2, "web-3"}
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("join pass failed: %v", err)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("the new member must be delivered, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, "web-3"), t9cContainer); image != t9cDigestA {
+		t.Fatalf("the joining member holds the digest now, got %s", image)
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil || entry.Reason != TargetReasonConflict ||
+		entry.RolloutStatus != imageflowv1alpha1.RolloutConflict {
+		t.Fatalf("the contested object still dominates the aggregate, got %+v", entry)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 3 {
+		t.Fatalf("matched must count the new member, got %+v", entry.MatchedObjects)
+	}
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("a delivered sibling must not record Applied over a contested aggregate, got %+v", got.Status.RecentDeliveries)
+	}
+	events := drainT9cEvents(f.recorder)
+	if n := len(t9cEventsWith(events, EventReasonImageApplied)); n != 2 {
+		t.Fatalf("the joining member keeps its dual-namespace delivery audit, got %v", events)
+	}
+	if n := len(t9cEventsWith(events, EventReasonDeliveryConflict)); n != 0 {
+		t.Fatalf("the persisted Conflict reason must not be re-announced, got %v", events)
+	}
+}
+
+// assertT9cConflictRecovery pins the recovery when the contested object
+// LEAVES the set: the aggregate recovers — Reason flips to Applied, the
+// persisted Conflict rollout is handed back to the observer lane as
+// Progressing (without this, the observer's Conflict gate would leave the
+// entry stuck forever), the matched count shrinks, and the recovered sibling
+// is confirmed exactly once.
+func assertT9cConflictRecovery(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb2}
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("recovery pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("recovery must not write to any workload, got %+v", f.audit)
+	}
+	if f.audit.statusWrites != 1 {
+		t.Fatalf("the recovery transition needs exactly one status write, got %+v", f.audit)
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatalf("aggregate entry must survive, got %+v", got.Status.Targets)
+	}
+	if entry.Reason != TargetReasonApplied || !entry.ImageApplied || entry.ObservedImage != t9cDigestA {
+		t.Fatalf("the remaining delivered object recovers the aggregate facts, got %+v", entry)
+	}
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("the persisted Conflict rollout must be handed back to the observer lane as Progressing, got %q", entry.RolloutStatus)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 1 {
+		t.Fatalf("matched must shrink to the remaining member, got %+v", entry.MatchedObjects)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("subscription aggregate must recover too, got %q", got.Status.RolloutStatus)
+	}
+	if cond := t9cCondition(got, imageflowv1alpha1.ConditionTypeConflict); cond == nil ||
+		cond.Status != metav1.ConditionFalse || cond.Reason != ReasonNoConflicts {
+		t.Fatalf("Conflict condition must flip back to False, got %+v", cond)
+	}
+	recs := got.Status.RecentDeliveries
+	if len(recs) != 2 {
+		t.Fatalf("recovery records the confirmation exactly once, got %+v", recs)
+	}
+	if recs[0].RolloutResult != imageflowv1alpha1.RolloutProgressing ||
+		recs[0].Reason != TargetReasonApplied || !recs[0].ImageApplied {
+		t.Fatalf("the recovery record reports the applied aggregate, got %+v", recs[0])
+	}
+	if recs[1].RolloutResult != imageflowv1alpha1.RolloutConflict {
+		t.Fatalf("history is append-only: the Conflict record stays, got %+v", recs[1])
+	}
+	events := drainT9cEvents(f.recorder)
+	if n := len(t9cEventsWith(events, EventReasonImageApplied)); n != 2 {
+		t.Fatalf("the recovered sibling is confirmed once (dual namespace), got %v", events)
+	}
+	if n := len(t9cEventsWith(events, EventReasonDeliveryConflict)); n != 0 {
+		t.Fatalf("recovery must not re-announce the conflict, got %v", events)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelConflict); v != 1 {
+		t.Fatalf("failures{conflict} must not grow on recovery, got %v", v)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb1), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the departed contested object stays untouched, got %s", image)
+	}
+}
+
+// TestSubscriptionDeliverySelectorZeroMatchesNoMatchesSurface pins ADR-014
+// decision 8 / spec D7: an empty match set is a LEGAL state, not a silent
+// hole — the selector entry reports Unknown with Reason NoMatches and matched
+// count 0, one Warning Event surfaces it, the subscription aggregate folds it
+// as Unknown, and no object is touched, no record is written. Other targets
+// of the same subscription are NOT blocked (asserted via the aggregate lane
+// and clean conditions). The surface is steady: a second pass writes nothing.
+func TestSubscriptionDeliverySelectorZeroMatchesNoMatchesSurface(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{}} // selectorKey absent → no matches
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1)
+	f.reconciler.SetMatchResolver(matcher)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("zero-match pass failed: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("zero matches must not touch any object, got %+v", f.audit)
+	}
+	if f.audit.statusWrites != 1 {
+		t.Fatalf("the NoMatches surface needs exactly one status write, got %+v", f.audit)
+	}
+	if calls := matcher.calls; len(calls) != 1 || calls[0] != selectorKey {
+		t.Fatalf("resolver must still be consulted, got %v", calls)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb1), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("unmatched object must be untouched, image is %s", image)
+	}
+
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("zero matches must still surface the selector entry, got %+v", got.Status.Targets)
+	}
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatalf("entry must keep the selector-form ref, got %+v", got.Status.Targets)
+	}
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutUnknown || entry.Reason != TargetReasonNoMatches {
+		t.Fatalf("zero matches must report Unknown/NoMatches, got %+v", entry)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 0 {
+		t.Fatalf("zero matches must carry matched count 0 (non-nil), got %+v", entry.MatchedObjects)
+	}
+	if entry.DesiredImage != t9cDigestA {
+		t.Fatalf("the resolved digest must still be recorded, got %q", entry.DesiredImage)
+	}
+	if !strings.Contains(entry.Message, "zero live objects") || !strings.Contains(entry.Message, "ADR-014 decision 8") {
+		t.Fatalf("NoMatches message must explain the legal empty set, got %q", entry.Message)
+	}
+	if len(got.Status.RecentDeliveries) != 0 {
+		t.Fatalf("zero matches must produce zero records, got %+v", got.Status.RecentDeliveries)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("aggregate must fold NoMatches as Unknown, got %q", got.Status.RolloutStatus)
+	}
+	assertT9cCleanConditions(t, got)
+
+	events := drainT9cEvents(f.recorder)
+	noMatches := t9cEventsWith(events, EventReasonNoMatches)
+	if len(events) != 1 || len(noMatches) != 1 {
+		t.Fatalf("expected exactly one NoMatches event, got %v", events)
+	}
+	if !strings.HasPrefix(noMatches[0], "Warning") {
+		t.Fatalf("NoMatches event must be a Warning: %s", noMatches[0])
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, "no_matches"); v != 0 {
+		t.Fatalf("NoMatches is NOT a failure metric (ADR-014 decision 8), got %v", v)
+	}
+
+	// Steady state: the legal empty set is stable — no repeat write, no
+	// repeat Warning.
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady state must be write-free, got %+v", f.audit)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("steady state must be event-free, got %v", events)
+	}
+}
+
+// TestSubscriptionDeliverySelectorWithoutResolverIsHonest pins the
+// registration-bug guard: an engine built without the match resolver refuses
+// the selector target honestly (InvalidTarget, zero writes) instead of
+// silently skipping it.
+func TestSubscriptionDeliverySelectorWithoutResolverIsHonest(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1)
+	// Deliberately NO SetMatchResolver.
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("deterministic failure must not error the reconcile: %v", err)
+	}
+	if f.audit.applies != 0 {
+		t.Fatalf("missing resolver must perform zero writes, got %+v", f.audit)
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil || entry.Reason != TargetReasonInvalidTarget || entry.Message == "" {
+		t.Fatalf("expected an honest InvalidTarget entry on the selector key, got %+v", entry)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutUnknown {
+		t.Fatalf("aggregate must surface Unknown (worst state), got %q", got.Status.RolloutStatus)
+	}
+}
+
+// TestSubscriptionDeliverySelectorResolveErrorMapping pins both resolver
+// failure lanes: a REST-mapping miss is the honest KindNotInstalled waiting
+// state (CRD may still be installed → waiting requeue), any other resolver
+// failure is a transient ApplyFailed that drives workqueue backoff.
+func TestSubscriptionDeliverySelectorResolveErrorMapping(t *testing.T) {
+	t.Run("no REST mapping requeues as KindNotInstalled", func(t *testing.T) {
+		sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+		selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+		web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+		matcher := &t9cFakeMatcher{err: &meta.NoKindMatchError{
+			GroupKind: schema.GroupKind{Group: "apps", Kind: t9cKindDeploy},
+		}}
+		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1)
+		f.reconciler.SetMatchResolver(matcher)
+
+		result, err := f.reconcile(t)
+		if err != nil {
+			t.Fatalf("waiting state must not error the reconcile: %v", err)
+		}
+		if result.RequeueAfter != waitingStateRequeue {
+			t.Fatalf("KindNotInstalled must requeue at the waiting interval, got %+v", result)
+		}
+		if f.audit.applies != 0 {
+			t.Fatalf("zero writes expected, got %+v", f.audit)
+		}
+		entry := t9cEntryByKey(f.getSub(t), selectorKey)
+		if entry == nil || entry.Reason != TargetReasonKindNotInstalled {
+			t.Fatalf("expected KindNotInstalled entry, got %+v", entry)
+		}
+	})
+
+	t.Run("resolver failure is transient ApplyFailed with backoff", func(t *testing.T) {
+		sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+		selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+		web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+		matcher := &t9cFakeMatcher{err: errors.New("match informer did not sync")}
+		f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1)
+		f.reconciler.SetMatchResolver(matcher)
+
+		_, err := f.reconcile(t)
+		if err == nil || !strings.Contains(err.Error(), "match informer did not sync") {
+			t.Fatalf("transient resolver failure must surface as the reconcile error, got %v", err)
+		}
+		if f.audit.applies != 0 {
+			t.Fatalf("zero writes expected, got %+v", f.audit)
+		}
+		entry := t9cEntryByKey(f.getSub(t), selectorKey)
+		if entry == nil || entry.Reason != TargetReasonApplyFailed || entry.RetryCount != 1 {
+			t.Fatalf("expected transient ApplyFailed entry with retry bookkeeping, got %+v", entry)
+		}
+	})
+}
+
+// TestSubscriptionDeliverySelectorOverlapKeepsPerTargetEntries pins the
+// cross-target overlap contract under aggregation: two selector targets
+// whose match sets intersect deliver the shared object exactly once (the
+// second target converges equal-and-owned), and EACH selector target keeps
+// its own aggregate entry with its own matched count — the per-target view
+// is honest: A records the delivery, B confirms it.
+func TestSubscriptionDeliverySelectorOverlapKeepsPerTargetEntries(t *testing.T) {
+	selA := t9cSelectorTarget(map[string]string{"app": "checkout"}, t9cContainer)
+	selB := t9cSelectorTarget(map[string]string{"tier": "web"}, t9cContainer)
+	sub := t9cAuthorizedSub(selA, selB)
+	keyA := imageflowv1alpha1.CanonicalTargetKey(selA.TargetRef)
+	keyB := imageflowv1alpha1.CanonicalTargetKey(selB.TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, map[string]string{"app": "checkout", "tier": "web"},
+		[2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{keyA: {t9cWeb1}, keyB: {t9cWeb1}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1)
+	f.reconciler.SetMatchResolver(matcher)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("overlap pass failed: (%+v, %v)", result, err)
+	}
+	if len(matcher.calls) != 2 {
+		t.Fatalf("both selector targets must be resolved, got %v", matcher.calls)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("the shared object must be applied exactly once, got %+v", f.audit)
+	}
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 2 {
+		t.Fatalf("each selector target keeps its own aggregate entry, got %+v", got.Status.Targets)
+	}
+	entryA := t9cEntryByKey(got, keyA)
+	if entryA == nil {
+		t.Fatalf("selector A must keep its entry, got %+v", got.Status.Targets)
+	}
+	assertT9cDeliveredEntry(t, entryA)
+	if entryA.MatchedObjects == nil || *entryA.MatchedObjects != 1 {
+		t.Fatalf("entry A matched = %+v, want 1", entryA.MatchedObjects)
+	}
+	entryB := t9cEntryByKey(got, keyB)
+	if entryB == nil {
+		t.Fatalf("selector B must keep its entry, got %+v", got.Status.Targets)
+	}
+	if entryB.Reason != TargetReasonApplied || !entryB.ImageApplied ||
+		entryB.DesiredImage != t9cDigestA || entryB.ObservedImage != t9cDigestA {
+		t.Fatalf("entry B must confirm the equal-and-owned object, got %+v", entryB)
+	}
+	if entryB.MatchedObjects == nil || *entryB.MatchedObjects != 1 {
+		t.Fatalf("entry B matched = %+v, want 1", entryB.MatchedObjects)
+	}
+	if len(got.Status.RecentDeliveries) != 2 {
+		t.Fatalf("one record per selector target (delivery + confirmation), got %+v", got.Status.RecentDeliveries)
+	}
+	// Per-object detail lives on the Events: A's value-changed pair plus B's
+	// confirmation pair, all under the ImageApplied reason.
+	if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, EventReasonImageApplied)) != 4 {
+		t.Fatalf("expected two dual-namespace event pairs (delivered + confirmed), got %v", events)
+	}
+}
+
+// TestSubscriptionDeliverySelectorLabelRemovalShrinksMatchedKeepsImage pins
+// ADR-014 decision 3 under aggregation: an object that leaves the match set
+// keeps its written image (no rollback — the write belonged to a real
+// delivery); the aggregate entry survives with a SHRUNKEN matched count, and
+// the remaining set keeps converging silently (no events, no record churn).
+func TestSubscriptionDeliverySelectorLabelRemovalShrinksMatchedKeepsImage(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("first pass failed: %v", err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("first pass must deliver both objects, got %+v", f.audit)
+	}
+	if entry := t9cEntryByKey(f.getSub(t), selectorKey); entry == nil ||
+		entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("first pass must report matched=2, got %+v", entry)
+	}
+	drainT9cEvents(f.recorder)
+
+	// web-1 loses its label: the resolver (informer membership) stops
+	// reporting it; the engine's next pass must shrink the matched count and
+	// leave the delivered image alone.
+	matcher.byKey[selectorKey] = []string{t9cWeb2}
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("shrink pass failed: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("shrinking the match set must not write to any workload, got %+v", f.audit)
+	}
+	if f.audit.statusWrites != 1 {
+		t.Fatalf("the matched-count change needs exactly one status write, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb1), t9cContainer); image != t9cDigestA {
+		t.Fatalf("a departed object must KEEP its delivered image, got %s", image)
+	}
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("the aggregate entry survives membership changes, got %+v", got.Status.Targets)
+	}
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatalf("entry must keep the selector-form ref, got %+v", got.Status.Targets)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 1 {
+		t.Fatalf("matched must shrink to 1, got %+v", entry.MatchedObjects)
+	}
+	if !entry.ImageApplied || entry.ObservedImage != t9cDigestA || entry.Reason != TargetReasonApplied {
+		t.Fatalf("the remaining object keeps the aggregate converged, got %+v", entry)
+	}
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("history is append-only and churn-free: the first-pass record stays alone, got %+v", got.Status.RecentDeliveries)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("shrinking the match set is event-free, got %v", events)
+	}
+}
+
+// TestSubscriptionDeliverySelectorDynamicSetLifecycle pins issue #84
+// (ADR-014 decisions 3/10, spec D9) across the full dynamic-set lifecycle of
+// one selector target:
+//
+//	phase 0: legal empty set (zero matches, zero writes);
+//	phase 1: a member JOINS → the very next pass delivers the current
+//	         desired image immediately (no extra trigger, no wait);
+//	phase 2: a second member joins a converged target → immediate delivery
+//	         of the same digest to the new member only;
+//	phase 3: web-1 loses its label → keeps its image, leaves the count,
+//	         zero churn (label-removal retention);
+//	phase 4: a NEW TAG arrives → only in-set members are overwritten; the
+//	         in-flight records flip to Superseded (aggregate latest-wins)
+//	         and the per-object audit names the overwritten object ONLY —
+//	         the departed web-1 keeps digestA and is never named;
+//	phase 5: web-3 joins after the tag move → it receives the CURRENT
+//	         digest immediately (new-member pickup in its strongest form).
+func TestSubscriptionDeliverySelectorDynamicSetLifecycle(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web3 := t9cLabeledDeploy(t9cWeb3, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2, web3)
+	f.reconciler.SetMatchResolver(matcher)
+
+	assertT9cDynSetPhase0EmptySet(t, f, selectorKey)
+	assertT9cDynSetPhase1FirstMember(t, f, matcher, selectorKey)
+	assertT9cDynSetPhase2SecondMember(t, f, matcher, selectorKey)
+	assertT9cDynSetPhase3MemberDeparts(t, f, matcher, selectorKey)
+	assertT9cDynSetPhase4TagMove(t, f, selectorKey)
+	assertT9cDynSetPhase5JoinAfterTagMove(t, f, matcher, selectorKey)
+}
+
+// t9cSelectorImageOf returns the current image of the named deployment's
+// managed container.
+func t9cSelectorImageOf(t *testing.T, f *t9cFixture, name string) string {
+	t.Helper()
+	return t9cContainerImage(t, t9cDeployByName(t, f, name), t9cContainer)
+}
+
+// t9cSelectorMatchedOf returns the aggregate entry's matched count, failing
+// when the entry or the count is missing.
+func t9cSelectorMatchedOf(t *testing.T, f *t9cFixture, selectorKey string) int32 {
+	t.Helper()
+	entry := t9cEntryByKey(f.getSub(t), selectorKey)
+	if entry == nil || entry.MatchedObjects == nil {
+		t.Fatalf("aggregate entry missing: %+v", f.getSub(t).Status.Targets)
+	}
+	return *entry.MatchedObjects
+}
+
+// t9cAdvanceSelectorPass advances the clock, resets the audit and runs one
+// pass that must not error.
+func t9cAdvanceSelectorPass(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("pass failed: %v", err)
+	}
+}
+
+// assertT9cDynSetPhase0EmptySet — Phase 0: legal empty set: nothing matches,
+// nothing is written.
+func assertT9cDynSetPhase0EmptySet(t *testing.T, f *t9cFixture, selectorKey string) {
+	t.Helper()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("empty-set pass failed: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("zero matches must not write any workload, got %+v", f.audit)
+	}
+	if t9cSelectorMatchedOf(t, f, selectorKey) != 0 {
+		t.Fatalf("empty set must report matched=0, got %d", t9cSelectorMatchedOf(t, f, selectorKey))
+	}
+	if entry := t9cEntryByKey(f.getSub(t), selectorKey); entry.Reason != TargetReasonNoMatches {
+		t.Fatalf("empty set must surface NoMatches, got %+v", entry)
+	}
+	drainT9cEvents(f.recorder)
+}
+
+// assertT9cDynSetPhase1FirstMember — Phase 1: web-1 gains the label:
+// immediate delivery of the current desired image on the very next pass.
+func assertT9cDynSetPhase1FirstMember(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb1}
+	t9cAdvanceSelectorPass(t, f)
+	if f.audit.applies != 1 {
+		t.Fatalf("the new member must be delivered immediately, got %+v", f.audit)
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 must hold the current digest immediately, got %s", t9cSelectorImageOf(t, f, t9cWeb1))
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb2) != t9cInitialImage || t9cSelectorImageOf(t, f, t9cWeb3) != t9cInitialImage {
+		t.Fatalf("non-members must stay untouched: web2=%s web3=%s",
+			t9cSelectorImageOf(t, f, t9cWeb2), t9cSelectorImageOf(t, f, t9cWeb3))
+	}
+	if t9cSelectorMatchedOf(t, f, selectorKey) != 1 {
+		t.Fatalf("matched must be 1, got %d", t9cSelectorMatchedOf(t, f, selectorKey))
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry.Reason != TargetReasonApplied || !entry.ImageApplied || entry.ObservedImage != t9cDigestA {
+		t.Fatalf("phase-1 entry = %+v, want Applied/digestA", entry)
+	}
+	if len(got.Status.RecentDeliveries) != 1 || got.Status.RecentDeliveries[0].NewImage != t9cDigestA ||
+		got.Status.RecentDeliveries[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-1 window = %+v, want one in-flight digestA record", got.Status.RecentDeliveries)
+	}
+	if events := drainT9cEvents(f.recorder); len(t9cEventsWith(events, EventReasonImageApplied)) != 2 || len(events) != 2 {
+		t.Fatalf("phase-1 events = %v, want the dual-namespace ImageApplied pair", events)
+	}
+}
+
+// assertT9cDynSetPhase2SecondMember — Phase 2: web-2 joins a converged
+// target: immediate delivery of the SAME digest to the new member only;
+// web-1 sees zero writes.
+func assertT9cDynSetPhase2SecondMember(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb1, t9cWeb2}
+	t9cAdvanceSelectorPass(t, f)
+	if f.audit.applies != 1 {
+		t.Fatalf("only the joining member is delivered, got %+v", f.audit)
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb2) != t9cDigestA {
+		t.Fatalf("web-2 must hold digestA immediately after joining, got %s", t9cSelectorImageOf(t, f, t9cWeb2))
+	}
+	if t9cSelectorMatchedOf(t, f, selectorKey) != 2 {
+		t.Fatalf("matched must be 2, got %d", t9cSelectorMatchedOf(t, f, selectorKey))
+	}
+	if recs := f.getSub(t).Status.RecentDeliveries; len(recs) != 2 ||
+		recs[0].NewImage != t9cDigestA || recs[1].NewImage != t9cDigestA ||
+		recs[1].RolloutResult == imageflowv1alpha1.RolloutSuperseded {
+		t.Fatalf("same-digest delivery to a new member must not flip history, got %+v", recs)
+	}
+	events := drainT9cEvents(f.recorder)
+	applied := t9cEventsWith(events, EventReasonImageApplied)
+	if len(applied) != 2 || len(events) != 2 {
+		t.Fatalf("phase-2 events = %v, want the web-2 ImageApplied pair only", events)
+	}
+}
+
+// assertT9cDynSetPhase3MemberDeparts — Phase 3: web-1 loses its label: image
+// retained, count shrinks, no record churn, no events.
+func assertT9cDynSetPhase3MemberDeparts(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb2}
+	t9cAdvanceSelectorPass(t, f)
+	if f.audit.applies != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("a departing member must not be written to, got %+v", f.audit)
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 must KEEP its delivered image, got %s", t9cSelectorImageOf(t, f, t9cWeb1))
+	}
+	if t9cSelectorMatchedOf(t, f, selectorKey) != 1 {
+		t.Fatalf("matched must shrink to 1, got %d", t9cSelectorMatchedOf(t, f, selectorKey))
+	}
+	if recs := f.getSub(t).Status.RecentDeliveries; len(recs) != 2 {
+		t.Fatalf("label removal must not churn history, got %+v", recs)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("label removal is event-free, got %v", events)
+	}
+}
+
+// assertT9cDynSetPhase4TagMove — Phase 4: a new tag arrives: only the in-set
+// member (web-2) is overwritten; the departed web-1 keeps digestA and is
+// NEVER named in the per-object Superseded audit.
+func assertT9cDynSetPhase4TagMove(t *testing.T, f *t9cFixture, selectorKey string) {
+	t.Helper()
+	f.updateStream(t, t9cDigestB, t9cStart.Add(-5*time.Minute))
+	f.clock.Advance(time.Minute)
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("tag-move pass failed: %v", err)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("the tag move must overwrite in-set members only, got %+v", f.audit)
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb2) != t9cDigestB {
+		t.Fatalf("web-2 must hold digestB, got %s", t9cSelectorImageOf(t, f, t9cWeb2))
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb1) != t9cDigestA {
+		t.Fatalf("web-1 departed: it keeps digestA and is NOT superseded, got %s", t9cSelectorImageOf(t, f, t9cWeb1))
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb3) != t9cInitialImage {
+		t.Fatalf("web-3 is not a member, got %s", t9cSelectorImageOf(t, f, t9cWeb3))
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 1 ||
+		entry.ObservedImage != t9cDigestB || entry.Reason != TargetReasonApplied ||
+		entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-4 entry = %+v, want matched=1/digestB/Applied/Progressing", entry)
+	}
+	recs := got.Status.RecentDeliveries
+	if len(recs) != 3 || recs[0].NewImage != t9cDigestB ||
+		recs[0].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-4 window head = %+v, want the digestB delivery in flight", recs)
+	}
+	for i := 1; i <= 2; i++ {
+		if recs[i].NewImage != t9cDigestA || recs[i].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("phase-4 record %d = %+v, want digestA Superseded (aggregate latest-wins)", i, recs[i])
+		}
+	}
+	events := drainT9cEvents(f.recorder)
+	superseded := t9cEventsWith(events, EventReasonDeliverySuperseded)
+	// Two flipped records × one overwritten object × dual namespace.
+	if len(superseded) != 4 {
+		t.Fatalf("phase-4 superseded events = %v, want 4 (2 flips × web-2 × dual namespace)", superseded)
+	}
+	for _, e := range superseded {
+		if !strings.Contains(e, t9cWeb2) {
+			t.Fatalf("per-object superseded audit must name the overwritten object: %s", e)
+		}
+		if strings.Contains(e, t9cWeb1) {
+			t.Fatalf("the departed object must never be named superseded: %s", e)
+		}
+	}
+	if appliedEvents := t9cEventsWith(events, EventReasonImageApplied); len(appliedEvents) != 2 {
+		t.Fatalf("phase-4 ImageApplied events = %v, want the web-2 pair", appliedEvents)
+	}
+}
+
+// assertT9cDynSetPhase5JoinAfterTagMove — Phase 5: web-3 joins after the tag
+// move: it receives the CURRENT digest immediately; web-2 (converged) sees
+// zero writes and the same image does not re-flip history.
+func assertT9cDynSetPhase5JoinAfterTagMove(t *testing.T, f *t9cFixture, matcher *t9cFakeMatcher, selectorKey string) {
+	t.Helper()
+	matcher.byKey[selectorKey] = []string{t9cWeb2, t9cWeb3}
+	t9cAdvanceSelectorPass(t, f)
+	if f.audit.applies != 1 {
+		t.Fatalf("only the joining member is delivered, got %+v", f.audit)
+	}
+	if t9cSelectorImageOf(t, f, t9cWeb3) != t9cDigestB {
+		t.Fatalf("web-3 must receive the CURRENT digest immediately, got %s", t9cSelectorImageOf(t, f, t9cWeb3))
+	}
+	if t9cSelectorMatchedOf(t, f, selectorKey) != 2 {
+		t.Fatalf("matched must be 2, got %d", t9cSelectorMatchedOf(t, f, selectorKey))
+	}
+	recs := f.getSub(t).Status.RecentDeliveries
+	if len(recs) != 4 || recs[0].NewImage != t9cDigestB || recs[1].NewImage != t9cDigestB ||
+		recs[1].RolloutResult != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("phase-5 window = %+v, want the second digestB record prepended without a flip", recs)
+	}
+	if recs[2].RolloutResult != imageflowv1alpha1.RolloutSuperseded ||
+		recs[3].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+		t.Fatalf("phase-5 superseded tail must stay terminal, got %+v", recs)
+	}
+	events := drainT9cEvents(f.recorder)
+	if len(t9cEventsWith(events, EventReasonImageApplied)) != 2 || len(events) != 2 {
+		t.Fatalf("phase-5 events = %v, want the web-3 ImageApplied pair only", events)
+	}
+}
+
+// TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject pins the
+// T8 frozen contract at per-object granularity under aggregation: a
+// persisted name-form Forbidden entry freezes THAT object (zero writes,
+// entry preserved untouched by the prune exemption) while the rest of the
+// match set delivers normally. The frozen object still COUNTS toward matched
+// (it is a member of the match set) but casts no delivery-fact vote — with
+// one active object left the aggregate degenerates to that object's own
+// delivery surface.
+func TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	transition := metav1.NewTime(t9cStart.Add(-2 * time.Hour))
+	forbidden := imageflowv1alpha1.TargetDeliveryStatus{
+		TargetRef:          t9cTargetRef(t9cWeb1),
+		DesiredImage:       t9cDigestA,
+		ObservedImage:      t9cDigestA,
+		ImageApplied:       true,
+		RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+		HealthStatus:       imageflowv1alpha1.HealthUnknown,
+		Reason:             TargetReasonForbidden,
+		Message:            "creator identity lacks the apps update grant on this target",
+		ObservedGeneration: 2,
+		RetryCount:         7,
+		LastTransitionTime: &transition,
+	}
+	sub.Status.Targets = []imageflowv1alpha1.TargetDeliveryStatus{forbidden}
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("mixed pass errored: %v", err)
+	}
+	if f.audit.applies != 1 {
+		t.Fatalf("only the unfrozen object may be applied, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb1), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the frozen object must see zero writes, image is %s", image)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb2), t9cContainer); image != t9cDigestA {
+		t.Fatalf("the unfrozen object must deliver, image is %s", image)
+	}
+	got := f.getSub(t)
+	preserved := t9cEntry(got, t9cWeb1)
+	if preserved == nil || !equality.Semantic.DeepEqual(*preserved, forbidden) {
+		t.Fatalf("per-object T8 entry must be preserved untouched:\n got %+v\nwant %+v", preserved, forbidden)
+	}
+	// The selector target itself is NOT gated by a per-object freeze: its
+	// aggregate entry appears, counts the frozen member, and folds only the
+	// active object's delivery facts (single-object degenerate: web-2's own
+	// Applied/Progressing surface, message passthrough).
+	agg := t9cEntryByKey(got, selectorKey)
+	if agg == nil {
+		t.Fatalf("the selector target keeps its own aggregate entry, got %+v", got.Status.Targets)
+	}
+	if agg.MatchedObjects == nil || *agg.MatchedObjects != 2 {
+		t.Fatalf("the frozen member still counts toward matched, got %+v", agg.MatchedObjects)
+	}
+	if agg.Reason != TargetReasonApplied || !agg.ImageApplied ||
+		agg.ObservedImage != t9cDigestA || agg.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate must fold the active object's delivery, got %+v", agg)
+	}
+	if len(got.Status.Targets) != 2 {
+		t.Fatalf("expected the preserved frozen entry plus the aggregate, got %+v", got.Status.Targets)
+	}
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("one aggregate record for the delivered active object, got %+v", got.Status.RecentDeliveries)
+	}
+}
+
+// TestAggregateSelectorOutcomeFoldsWorstState is the table-driven unit test
+// of the pure per-target fold (issue #82, ADR-014 decision 5/8/9, spec v1.7
+// D8): worst-state rollout consequence, first-failure reason in match order,
+// honest knowledge rules for ObservedImage/ImageApplied, T8-frozen members
+// never voting, and the single-object degenerate passthrough.
+func TestAggregateSelectorOutcomeFoldsWorstState(t *testing.T) {
+	source := sourceState{desiredImage: t9cDigestA}
+	for _, tc := range t9cAggregateFoldCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			out := deliveryOutcome{setMatched: true, matched: int32(len(tc.objects))}
+			aggregateSelectorOutcome(&out, tc.objects, source)
+			tc.check(t, out)
+		})
+	}
+}
+
+// t9cFoldCase is one worst-state fold case: the per-object outcomes the way
+// deliverObjectTarget leaves them, plus the check of the folded aggregate.
+type t9cFoldCase struct {
+	name    string
+	objects []deliveryOutcome
+	check   func(t *testing.T, out deliveryOutcome)
+}
+
+// t9cAggregateFoldCases builds the fold-case table. deliveredObj /
+// convergedObj / failedObj build per-object outcomes the way
+// deliverObjectTarget leaves them.
+func t9cAggregateFoldCases() []t9cFoldCase {
+	objRef := func(name string) imageflowv1alpha1.TargetReference {
+		ref := t9cTargetRef(name)
+		return ref
+	}
+	deliveredObj := func(name string) deliveryOutcome {
+		return deliveryOutcome{
+			ref: objRef(name), delivered: true, converged: true,
+			reason: TargetReasonApplied, message: "delivered " + name,
+			setObserved: true, observedImage: t9cDigestA,
+			setImageApplied: true, imageApplied: true,
+			resetRetry: true, locator: "containers [" + t9cContainer + "]",
+		}
+	}
+	convergedObj := func(name string) deliveryOutcome {
+		o := deliveredObj(name)
+		o.delivered = false
+		o.message = "converged " + name
+		return o
+	}
+	failedObj := func(name, reason string) deliveryOutcome {
+		return deliveryOutcome{
+			ref: objRef(name), reason: reason, message: reason + " on " + name,
+			setObserved: true, observedImage: t9cInitialImage,
+		}
+	}
+
+	return []t9cFoldCase{
+		{
+			name:    "delivered match set folds to Progressing with an Applied summary",
+			objects: []deliveryOutcome{deliveredObj(t9cWeb1), deliveredObj(t9cWeb2)},
+			check:   t9cCheckFoldDeliveredApplied,
+		},
+		{
+			name:    "converged match set keeps the persisted rollout (observer lane owns transitions)",
+			objects: []deliveryOutcome{convergedObj(t9cWeb1), convergedObj(t9cWeb2)},
+			check:   t9cCheckFoldConvergedKeepsRollout,
+		},
+		{
+			name:    "conflict dominates a delivered sibling",
+			objects: []deliveryOutcome{deliveredObj(t9cWeb1), conflictObj(t9cWeb2)},
+			check:   t9cCheckFoldConflictDominates,
+		},
+		{
+			name: "first failure in match order names the aggregate reason",
+			objects: []deliveryOutcome{
+				failedObj(t9cWeb1, TargetReasonContainerNotFound),
+				failedObj(t9cWeb2, TargetReasonApplyFailed),
+			},
+			check: t9cCheckFoldFirstFailureNamesReason,
+		},
+		{
+			name: "T8-frozen members count for nothing in the delivery facts",
+			objects: []deliveryOutcome{
+				{ref: objRef(t9cWeb1), preserveEntry: true},
+				convergedObj(t9cWeb2),
+			},
+			check: t9cCheckFoldFrozenCountForNothing,
+		},
+		{
+			name: "all members frozen keeps the persisted surface untouched",
+			objects: []deliveryOutcome{
+				{ref: objRef(t9cWeb1), preserveEntry: true},
+				{ref: objRef(t9cWeb2), preserveEntry: true},
+			},
+			check: t9cCheckFoldAllFrozenFactFree,
+		},
+		{
+			name: "non-uniform observed images blank the aggregate honestly",
+			objects: []deliveryOutcome{
+				convergedObj(t9cWeb1),
+				func() deliveryOutcome {
+					o := convergedObj(t9cWeb2)
+					o.observedImage = t9cInitialImage
+					return o
+				}(),
+			},
+			check: t9cCheckFoldNonUniformBlanks,
+		},
+		{
+			name: "partial observation keeps the persisted value",
+			objects: []deliveryOutcome{
+				convergedObj(t9cWeb1),
+				func() deliveryOutcome {
+					o := failedObj(t9cWeb2, TargetReasonApplyFailed)
+					o.setObserved = false
+					return o
+				}(),
+			},
+			check: t9cCheckFoldPartialObservationKeeps,
+		},
+		{
+			name: "one confirmed non-applied object breaks the guarantee",
+			objects: []deliveryOutcome{
+				deliveredObj(t9cWeb1),
+				func() deliveryOutcome {
+					o := failedObj(t9cWeb2, TargetReasonConflict)
+					o.conflictNow = true
+					o.setImageApplied = true
+					o.imageApplied = false
+					return o
+				}(),
+			},
+			check: t9cCheckFoldNonAppliedBreaksGuarantee,
+		},
+		{
+			name:    "single-object degenerate passes the object surface through",
+			objects: []deliveryOutcome{deliveredObj(t9cWeb1)},
+			check:   t9cCheckFoldSingleObjectPassthrough,
+		},
+	}
+}
+
+func t9cCheckFoldDeliveredApplied(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	progressing := imageflowv1alpha1.RolloutProgressing
+	if !out.delivered || !out.converged || out.conflictNow {
+		t.Fatalf("delivery facts mismatch: %+v", out)
+	}
+	if out.rolloutSet == nil || *out.rolloutSet != progressing {
+		t.Fatalf("rolloutSet = %+v, want Progressing", out.rolloutSet)
+	}
+	if out.reason != TargetReasonApplied || !out.resetRetry {
+		t.Fatalf("reason/resetRetry mismatch: %+v", out)
+	}
+	if want := "all 2 matched objects hold " + t9cDigestA; !strings.Contains(out.message, want) {
+		t.Fatalf("message %q must contain %q", out.message, want)
+	}
+	if !out.setObserved || out.observedImage != t9cDigestA {
+		t.Fatalf("uniform observed must write the digest, got %+v", out)
+	}
+	if !out.setImageApplied || !out.imageApplied {
+		t.Fatalf("all-applied match set must guarantee ImageApplied, got %+v", out)
+	}
+}
+
+func t9cCheckFoldConvergedKeepsRollout(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if out.delivered || out.rolloutSet != nil {
+		t.Fatalf("converged-only pass must not force a rollout, got %+v", out)
+	}
+	if !out.converged || out.reason != TargetReasonApplied || !out.resetRetry {
+		t.Fatalf("converged fold mismatch: %+v", out)
+	}
+}
+
+func t9cCheckFoldConflictDominates(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	conflict := imageflowv1alpha1.RolloutConflict
+	if !out.conflictNow || !out.delivered {
+		t.Fatalf("both facts must survive the fold, got %+v", out)
+	}
+	if out.rolloutSet == nil || *out.rolloutSet != conflict {
+		t.Fatalf("rolloutSet = %+v, want Conflict (worst state)", out.rolloutSet)
+	}
+	if out.reason != TargetReasonConflict {
+		t.Fatalf("reason = %q, want Conflict", out.reason)
+	}
+	if !strings.Contains(out.message, t9cWeb2) {
+		t.Fatalf("message %q must name the contested object", out.message)
+	}
+}
+
+func t9cCheckFoldFirstFailureNamesReason(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if out.reason != TargetReasonContainerNotFound {
+		t.Fatalf("reason = %q, want the FIRST failure %q", out.reason, TargetReasonContainerNotFound)
+	}
+	if !strings.Contains(out.message, t9cWeb1) || !strings.Contains(out.message, "2 require attention") {
+		t.Fatalf("message %q must carry the bounded summary", out.message)
+	}
+	if out.rolloutSet != nil {
+		t.Fatalf("a failed pass must not force a rollout transition, got %+v", out.rolloutSet)
+	}
+}
+
+func t9cCheckFoldFrozenCountForNothing(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if !out.converged || out.reason != TargetReasonApplied {
+		t.Fatalf("the single active object decides the fold, got %+v", out)
+	}
+	if out.message != "converged "+t9cWeb2 {
+		t.Fatalf("single-active degenerate must pass the object message through, got %q", out.message)
+	}
+}
+
+func t9cCheckFoldAllFrozenFactFree(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if out.reason != "" || out.rolloutSet != nil || out.delivered || out.converged ||
+		out.setObserved || out.setImageApplied {
+		t.Fatalf("all-frozen fold must stay fact-free, got %+v", out)
+	}
+}
+
+func t9cCheckFoldNonUniformBlanks(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if !out.setObserved || out.observedImage != "" {
+		t.Fatalf("confirmed non-uniform set must write the empty string, got %+v", out)
+	}
+}
+
+func t9cCheckFoldPartialObservationKeeps(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if out.setObserved {
+		t.Fatalf("a partial read must not blank truth the previous pass established, got %+v", out)
+	}
+}
+
+func t9cCheckFoldNonAppliedBreaksGuarantee(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	if !out.setImageApplied || out.imageApplied {
+		t.Fatalf("full knowledge folds the AND, got %+v", out)
+	}
+}
+
+func t9cCheckFoldSingleObjectPassthrough(t *testing.T, out deliveryOutcome) {
+	t.Helper()
+	progressing := imageflowv1alpha1.RolloutProgressing
+	if out.message != "delivered "+t9cWeb1 {
+		t.Fatalf("message %q must pass through unchanged", out.message)
+	}
+	if out.locator != "containers ["+t9cContainer+"]" {
+		t.Fatalf("locator %q must carry over for the target-side Event", out.locator)
+	}
+	if out.rolloutSet == nil || *out.rolloutSet != progressing {
+		t.Fatalf("rolloutSet = %+v, want Progressing", out.rolloutSet)
+	}
+}
+
+// conflictObj builds the outcome deliverObjectTarget leaves for a contested
+// object: zero writes, Conflict reason, allEqual-dependent ImageApplied.
+func conflictObj(name string) deliveryOutcome {
+	return deliveryOutcome{
+		ref: objRefShared(name), conflictNow: true,
+		reason: TargetReasonConflict,
+		message: fmt.Sprintf(
+			"image field(s) [spec.template.spec.containers[name=%s].image] of target %s are owned by subscription %s",
+			t9cContainer, name, t9cRivalSubName),
+		setObserved: true, observedImage: t9cInitialImage,
+		setImageApplied: true, imageApplied: false,
+	}
+}
+
+func objRefShared(name string) imageflowv1alpha1.TargetReference {
+	return t9cTargetRef(name)
+}
+
+// --- Selector targets: match-count hard limit (issue #83, ADR-014
+// decisions 7/13, spec D6) — asserted on the #82 aggregate surface ---
+//
+// The bound is a controller startup flag (config.SelectorMatchLimit,
+// --selector-match-limit, default 50). The engine applies it to the RESOLVED
+// (effective) match set immediately before fan-out: members beyond the bound
+// see zero writes. The selector target's single aggregate entry reports
+// Failed with Reason MatchLimitExceeded (the breach outranks every per-object
+// fold — worst state) plus one Warning Event naming the limit and the
+// observed count; matchedObjects still counts the FULL membership (the
+// over-limit members are matched facts even though they are not delivered);
+// completed-state objects never consume quota (they are excluded upstream,
+// before the bound applies).
+
+const t9cWeb3 = "web-3"
+
+// TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports pins spec D6:
+// three matches under a limit of two deliver the first two in sorted name
+// order, the third sees zero writes; the target reports
+// Failed/MatchLimitExceeded with a Warning Event naming both numbers; the
+// failure is metered; the next pass stays silent (terminal report, no
+// re-emit, no churn).
+func TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web3 := t9cLabeledDeploy(t9cWeb3, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2, t9cWeb3}}}
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2, web3)
+	f.reconciler.SetMatchResolver(matcher)
+
+	assertT9cMatchLimitPass(t, f)
+	limitMessage := assertT9cMatchLimitReport(t, f.getSub(t), selectorKey)
+	assertT9cMatchLimitEventsAndMetrics(t, f)
+	assertT9cMatchLimitSteadyState(t, f, selectorKey, limitMessage)
+}
+
+// assertT9cMatchLimitPass runs the over-limit pass: terminal report, only
+// the first two matches in sorted name order are applied, the match beyond
+// the limit sees zero writes.
+func assertT9cMatchLimitPass(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("over-limit pass must stay a terminal report: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 2 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("only the first two matches may be applied, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, t9cWeb3), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the match beyond the limit must see zero writes, image is %s", image)
+	}
+}
+
+// assertT9cMatchLimitReport pins the over-limit status surface: no entry for
+// the truncated object, ONE selector-keyed aggregate entry reporting
+// Failed/MatchLimitExceeded with the FULL observed membership count, the
+// delivered prefix's aggregate delivery facts, and one selector-keyed
+// per-target record. Returns the terminal entry message for the steady-state
+// comparison.
+func assertT9cMatchLimitReport(t *testing.T, got *imageflowv1alpha1.ImageSubscription, selectorKey string) string {
+	t.Helper()
+	if entry := t9cEntry(got, t9cWeb3); entry != nil {
+		t.Fatalf("the truncated object must not get a status entry, got %+v", entry)
+	}
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("one selector target aggregates to exactly ONE entry (#82), got %+v", got.Status.Targets)
+	}
+	limit := t9cEntryByKey(got, selectorKey)
+	if limit == nil {
+		t.Fatal("the over-limit target must report on the selector-keyed aggregate entry")
+	}
+	if limit.Reason != TargetReasonMatchLimitExceeded || limit.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("selector entry = %s/%s, want %s/Failed",
+			limit.Reason, limit.RolloutStatus, TargetReasonMatchLimitExceeded)
+	}
+	if limit.MatchedObjects == nil || *limit.MatchedObjects != 3 {
+		t.Fatalf("matched must count the FULL observed membership including the truncated member, got %+v", limit.MatchedObjects)
+	}
+	if !strings.Contains(limit.Message, "3") || !strings.Contains(limit.Message, "2") {
+		t.Fatalf("message must name the observed count and the limit, got %q", limit.Message)
+	}
+	if !limit.ImageApplied || limit.ObservedImage != t9cDigestA || limit.DesiredImage != t9cDigestA {
+		t.Fatalf("the delivered prefix still reports its aggregate delivery facts, got %+v", limit)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("aggregate = %q, want Failed (worst state)", got.Status.RolloutStatus)
+	}
+	if len(got.Status.RecentDeliveries) != 1 {
+		t.Fatalf("one per-target record for the delivered prefix, got %+v", got.Status.RecentDeliveries)
+	}
+	if rec := got.Status.RecentDeliveries[0]; rec.TargetRef.Name != "" || rec.NewImage != t9cDigestA {
+		t.Fatalf("the record is selector-keyed and names the digest, got %+v", rec)
+	}
+	// MatchLimitExceeded is an entry Reason + Event, not a new Condition type.
+	assertT9cCleanConditions(t, got)
+	return limit.Message
+}
+
+// assertT9cMatchLimitEventsAndMetrics pins the single Warning event naming
+// the bound, the delivered prefix's dual-namespace audit and the metered
+// failure.
+func assertT9cMatchLimitEventsAndMetrics(t *testing.T, f *t9cFixture) {
+	t.Helper()
+	events := drainT9cEvents(f.recorder)
+	warnings := t9cEventsWith(events, TargetReasonMatchLimitExceeded)
+	if len(warnings) != 1 {
+		t.Fatalf("expected exactly one %s Warning event, got %v", TargetReasonMatchLimitExceeded, events)
+	}
+	if !strings.HasPrefix(warnings[0], "Warning") || !strings.Contains(warnings[0], "--selector-match-limit") {
+		t.Fatalf("warning event must carry severity and the bound, got %q", warnings[0])
+	}
+	if applied := t9cEventsWith(events, EventReasonImageApplied); len(applied) != 4 {
+		t.Fatalf("the two delivered objects still fire their dual-namespace events, got %v", events)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelMatchLimitExceeded); v != 1 {
+		t.Fatalf("failures{match_limit_exceeded} = %v, want 1", v)
+	}
+}
+
+// assertT9cMatchLimitSteadyState pins the steady state: same match set, same
+// bound — zero writes, zero events, the terminal report persists unchanged.
+func assertT9cMatchLimitSteadyState(t *testing.T, f *t9cFixture, selectorKey, wantMessage string) {
+	t.Helper()
+	f.clock.Advance(time.Minute)
+	f.audit.reset()
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	if f.audit.applies != 0 || f.audit.statusWrites != 0 || f.audit.otherWrites != 0 {
+		t.Fatalf("steady state must be silent, got %+v", f.audit)
+	}
+	if events := drainT9cEvents(f.recorder); len(events) != 0 {
+		t.Fatalf("steady state must not re-emit events, got %v", events)
+	}
+	still := f.getSub(t)
+	after := t9cEntryByKey(still, selectorKey)
+	if after == nil || after.Reason != TargetReasonMatchLimitExceeded ||
+		after.RolloutStatus != imageflowv1alpha1.RolloutFailed || after.Message != wantMessage {
+		t.Fatalf("the terminal report must persist unchanged, got %+v", after)
+	}
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded pins the
+// boundary: a match set exactly AT the limit stays inside the quota — full
+// fan-out, no selector-keyed entry, no warning, normal aggregate.
+func TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cLabeledDeploy(t9cWeb1, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	web2 := t9cLabeledDeploy(t9cWeb2, t9cAppCheckout, [2]string{t9cContainer, t9cInitialImage})
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("boundary pass errored: %v", err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("every match within the limit must be delivered, got %+v", f.audit)
+	}
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("expected the single selector-keyed aggregate entry (#82), got %+v", got.Status.Targets)
+	}
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatal("at the limit the selector target reports on its aggregate entry like any other pass")
+	}
+	assertT9cDeliveredEntry(t, entry)
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("matched = %+v, want 2 (exactly at the limit)", entry.MatchedObjects)
+	}
+	if entry.Reason != TargetReasonApplied {
+		t.Fatalf("within the quota the fold stands on its own, reason = %s", entry.Reason)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate = %q, want Progressing", got.Status.RolloutStatus)
+	}
+	if warnings := t9cEventsWith(drainT9cEvents(f.recorder), TargetReasonMatchLimitExceeded); len(warnings) != 0 {
+		t.Fatalf("no warning at the boundary, got %v", warnings)
+	}
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitDefaultFifty pins the ADR-014
+// default engine-side: a zero-value config normalizes to 50, so of 51
+// matching objects exactly the 51st (sorted last) is not delivered.
+func TestSubscriptionDeliverySelectorMatchLimitDefaultFifty(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	names := make([]string, 0, config.DefaultSelectorMatchLimit+1)
+	objs := []client.Object{sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute))}
+	for i := 0; i <= config.DefaultSelectorMatchLimit; i++ {
+		name := fmt.Sprintf("web-%03d", i) // web-000..web-050, sorted order
+		names = append(names, name)
+		objs = append(objs, t9cLabeledDeploy(name, t9cAppCheckout,
+			[2]string{t9cContainer, t9cInitialImage}))
+	}
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: names}}
+	f := newT9cFixture(t, config.Config{}, objs...)
+	f.reconciler.SetMatchResolver(matcher)
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("default-limit pass errored: %v", err)
+	}
+	if f.audit.applies != config.DefaultSelectorMatchLimit {
+		t.Fatalf("expected exactly %d applies, got %+v", config.DefaultSelectorMatchLimit, f.audit)
+	}
+	overflow := names[config.DefaultSelectorMatchLimit]
+	if image := t9cContainerImage(t, t9cDeployByName(t, f, overflow), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the match beyond the default limit saw a write, image %s", image)
+	}
+	got := f.getSub(t)
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("51 matches still aggregate to exactly ONE entry (#82), got %d entries", len(got.Status.Targets))
+	}
+	limit := t9cEntryByKey(got, selectorKey)
+	if limit == nil || limit.Reason != TargetReasonMatchLimitExceeded ||
+		limit.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("over-limit report missing: %+v", limit)
+	}
+	if limit.MatchedObjects == nil || *limit.MatchedObjects != int32(config.DefaultSelectorMatchLimit)+1 {
+		t.Fatalf("matched must count all 51 observed members, got %+v", limit.MatchedObjects)
+	}
+	if !strings.Contains(limit.Message, "51") || !strings.Contains(limit.Message, "50") {
+		t.Fatalf("message must name observed 51 and limit 50, got %q", limit.Message)
+	}
+	if entry := t9cEntry(got, overflow); entry != nil {
+		t.Fatalf("the truncated object must not get an entry, got %+v", entry)
+	}
+}
+
+// t83LabeledJob builds a batch/v1 Job in the shape the engine delivers
+// (spec.template.spec.containers), optionally Completed (Complete=True —
+// the Job terminal state of ADR-014 decision 13).
+func t83LabeledJob(name string, objLabels map[string]string, completed bool, images ...[2]string) *unstructured.Unstructured {
+	containers := make([]any, 0, len(images))
+	for _, pair := range images {
+		containers = append(containers, map[string]any{"name": pair[0], "image": pair[1]})
+	}
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": t9cAPIBatch,
+		"kind":       t9cKindJob,
+		"metadata":   map[string]any{"namespace": t9cNamespace, "name": name},
+		"spec": map[string]any{
+			"template": map[string]any{"spec": map[string]any{"containers": containers}},
+		},
+	}}
+	u.SetLabels(objLabels)
+	if completed {
+		if err := unstructured.SetNestedSlice(u.Object, []any{
+			map[string]any{"type": "Complete", "status": "True"},
+		}, "status", "conditions"); err != nil {
+			panic(err)
+		}
+	}
+	return u
+}
+
+func t83JobSelectorTarget(matchLabels map[string]string, containers ...string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t9cAPIBatch,
+			Kind:          t9cKindJob,
+			Namespace:     t9cNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: containers,
+	}
+}
+
+func t83JobByName(t *testing.T, f *t9cFixture, name string) *unstructured.Unstructured {
+	t.Helper()
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(t9cAPIBatch)
+	u.SetKind(t9cKindJob)
+	key := types.NamespacedName{Namespace: t9cNamespace, Name: name}
+	if err := f.client.Get(context.Background(), key, u); err != nil {
+		t.Fatalf("get job %s: %v", name, err)
+	}
+	return u
+}
+
+// t83ListerMatcher is the unit-test double sanctioned by the matchResolverAPI
+// interface comment: it lists through the fake client and applies the same
+// label match and completed-state exclusion as the production resolveSelector
+// (ADR-014 decision 13), so the engine sees the EFFECTIVE match set.
+type t83ListerMatcher struct{ cl client.Client }
+
+func (m t83ListerMatcher) resolveSelector(ctx context.Context, ref imageflowv1alpha1.TargetReference) ([]string, error) {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gv.WithKind(ref.Kind))
+	if err := m.cl.List(ctx, list, client.InNamespace(ref.Namespace)); err != nil {
+		return nil, err
+	}
+	var names []string
+	for i := range list.Items {
+		obj := &list.Items[i]
+		if !selectorMatchesLabels(ref.LabelSelector, obj.GetLabels()) || isCompletedObject(obj) {
+			continue
+		}
+		names = append(names, obj.GetName())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects
+// pins AC ③: the quota counts the EFFECTIVE match set — completed-state
+// objects are excluded before the bound applies (ADR-014 decision 13). Three
+// Jobs physically carry the label, one is Complete=True → effective set of
+// two ≤ limit two → everything live is delivered, no over-limit surface
+// appears anywhere, and the completed Job sees zero writes.
+func TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects(t *testing.T) {
+	sub := t9cAuthorizedSub(t83JobSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	f := newT9cFixture(t, config.Config{SelectorMatchLimit: 2}, sub,
+		t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)),
+		t83LabeledJob("batch-1", t9cAppCheckout, false, [2]string{t9cContainer, t9cInitialImage}),
+		t83LabeledJob("batch-2", t9cAppCheckout, false, [2]string{t9cContainer, t9cInitialImage}),
+		t83LabeledJob("batch-done", t9cAppCheckout, true, [2]string{t9cContainer, t9cInitialImage}),
+	)
+	f.reconciler.SetMatchResolver(t83ListerMatcher{cl: f.client})
+
+	if _, err := f.reconcile(t); err != nil {
+		t.Fatalf("quota pass errored: %v", err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("the two live Jobs must be delivered, got %+v", f.audit)
+	}
+	if image := t9cContainerImage(t, t83JobByName(t, f, "batch-done"), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("the completed Job must see zero writes, image is %s", image)
+	}
+	for _, name := range []string{"batch-1", "batch-2"} {
+		if image := t9cContainerImage(t, t83JobByName(t, f, name), t9cContainer); image != t9cDigestA {
+			t.Fatalf("%s image = %s, want digest %s", name, image, t9cDigestA)
+		}
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatal("the within-quota effective set reports on the selector-keyed aggregate entry")
+	}
+	if entry.Reason != TargetReasonApplied || entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("quota intact: the plain aggregate fold stands, got %s/%s", entry.Reason, entry.RolloutStatus)
+	}
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("the quota (and matched) counts effective matches only — the completed Job is excluded upstream, got %+v", entry.MatchedObjects)
+	}
+	if e := t9cEntry(got, "batch-done"); e != nil {
+		t.Fatalf("the completed Job is outside the match set entirely, got %+v", e)
+	}
+	if warnings := t9cEventsWith(drainT9cEvents(f.recorder), TargetReasonMatchLimitExceeded); len(warnings) != 0 {
+		t.Fatalf("quota counts effective matches only, no warning expected, got %v", warnings)
 	}
 }

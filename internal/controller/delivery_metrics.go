@@ -43,6 +43,7 @@ const (
 	failureLabelInvalidImageField     = "invalid_image_field"
 	failureLabelKindNotInstalled      = "kind_not_installed"
 	failureLabelConflict              = "conflict"
+	failureLabelMatchLimitExceeded    = "match_limit_exceeded"
 )
 
 // deliveryLatencyBuckets spans the sub-second fresh-registration path up to

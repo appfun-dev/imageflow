@@ -1,6 +1,6 @@
 # Spec: Native Health Determination (v1.5)
 
-- Status: Draft
+- Status: Implemented
 - Date: 2026-11-10
 - Author: Agent (grill session with user)
 - Related: ADR-005 §3/§4/§8.2, ADR-006, ADR-013, Issue #46

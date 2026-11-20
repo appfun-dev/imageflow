@@ -156,12 +156,8 @@ func (r *SubscriptionDeliveryReconciler) mergeTargetEntries(
 			transition.deliveredCount++
 		}
 		transition.events = append(transition.events, plan.events...)
-		if plan.latency != nil {
-			transition.latencies = append(transition.latencies, *plan.latency)
-		}
-		if plan.failureLabel != "" {
-			transition.failureReasons = append(transition.failureReasons, plan.failureLabel)
-		}
+		transition.latencies = append(transition.latencies, plan.latencies...)
+		transition.failureReasons = append(transition.failureReasons, plan.failureLabels...)
 	}
 
 	// Stale entries of targets no longer in the spec: Forbidden ones belong
@@ -179,11 +175,13 @@ func (r *SubscriptionDeliveryReconciler) mergeTargetEntries(
 }
 
 // entryPlan carries the record/event/metric decisions of one merged entry.
+// Selector aggregates fan their per-object events/metrics out of the single
+// plan: latencies and failureLabels are per-object slices (issue #82).
 type entryPlan struct {
-	record       *imageflowv1alpha1.DeliveryResult
-	events       []plannedEvent
-	latency      *time.Duration
-	failureLabel string
+	record        *imageflowv1alpha1.DeliveryResult
+	events        []plannedEvent
+	latencies     []time.Duration
+	failureLabels []string
 }
 
 // mergeEntry applies one outcome onto the persisted entry base, honoring the
@@ -212,6 +210,13 @@ func mergeEntry(
 	if out.setImageApplied {
 		merged.ImageApplied = out.imageApplied
 	}
+	if out.setMatched {
+		// Selector targets carry the match-set size (ADR-014 decision 5,
+		// spec v1.7 D8); named targets keep the field nil. Membership churn
+		// re-delivers via the informer channel, so the count stays fresh.
+		matched := out.matched
+		merged.MatchedObjects = &matched
+	}
 
 	// Rollout/health: preserve persisted observations (T11's lane) except for
 	// delivery consequences; initialize empty fields to Unknown (never
@@ -225,6 +230,16 @@ func mergeEntry(
 	} else if merged.RolloutStatus == "" {
 		merged.RolloutStatus = imageflowv1alpha1.RolloutUnknown
 		stateChanged = true
+	} else if out.setMatched && merged.RolloutStatus == imageflowv1alpha1.RolloutConflict &&
+		out.reason != "" && out.reason != TargetReasonConflict {
+		// Selector-aggregate conflict recovery (#82): the contested object
+		// left the match set (label removed / completed) or the rival
+		// released the fields, so this pass folded no Conflict — but the
+		// persisted aggregate still says Conflict and the observer skips
+		// Conflict entries, leaving it stuck. Delivery consequence applies:
+		// hand the aggregate back to the observer lane as Progressing.
+		merged.RolloutStatus = imageflowv1alpha1.RolloutProgressing
+		stateChanged = true
 	}
 	if merged.HealthStatus == "" {
 		merged.HealthStatus = imageflowv1alpha1.HealthUnknown
@@ -235,9 +250,14 @@ func mergeEntry(
 		merged.LastTransitionTime = &transitionTime
 	}
 
-	reasonChanged := base.Reason != out.reason
-	merged.Reason = out.reason
-	merged.Message = out.message
+	// An empty reason means "no reason fact from this pass" (every matched
+	// object of a selector target was T8-frozen): keep the persisted surface.
+	reasonChanged := false
+	if out.reason != "" {
+		reasonChanged = base.Reason != out.reason
+		merged.Reason = out.reason
+		merged.Message = out.message
+	}
 	merged.ObservedGeneration = generation
 
 	switch {
@@ -267,54 +287,173 @@ func planEffects(
 	freshConverged := base.DesiredImage == source.desiredImage &&
 		base.ImageApplied &&
 		base.Reason == TargetReasonApplied
+	// Steady quota breach (issues #82 × #83): the persisted entry already
+	// reports MatchLimitExceeded and this pass re-folds to the same breach.
+	// The converged lane and the sibling confirmation events stay silent —
+	// the terminal report persists unchanged with zero churn — while real
+	// writes (a prefix member delivered) are still recorded and audited.
+	limitSteady := base.Reason == TargetReasonMatchLimitExceeded &&
+		out.reason == TargetReasonMatchLimitExceeded
 
 	switch {
+	case out.conflictNow && out.reason != TargetReasonMatchLimitExceeded:
+		// Terminal Conflict transition (ADR-008): recorded with the Conflict
+		// outcome; zero writes were performed on the contested object. For a
+		// selector aggregate this lane WINS over a delivered sibling on EVERY
+		// pass while the conflict persists — the record follows the worst
+		// state (ADR-014 decision 9), so a new member delivered into a
+		// contested target must not record an Applied/Progressing rollout.
+		conflictSteady := base.Reason == TargetReasonConflict
+		if !conflictSteady {
+			record := newDeliveryRecord(source, out, base.DesiredImage, now)
+			record.ImageApplied = out.imageApplied
+			record.RolloutResult = imageflowv1alpha1.RolloutConflict
+			record.Reason = TargetReasonConflict
+			plan.record = record
+		}
+		if len(out.objectOutcomes) > 0 {
+			planDeliveryEvents(plan, out, source, now, freshConverged, conflictSteady)
+		}
 	case out.delivered:
 		// THE delivery: a value-changing apply landed this pass. Always
 		// recorded (fresh-read evidence makes duplicates impossible: the next
 		// pass reads equal-and-owned and skips the apply).
+		//
+		// The record is per-target — a selector aggregate records ONCE (spec
+		// v1.7 D8); Events and latency samples stay per-object so a two-object
+		// fan-out still reports two ImageApplied events and two samples.
 		plan.record = newDeliveryRecord(source, out, base.DesiredImage, now)
-		plan.events = append(plan.events, imageAppliedEvent(out, source, true))
-		if source.created != nil {
-			latency := now.Sub(source.created.Time)
-			if latency < 0 {
-				latency = 0
-			}
-			plan.latency = &latency
-		}
-	case out.converged && !freshConverged:
+		planDeliveryEvents(plan, out, source, now, freshConverged, limitSteady)
+	case out.converged && !freshConverged && !limitSteady:
 		// Ownership takeover (orphan/user field already at the digest) or
 		// crash recovery before the status write: the subscription now
 		// guarantees the field — record it once (gate: persisted entry not
 		// converged yet).
 		plan.record = newDeliveryRecord(source, out, base.DesiredImage, now)
-		plan.events = append(plan.events, imageAppliedEvent(out, source, false))
-	case out.conflictNow && base.Reason != TargetReasonConflict:
-		// Terminal Conflict transition (ADR-008): recorded with the Conflict
-		// outcome; zero writes were performed.
-		record := newDeliveryRecord(source, out, base.DesiredImage, now)
-		record.ImageApplied = out.imageApplied
-		record.RolloutResult = imageflowv1alpha1.RolloutConflict
-		record.Reason = TargetReasonConflict
-		plan.record = record
+		planDeliveryEvents(plan, out, source, now, freshConverged, false)
 	}
 
-	if reasonChanged {
+	if !reasonChanged {
+		return
+	}
+	if out.reason == TargetReasonNoMatches {
+		// ADR-014 decision 8: zero matches is a LEGAL empty set, not a
+		// delivery failure — surface the Warning Event but no failure metric
+		// (the bounded failure vocabulary deliberately excludes NoMatches).
+		plan.events = append(plan.events, plannedEvent{
+			eventType: corev1.EventTypeWarning,
+			reason:    EventReasonNoMatches,
+			message:   authz.TruncateMessage(out.message, 1024),
+		})
+		return
+	}
+	if out.reason == TargetReasonMatchLimitExceeded {
+		// Issue #83, ADR-014 decision 7: the quota breach is a target-level
+		// Warning + failure metric. No return — the per-object loop below
+		// still surfaces failures among the delivered prefix (objects never
+		// carry MatchLimitExceeded themselves, so nothing double-counts).
+		plan.events = append(plan.events, plannedEvent{
+			eventType: corev1.EventTypeWarning,
+			reason:    deliveryEventReason(out.reason),
+			message:   authz.TruncateMessage(out.message, 1024),
+		})
 		if label, isFailure := deliveryFailureLabel(out.reason); isFailure {
-			eventReason := out.reason
-			switch out.reason {
-			case TargetReasonUnsupported:
-				eventReason = EventReasonUnsupportedTarget
-			case TargetReasonConflict:
-				eventReason = EventReasonDeliveryConflict
+			plan.failureLabels = append(plan.failureLabels, label)
+		}
+	}
+	if len(out.objectOutcomes) > 0 {
+		// Selector aggregate: per-object failure Warnings and metrics — the
+		// aggregate entry names the FIRST failure in match order, but every
+		// failed object gets its own Warning (per-object detail belongs to
+		// the Events, spec v1.7 D8).
+		for i := range out.objectOutcomes {
+			obj := &out.objectOutcomes[i]
+			label, isFailure := deliveryFailureLabel(obj.reason)
+			if !isFailure {
+				continue
 			}
 			plan.events = append(plan.events, plannedEvent{
 				eventType: corev1.EventTypeWarning,
-				reason:    eventReason,
-				message:   authz.TruncateMessage(out.message, 1024),
+				reason:    deliveryEventReason(obj.reason),
+				message:   authz.TruncateMessage(obj.message, 1024),
 			})
-			plan.failureLabel = label
+			plan.failureLabels = append(plan.failureLabels, label)
 		}
+		return
+	}
+	if label, isFailure := deliveryFailureLabel(out.reason); isFailure {
+		plan.events = append(plan.events, plannedEvent{
+			eventType: corev1.EventTypeWarning,
+			reason:    deliveryEventReason(out.reason),
+			message:   authz.TruncateMessage(out.message, 1024),
+		})
+		plan.failureLabels = append(plan.failureLabels, label)
+	}
+}
+
+// planDeliveryEvents plans the per-object ImageApplied events and latency
+// samples of a delivery/convergence lane. A named target plans its single
+// object; a selector aggregate walks objectOutcomes. Value-changing applies
+// are audited on every pass they land (they never repeat: the next pass reads
+// equal-and-owned). Already equal-and-owned objects are confirmed only while
+// the aggregate entry has not converged yet (fresh selector target or crash
+// recovery) — and never while a conflict persists (conflictSteady): a
+// contested aggregate never reaches freshConverged, so re-confirming the
+// already-equal siblings on every later pass would churn.
+func planDeliveryEvents(
+	plan *entryPlan,
+	out *deliveryOutcome,
+	source sourceState,
+	now time.Time,
+	freshConverged bool,
+	conflictSteady bool,
+) {
+	if len(out.objectOutcomes) == 0 {
+		plan.events = append(plan.events, imageAppliedEvent(out, source, out.delivered))
+		if out.delivered {
+			if latency, ok := deliveryLatency(source, now); ok {
+				plan.latencies = append(plan.latencies, latency)
+			}
+		}
+		return
+	}
+	for i := range out.objectOutcomes {
+		obj := &out.objectOutcomes[i]
+		switch {
+		case obj.delivered:
+			plan.events = append(plan.events, imageAppliedEvent(obj, source, true))
+			if latency, ok := deliveryLatency(source, now); ok {
+				plan.latencies = append(plan.latencies, latency)
+			}
+		case obj.converged && !freshConverged && !conflictSteady:
+			plan.events = append(plan.events, imageAppliedEvent(obj, source, false))
+		}
+	}
+}
+
+// deliveryLatency reports one stream-creation-to-apply latency sample, or
+// false when the stream carries no creation time.
+func deliveryLatency(source sourceState, now time.Time) (time.Duration, bool) {
+	if source.created == nil {
+		return 0, false
+	}
+	latency := now.Sub(source.created.Time)
+	if latency < 0 {
+		latency = 0
+	}
+	return latency, true
+}
+
+// deliveryEventReason maps a bounded delivery failure reason to its Event
+// reason (most reuse the reason string verbatim).
+func deliveryEventReason(reason string) string {
+	switch reason {
+	case TargetReasonUnsupported:
+		return EventReasonUnsupportedTarget
+	case TargetReasonConflict:
+		return EventReasonDeliveryConflict
+	default:
+		return reason
 	}
 }
 
@@ -396,8 +535,10 @@ func mergeRecentDeliveries(
 				// T11 (AC5/AC6): the supersede itself is audited with a
 				// dual-namespace Event carrying source, old/new image,
 				// target and the per-stage results at supersede time.
+				// v1.7-07 #84: selector-form targets audit the flip per
+				// object (ADR-014 decision 10).
 				transition.events = append(transition.events,
-					supersededEvent(*entry, inFlight, record, outcomes))
+					supersededEvents(*entry, inFlight, record, outcomes)...)
 			}
 		}
 		merged = append([]imageflowv1alpha1.DeliveryResult{record}, merged...)
@@ -439,6 +580,81 @@ func supersededEvent(
 		}
 	}
 	return ev
+}
+
+// supersededEvents generalizes the Superseded audit to the per-object
+// dimension for selector-shape targets (v1.7-07 #84, ADR-014 decision 10,
+// spec D9):
+//
+//   - The record flip itself stays aggregate latest-wins — mergeRecentDeliveries
+//     flips the same-key in-flight record regardless of the target shape.
+//   - The named shape keeps its single per-target event verbatim (T11
+//     vocabulary, pinned by TestSupersededEventPlannedOnLatestWins).
+//   - The selector shape emits one event per object ACTUALLY overwritten by
+//     the newer tag in this pass (a value-changing apply landed:
+//     objectOutcomes.delivered), each riding that object dual-namespace.
+//     Conflict-skipped, converged and immutable objects are not overwritten
+//     and record nothing. Objects that left the match set (label removed)
+//     never appear in this pass's objectOutcomes at all, so they are never
+//     named — they simply keep their last delivered image.
+//   - A selector-shape supersede pass that overwrote zero objects (e.g. a
+//     conflict-lane record) still audits the aggregate flip, falling back to
+//     a single subscription-side event that says so honestly.
+func supersededEvents(
+	entry imageflowv1alpha1.DeliveryResult,
+	inFlight imageflowv1alpha1.RolloutStatus,
+	record imageflowv1alpha1.DeliveryResult,
+	outcomes []deliveryOutcome,
+) []plannedEvent {
+	ref := entry.TargetRef
+	if ref.LabelSelector == nil || ref.Name != "" {
+		return []plannedEvent{supersededEvent(entry, inFlight, record, outcomes)}
+	}
+	entryKey := imageflowv1alpha1.CanonicalTargetKey(ref)
+	var aggregate *deliveryOutcome
+	for i := range outcomes {
+		if imageflowv1alpha1.CanonicalTargetKey(outcomes[i].ref) == entryKey {
+			aggregate = &outcomes[i]
+			break
+		}
+	}
+	var events []plannedEvent
+	if aggregate != nil {
+		for i := range aggregate.objectOutcomes {
+			obj := &aggregate.objectOutcomes[i]
+			if !obj.delivered {
+				continue
+			}
+			message := fmt.Sprintf(
+				"Delivery superseded per object (latest-wins, ADR-008; per-object Superseded, ADR-014 decision 10): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished — this object was actually overwritten by the newer tag; objects that left the match set keep their last delivered image and are NOT superseded. Terminal: no retry, no cross-target rollback; the native rollout controller converges the workload on its own. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+				entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+				authz.FormatTarget(obj.ref), record.NewImage,
+				entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+			ev := plannedEvent{
+				eventType: corev1.EventTypeNormal,
+				reason:    EventReasonDeliverySuperseded,
+				message:   authz.TruncateMessage(message, 1024),
+			}
+			if obj.targetObject != nil {
+				ev.targetSide = true
+				ev.targetObject = obj.targetObject
+			}
+			events = append(events, ev)
+		}
+	}
+	if len(events) > 0 {
+		return events
+	}
+	message := fmt.Sprintf(
+		"Delivery superseded at target level (latest-wins, ADR-008; per-object Superseded, ADR-014 decision 10): the in-flight delivery of %s (source %s %s/%s) to %s was replaced by %s before its rollout finished; zero matched objects were actually overwritten by the newer tag in this pass, so no object records a per-object Superseded fact; label-removed objects keep their last delivered image and are NOT superseded. Terminal: no retry, no cross-target rollback. Stages at supersede time — imageApplied: %t, rollout: %s, health: %s.",
+		entry.NewImage, entry.Source.Kind, entry.Source.Namespace, entry.Source.Name,
+		authz.FormatTarget(ref), record.NewImage,
+		entry.ImageApplied, inFlight, healthOrUnknown(entry.HealthResult))
+	return []plannedEvent{{
+		eventType: corev1.EventTypeNormal,
+		reason:    EventReasonDeliverySuperseded,
+		message:   authz.TruncateMessage(message, 1024),
+	}}
 }
 
 // healthOrUnknown renders an unset health result honestly as Unknown.
@@ -660,6 +876,8 @@ func deliveryFailureLabel(reason string) (label string, ok bool) {
 		return failureLabelKindNotInstalled, true
 	case TargetReasonConflict:
 		return failureLabelConflict, true
+	case TargetReasonMatchLimitExceeded:
+		return failureLabelMatchLimitExceeded, true
 	}
 	return "", false
 }

@@ -76,6 +76,11 @@ spec:
           - --stream-tag-history-limit=3
           - --subscription-delivery-limit=5
           - --mirror-event-limit=5
+          # Hard bound on one label-selector target's effective match count
+          # (ADR-014 decision 7, #83): matches beyond the bound are not
+          # delivered; the target reports Failed/MatchLimitExceeded plus a
+          # Warning event naming the limit and the observed count.
+          - --selector-match-limit=50
           # ADR-007 registry allowlist; empty = allow all registries.
           # Example: --registry-allowlist=quay.io,registry.internal.example.com
           - --registry-allowlist=

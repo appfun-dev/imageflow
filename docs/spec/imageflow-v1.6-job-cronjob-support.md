@@ -1,6 +1,6 @@
 # Spec: Job/CronJob Support (v1.6)
 
-- Status: Draft
+- Status: Implemented
 - Date: 2026-11-12
 - Author: Agent (grilling → to-spec workflow)
 - Related: ADR-006, ADR-005 §3/§4, GLOSSARY.md (Outcome Stages, Delivery Result, Subscription Target)
