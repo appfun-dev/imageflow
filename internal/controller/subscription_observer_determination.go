@@ -698,7 +698,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 	// Deployment lane, the Rollout never freezes the reconcile (decision
 	// 12).
 	if facts.kind == observerKindRollout {
-		return determineArgoRollout(facts, name, entry.DesiredImage, pods)
+		return determineArgoRollout(facts, entry.DesiredImage, pods)
 	}
 	if facts.rolloutSucceeded() {
 		return rolloutDetermination{
@@ -731,7 +731,7 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 //  5. a pod of this workload stuck starting the desired image ⇒ Failed
 //     (the same pod-level signal the Deployment lane uses);
 //  6. anything else ⇒ Progressing.
-func determineArgoRollout(facts workloadFacts, name, desiredImage string, pods []*corev1.Pod) rolloutDetermination {
+func determineArgoRollout(facts workloadFacts, desiredImage string, pods []*corev1.Pod) rolloutDetermination {
 	if !facts.rolloutObservedParsed {
 		return rolloutDetermination{
 			status: imageflowv1alpha1.RolloutProgressing,
@@ -852,7 +852,7 @@ func determineHealth(rollout rolloutDetermination, pods []*corev1.Pod, desiredIm
 			return healthVerdict{
 				status:  imageflowv1alpha1.HealthUnknown,
 				reason:  HealthReasonAwaitingPromotion,
-				message: fmt.Sprintf("health stage is not evaluated: the rollout is paused awaiting promotion (manual promote, ADR-015 decision 8), health assessment requires rollout Succeeded (ADR-005 §3)"),
+				message: "health stage is not evaluated: the rollout is paused awaiting promotion (manual promote, ADR-015 decision 8), health assessment requires rollout Succeeded (ADR-005 §3)",
 			}
 		}
 		return healthVerdict{

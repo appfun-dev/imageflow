@@ -70,12 +70,12 @@ func t93eRollout(ns, name string) *unstructured.Unstructured {
 // t93eReadyStatus mirrors t11uArgoRolloutReadyStatus for the real API server:
 // the trusted three-in-one base (observedGeneration "1" — envtest assigns
 // metadata.generation 1 on create) with all replica counts caught up.
-func t93eReadyStatus(phase, stableRS, currentPodHash string) map[string]interface{} {
+func t93eReadyStatus(phase, stableRS string) map[string]interface{} {
 	return map[string]interface{}{
 		"observedGeneration": "1",
 		"phase":              phase,
 		"stableRS":           stableRS,
-		"currentPodHash":     currentPodHash,
+		"currentPodHash":     "rs-v2",
 		"replicas":           int64(2),
 		"updatedReplicas":    int64(2),
 		"readyReplicas":      int64(2),
@@ -165,7 +165,7 @@ func TestObserverArgoRolloutEnvtestVerdicts(t *testing.T) {
 		{
 			name:        "succeeded on the trusted three-in-one",
 			priorStatus: imageflowv1alpha1.RolloutProgressing,
-			status:      t93eReadyStatus("Healthy", "rs-v2", "rs-v2"),
+			status:      t93eReadyStatus("Healthy", "rs-v2"),
 			wantRollout: imageflowv1alpha1.RolloutSucceeded,
 			// D6: Succeeded hands off to the v1.5 native health pod scan;
 			// with no pods in the environment that is honestly NoMatchingPods.
@@ -177,7 +177,7 @@ func TestObserverArgoRolloutEnvtestVerdicts(t *testing.T) {
 			name:        "progressing with AwaitingPromotion while paused at a canary step",
 			priorStatus: imageflowv1alpha1.RolloutUnknown,
 			status: func() map[string]interface{} {
-				st := t93eReadyStatus("Paused", "rs-v1", "rs-v2")
+				st := t93eReadyStatus("Paused", "rs-v1")
 				st["pauseConditions"] = []interface{}{
 					map[string]interface{}{"reason": "StepPause", "startTime": "2026-11-20T11:00:00Z"},
 				}
@@ -191,7 +191,7 @@ func TestObserverArgoRolloutEnvtestVerdicts(t *testing.T) {
 		{
 			name:        "failed on Degraded phase",
 			priorStatus: imageflowv1alpha1.RolloutProgressing,
-			status:      t93eReadyStatus("Degraded", "rs-v1", "rs-v2"),
+			status:      t93eReadyStatus("Degraded", "rs-v1"),
 			wantRollout: imageflowv1alpha1.RolloutFailed,
 			// A failed rollout keeps health unevaluated (ADR-005 §3).
 			wantHealth:       imageflowv1alpha1.HealthUnknown,
@@ -213,7 +213,7 @@ func TestObserverArgoRolloutEnvtestVerdicts(t *testing.T) {
 			name:        "progressing while the controller has not observed the current generation",
 			priorStatus: imageflowv1alpha1.RolloutUnknown,
 			status: func() map[string]interface{} {
-				st := t93eReadyStatus("Healthy", "rs-v2", "rs-v2")
+				st := t93eReadyStatus("Healthy", "rs-v2")
 				st["observedGeneration"] = "0"
 				return st
 			}(),
@@ -259,7 +259,7 @@ func TestObserverArgoRolloutEnvtestExtraction(t *testing.T) {
 	reconciler := NewSubscriptionObserverReconciler(
 		env.client, nil, record.NewFakeRecorder(64), clock.NewFake(t93eT0), config.Config{}, nil, nil)
 
-	status := t93eReadyStatus("Paused", "rs-v1", "rs-v2")
+	status := t93eReadyStatus("Paused", "rs-v1")
 	status["pauseConditions"] = []interface{}{
 		map[string]interface{}{"reason": "StepPause", "startTime": "2026-11-20T11:00:00Z"},
 	}

@@ -3637,7 +3637,7 @@ func t11uRolloutRef() imageflowv1alpha1.TargetReference {
 // t11uArgoRollout builds the unstructured Argo Rollout the observer reads
 // (D4/D11): spec.template is a corev1.PodTemplateSpec-shaped map so the
 // converter path produces the same corev1.PodSpec a Deployment carries.
-func t11uArgoRollout(image string, generation int64, status map[string]interface{}) *unstructured.Unstructured {
+func t11uArgoRollout(image string, status map[string]interface{}) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": t11uRolloutAPI,
 		"kind":       kindRollout,
@@ -3645,7 +3645,7 @@ func t11uArgoRollout(image string, generation int64, status map[string]interface
 			"namespace":  t11uNamespace,
 			"name":       t11uRolloutName,
 			"uid":        string(t11uRolloutUID),
-			"generation": generation,
+			"generation": int64(3),
 		},
 		"spec": map[string]interface{}{
 			"replicas": int64(2),
@@ -3663,12 +3663,12 @@ func t11uArgoRollout(image string, generation int64, status map[string]interface
 
 // t11uArgoRolloutReadyStatus is the controller-observed (generation 3) status
 // shared by most matrix cases; each case mutates the copy it needs.
-func t11uArgoRolloutReadyStatus(phase, stableRS, currentPodHash string) map[string]interface{} {
+func t11uArgoRolloutReadyStatus(phase, stableRS string) map[string]interface{} {
 	return map[string]interface{}{
 		"observedGeneration": "3",
 		"phase":              phase,
 		"stableRS":           stableRS,
-		"currentPodHash":     currentPodHash,
+		"currentPodHash":     "rs-v2",
 		"replicas":           int64(2),
 		"updatedReplicas":    int64(2),
 		"readyReplicas":      int64(2),
@@ -3683,13 +3683,13 @@ func t11uArgoRolloutPauseConditions() []interface{} {
 }
 
 func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
-	paused := t11uArgoRolloutReadyStatus("Paused", "rs-v1", "rs-v2")
+	paused := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
 	paused["pauseConditions"] = t11uArgoRolloutPauseConditions()
-	pausedCaughtUp := t11uArgoRolloutReadyStatus("Paused", "rs-v2", "rs-v2")
+	pausedCaughtUp := t11uArgoRolloutReadyStatus("Paused", "rs-v2")
 	pausedCaughtUp["pauseConditions"] = t11uArgoRolloutPauseConditions()
-	degradedPaused := t11uArgoRolloutReadyStatus("Degraded", "rs-v1", "rs-v2")
+	degradedPaused := t11uArgoRolloutReadyStatus("Degraded", "rs-v1")
 	degradedPaused["pauseConditions"] = t11uArgoRolloutPauseConditions()
-	succeededLingeringPause := t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2")
+	succeededLingeringPause := t11uArgoRolloutReadyStatus("Healthy", "rs-v2")
 	succeededLingeringPause["pauseConditions"] = t11uArgoRolloutPauseConditions()
 	rolling := map[string]interface{}{
 		"observedGeneration": "3",
@@ -3713,7 +3713,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 	}{
 		{
 			name:    "succeeded when observedGeneration covers generation, phase Healthy and stableRS equals currentPodHash",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutSucceeded,
 			wantSub: "covers generation 3",
@@ -3723,7 +3723,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:    "progressing while the controller has not observed the current generation",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutProgressing,
 			wantSub: "does not cover generation 3",
@@ -3731,7 +3731,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "progressing when observedGeneration is an empty string",
-			rollout:          t11uArgoRollout(t11uRefB, 3, map[string]interface{}{"observedGeneration": "", "phase": "Healthy"}),
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "", "phase": "Healthy"}),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "not a number",
@@ -3739,7 +3739,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "progressing when observedGeneration is not numeric",
-			rollout:          t11uArgoRollout(t11uRefB, 3, map[string]interface{}{"observedGeneration": "abc", "phase": "Healthy"}),
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "abc", "phase": "Healthy"}),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "not a number",
@@ -3747,7 +3747,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "progressing when observedGeneration is absent",
-			rollout:          t11uArgoRollout(t11uRefB, 3, map[string]interface{}{"phase": "Healthy"}),
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"phase": "Healthy"}),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "not a number",
@@ -3755,7 +3755,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "a stale degraded status of an old generation stays progressing",
-			rollout:          t11uArgoRollout(t11uRefB, 3, map[string]interface{}{"observedGeneration": "2", "phase": "Degraded"}),
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "2", "phase": "Degraded"}),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "does not cover generation 3",
@@ -3763,28 +3763,28 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:    "failed on Degraded phase",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Degraded", "rs-v1", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Degraded", "rs-v1")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutFailed,
 			wantSub: `status.phase "Degraded"`,
 		},
 		{
 			name:    "failed on ReplicaFailure phase",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("ReplicaFailure", "rs-v1", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("ReplicaFailure", "rs-v1")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutFailed,
 			wantSub: `status.phase "ReplicaFailure"`,
 		},
 		{
 			name:    "failed on ProgressDeadlineExceeded phase",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("ProgressDeadlineExceeded", "rs-v1", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("ProgressDeadlineExceeded", "rs-v1")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutFailed,
 			wantSub: `status.phase "ProgressDeadlineExceeded"`,
 		},
 		{
 			name:             "progressing with AwaitingPromotion while paused at a canary step",
-			rollout:          t11uArgoRollout(t11uRefB, 3, paused),
+			rollout:          t11uArgoRollout(t11uRefB, paused),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "awaiting promotion",
@@ -3793,7 +3793,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "paused with a caught-up stable ReplicaSet still awaits promotion",
-			rollout:          t11uArgoRollout(t11uRefB, 3, pausedCaughtUp),
+			rollout:          t11uArgoRollout(t11uRefB, pausedCaughtUp),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantAwaitingProm: true,
@@ -3801,21 +3801,21 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:    "failed beats paused when the phase is Degraded",
-			rollout: t11uArgoRollout(t11uRefB, 3, degradedPaused),
+			rollout: t11uArgoRollout(t11uRefB, degradedPaused),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutFailed,
 			wantSub: `status.phase "Degraded"`,
 		},
 		{
 			name:    "succeeded beats a lingering pause condition when the three-in-one holds",
-			rollout: t11uArgoRollout(t11uRefB, 3, succeededLingeringPause),
+			rollout: t11uArgoRollout(t11uRefB, succeededLingeringPause),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutSucceeded,
 			wantSub: "covers generation 3",
 		},
 		{
 			name:             "progressing while phase is Healthy but stableRS has not caught up with currentPodHash",
-			rollout:          t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Healthy", "rs-v1", "rs-v2")),
+			rollout:          t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v1")),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          "rs-v1",
@@ -3823,7 +3823,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:             "progressing on phase Progressing",
-			rollout:          t11uArgoRollout(t11uRefB, 3, rolling),
+			rollout:          t11uArgoRollout(t11uRefB, rolling),
 			desired:          t11uRefB,
 			want:             imageflowv1alpha1.RolloutProgressing,
 			wantSub:          `status.phase "Progressing"`,
@@ -3831,14 +3831,14 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 		},
 		{
 			name:    "unknown when the spec no longer holds the desired image",
-			rollout: t11uArgoRollout(t11uRefA, 3, t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefA, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutUnknown,
 			wantSub: "currently references",
 		},
 		{
 			name:    "unknown when the declared container is missing from the pod template",
-			rollout: t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2")),
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
 			// container renamed below
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutUnknown,
@@ -3854,7 +3854,7 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 					"uid": string(t11uRolloutUID), "generation": int64(3),
 				},
 				"spec":   map[string]interface{}{"replicas": int64(2)},
-				"status": t11uArgoRolloutReadyStatus("Healthy", "rs-v2", "rs-v2"),
+				"status": t11uArgoRolloutReadyStatus("Healthy", "rs-v2"),
 			}},
 			desired: t11uRefB,
 			want:    imageflowv1alpha1.RolloutUnknown,
@@ -3911,12 +3911,12 @@ func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
 }
 
 func TestObserverGetWorkloadFactsArgoRolloutExtraction(t *testing.T) {
-	status := t11uArgoRolloutReadyStatus("Paused", "rs-v1", "rs-v2")
+	status := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
 	status["pauseConditions"] = t11uArgoRolloutPauseConditions()
 	status["updatedReplicas"] = int64(1)
 	status["readyReplicas"] = int64(1)
 	status["availableReplicas"] = int64(0)
-	wl := t11uArgoRollout(t11uRefB, 3, status)
+	wl := t11uArgoRollout(t11uRefB, status)
 	fx := newT11uFixture(t, config.Config{}, wl)
 
 	ref := t11uRolloutRef()
@@ -3991,7 +3991,7 @@ func TestParseArgoRolloutObservedGeneration(t *testing.T) {
 // exactly like the Deployment lane (D4): Argo Rollouts manages ReplicaSets
 // owned by the Rollout, and those own the pods.
 func TestObserverDetermineArgoRolloutPodImageFailureAndReplicaSetChain(t *testing.T) {
-	rollout := t11uArgoRollout(t11uRefB, 3, t11uArgoRolloutReadyStatus("Progressing", "rs-v1", "rs-v2"))
+	rollout := t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Progressing", "rs-v1"))
 	rs := &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: t11uNamespace, Name: t11uRSName, UID: t11uRSUID,
