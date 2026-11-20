@@ -978,6 +978,23 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **NoMatches/MatchLimitExceeded 事件断言同时钉住类型与文案**：`type|message` 行断言 Warning 类型 + 引擎消息的稳定子串（`matched zero live objects`/`legal empty match set`/`ADR-014 decision 8`；`over the hard limit of 3`/`--selector-match-limit`/`remaining 1 are NOT delivered`），文案漂移会 RED；
 - **本机未实跑声明**：本机 Podman socket 拒连、kind 集群无法创建（同 v1.7-02/07/08 小节），本车道**首跑在 CI/有 Podman 的环境**；本机验收为编译级证据——`go build ./...`、`go vet ./test/e2e/...`、`gofmt -l .` 全清洁，`go test -c ./test/e2e/ -o /dev/null` 编译通过，`go test ./test/e2e/ -run xxx -count=1` 返回 `ok ... [no tests to run]`。
 
+## Argo Rollouts 内建 Kind 支持测试矩阵（v1.8，#91）
+
+v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo Rollout（`argoproj.io/v1alpha1`）
+纳入内建 Kind。本节是 v1.8 全部测试 lane 的总览索引（对齐 spec §Testing Decisions 六条缝）；各票的完整用例表、
+断言与覆盖率要点见紧随其后的 v1.8-01 / v1.8-02 小节，此处不重复。
+
+| 票 | Lane | 层 · 文件 | 覆盖要点 |
+|---|---|---|---|
+| v1.8-01（#92） | Adapter 单测 | unit · `internal/delivery/delivery_test.go` | Rollout 精确 GVK 命中内建注册表；Plan 只声明具名容器字段（与 Deployment 同形 apply-nest）；Classify 走 KindAdapter 车道 |
+| v1.8-01（#92） | SSA 升级单测 | unit · `internal/controller/subscription_delivery_controller_test.go` | 首发 409（foreign manager `rollouts-controller` 持有 image 字段，上游 argo/argo-rollouts#3281 形态）→ force 重试恰一次 + Warning `ApplyConflictEscalated`；持续冲突如实 Failed（预算 1/pass 用尽，无 retry bookkeeping）；named / selector 两投递形态端到端 |
+| v1.8-01（#92） | envtest 双 lane | envtest · `internal/controller/subscription_delivery_rollout_envtest_test.go` | lane A：vendored Rollout CRD（无 rollouts-controller）真实 SSA 写路径 + 二次 pass 稳态零写入；lane B：无 CRD → `KindNotInstalled` 等待态（spec D9） |
+| v1.8-02（#93） | D5 判定矩阵 18 例 | unit · `internal/controller/subscription_observer_test.go` | untrusted 三种 / 三合一 Succeeded（含两负例）/ Failed 三 phase / `pause: {}` → Progressing + `AwaitingPromotion` / pod 镜像失败 / Unknown 类；两跳 RS owner 链 pod 失败 |
+| v1.8-02（#93） | D4 提取 | unit · `internal/controller/subscription_observer_test.go` | unstructured 逐字段提取断言 + `observedGeneration` 字符串防御解析边界表（空白/非数字/小数/溢出/缺失 → 不信任 status） |
+| v1.8-02（#93） | envtest 5+1 例 | envtest · `internal/controller/subscription_observer_argorollout_envtest_test.go` | CRD 在、controller 不在（status 经 /status 子资源手工落库）：5 例 D5 决定性行端到端 + 1 例提取断言（含 API Server Create 剥离 status 的自证） |
+| v1.8-02（#93） | 契约扩充 | unit · `internal/controller/metrics_cardinality_test.go`、`subscription_observer_test.go` | 失败 reason 闭集**负表**加 `AwaitingPromotion`（进 health 词汇、绝不进 failure 指标词汇，ADR-015 决策 8/10）；observer kind 闭集加 `rollout`（系列上限 27→31）；`isEngineOwnedReason` 守卫放行 |
+| v1.8-04（#95） | kind e2e（t87 车道） | kind · `test/e2e/`（CI 安装 argo-rollouts，pin install.yaml） | **占位（本票登记、#95 实填）**：spec D11 场景 (a) 无 pause canary 收敛 Succeeded；(b) `pause: {}` → Progressing + `AwaitingPromotion`；(c) SSA 409 升级明确只在 unit 层（已由 v1.8-01 覆盖）；envtest 无 controller 无法闭环，故收敛判定只在 kind e2e |
+
 ## Argo Rollout 投递支持（v1.8-01，#92）
 
 ### Adapter 单元测试（`internal/delivery/delivery_test.go`）
