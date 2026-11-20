@@ -26,6 +26,19 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
+      # ADR-015 decision 15 / spec v1.8 D11: the kind e2e lane asserts the
+      # closed loop with the REAL rollouts-controller, so the cluster must
+      # exist before the pinned install manifest is applied (setup-test-e2e
+      # is idempotent; `make test-e2e` below re-runs it as a no-op).
+      - name: Create the kind cluster
+        run: make setup-test-e2e
+
+      - name: Install Argo Rollouts (pinned stable, ADR-015)
+        run: |
+          kubectl create namespace argo-rollouts
+          kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/download/v1.10.2/install.yaml
+          kubectl rollout status deployment/argo-rollouts -n argo-rollouts --timeout=180s
+
       - name: Running Test e2e
         run: |
           go mod tidy

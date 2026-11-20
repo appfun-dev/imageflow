@@ -1068,3 +1068,43 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **本机实跑声明**：unit 层（`go test ./internal/controller/...`）与 envtest 层均本机实跑通过
   （`KUBEBUILDER_ASSETS` 指向主 checkout 的 `bin/k8s/1.33.0-darwin-arm64`，worktree 不带该目录）；
   e2e kind 车道本机无 Podman 不在本票范围（本票无 e2e 用例要求）。
+
+## Argo Rollouts kind e2e 闭环（v1.8-04，#95）
+
+本票（ADR-015 决策 15，docs/spec/imageflow-v1.8-argo-rollouts-support.md D11）补 v1.8 的最后一块：
+在**真实 kind 集群 + 真实 rollouts-controller** 上验证 spec D11 的两个闭环场景。envtest 无法替代——
+CRD 在、controller 不在时 native status 永远空白，收敛判定（决策 7 三合一）与步停映射（决策 8）
+都依赖 rollouts-controller 真实写入 status.phase/stableRS/currentPodHash/pauseConditions。
+CI 的 `E2E Tests` job（`.github/workflows/test-e2e.yml`）在建好 kind 集群后安装 **pin 的
+argo-rollouts v1.10.2**（stable 通道，与 ADR-015 研究锚点一致；`kubectl create ns argo-rollouts` +
+`kubectl apply -f …/releases/download/v1.10.2/install.yaml` + `rollout status` 等待就绪），
+然后 `make test-e2e` 照常跑全量车道。
+
+车道文件 `test/e2e/rollout_e2e_test.go`（`Describe(..., Label("t87"), Ordered)`，命名与结构沿用
+t86 车道先例）：双命名空间（订阅侧 `t87-rollout-e2e` / 负载侧 `t87-rollout-e2e-wl`）、manager 裸
+Pod + 生成 RBAC 绑定（`config/rbac/role.yaml`，含 #92 的 argoproj.io verbs）、created-by 注解手工
+注入（webhook 在 e2e 不活跃）、事件断言沿用 t11/t86 的双 ns field-selector 模式。Allure 过渡标注
+（ADR-009）：AllureID **IF-95** · TMS **IF-95**/**SPEC-91** · Epic *Phase 1.8: Argo Rollouts
+Support* · Feature *ADR-015 Argo Rollouts Adoption* · Suite **t87-rollout**（文件头与逐 It 注释块）。
+
+| 场景 | 用例 | 断言要点 |
+|---|---|---|
+| 无 pause 收敛（D11-a，US-8/US-20） | `t87-e2e-rollout-canary-without-pause-converges-succeeded-after-image-write` | `canary: {}` 基础金丝雀；真实 digest（registry.k8s.io/pause 多架构锚点，与 t11 同一 digest，kubelet 真拉取）经引擎写入 pod-template 标准路径（决策 4）；原生门控 phase=Healthy 且 stableRS==currentPodHash（决策 7 三合一全部兑现）；entry Succeeded + Reason=Applied（R3）+ health Healthy + 聚合 Succeeded；双 ns RolloutSucceeded 事件含审计四段与 `succeeded per native` |
+| pause:{} 步停（D11-b，US-11/US-21） | `t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded` | Rollout 出生即持目标 digest + `steps: [setWeight:50, pause:{}]`，先门控原生 `pauseConditions[0].reason==CanaryPauseStep` 再建订阅；no-op 投递播种 Unknown → observer Unknown→Progressing 翻转携带判定消息；entry Progressing + health Unknown（ADR-005 §3 门）+ Reason 保持 Applied（AwaitingPromotion 只走事件 detMessage）+ 聚合 Progressing；双 ns RolloutProgressing 事件含 `awaiting promotion` + `ADR-015 decision 8`；Consistently 70s（两个 30s observer 轮询周期）断言永不 Succeeded、双 ns 无 RolloutSucceeded |
+
+### 覆盖率要点
+
+- **场景 b 的 no-op 形态是确定性设计而非绕行**：值变更投递由引擎直接播种 `entry.RolloutStatus=
+  Progressing`（delivery controller 收敛路径），observer 的 Progressing→Progressing 不翻转、永不
+  发出携带 detMessage 的 transition 事件（v1.8-02 已记录该语义）——步停场景若走值变更路径，
+  AwaitingPromotion 在 e2e 层**原则上不可断言**。让 Rollout 先在原生层步停、订阅后到，引擎即播种
+  Unknown，observer 的 Unknown→Progressing 翻转确定性携带 `awaiting promotion` 判定（车道文件头
+  有完整推导）；
+- **观察靠 30s 轮询**：observer 不 watch Rollout informer，Progressing 时按 `waitingStateRequeue`
+  （30s）重排——场景 a 收敛 Eventually 预算 5m，场景 b 的 Consistently 70s 覆盖两个完整轮询周期；
+- **真实收敛是真凭证**：注册镜像取 t11 的 pause:3.9 真实多架构 digest，kubelet 拉取、金丝雀 RS
+  pod Ready、rollouts-controller 推进——observer 的 Succeeded/Progressing 判定全部挣得，非模拟；
+- **本机未实跑声明**：本机无 Podman（kind 集群起不来），本票只做到编译级验收——
+  `gofmt -l` 干净、`go vet ./test/e2e/...` 通过、`go build ./...` 通过；
+- **CI 首跑声明**：t87 车道的首次真实运行发生在 CI 的 `E2E Tests` job（含 argo-rollouts v1.10.2
+  安装步骤）；若首跑暴露时序问题，只允许调整 t87 车道的超时与门控预算，不允许放松断言面。
