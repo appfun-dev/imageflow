@@ -50,7 +50,9 @@
 
 - ADR、spec、ops.md 等面向 agent 的文档使用中文
 - 代码注释、commit message 可使用英文（技术惯例）
-- 用户面向的错误消息使用中文
+- 用户面向的错误消息使用中文：指 CLI 输出、UI 界面、面向用户的文档中展示的错误消息
+- K8s API 错误消息按 K8s 生态惯例使用英文，不计入中文要求（admission webhook 响应、`field.ErrorList`、`apierrors` 等，如 `internal/webhook/` 下各校验 webhook；同理复用 `metav1validation.ValidateLabelSelector` 等上游校验函数时保留其英文消息）
+- 区分：本节约定的是制品内的语言（文档、代码、错误消息）；agent 与人的交互语言约定见 AGENTS.md「基础交互规范」，两者互不冲突
 
 ## Allure 测试导入约定
 
