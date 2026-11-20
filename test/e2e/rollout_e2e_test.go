@@ -230,9 +230,6 @@ spec:
       labels:
         app: %[1]s
     spec:
-      terminationGracePeriodSeconds: 0
-      tolerations:
-      - operator: Exists
       containers:
       - name: %[3]s
         image: %[4]s
