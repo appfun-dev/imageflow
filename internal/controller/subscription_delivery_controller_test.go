@@ -1142,7 +1142,7 @@ func TestSubscriptionDeliverySSAConflictPersistentFailsHonestly(t *testing.T) {
 	}
 }
 
-// --- Argo Rollout targets (v1.8-01, issue #92, ADR-015 decisions 2/3) ------
+// --- Argo Rollout targets (v1.8-01, issue #92, ADR-015 decisions 3/9) ------
 //
 // Rollout is a registered built-in kind on the standard pod-template path
 // (.spec.template.spec.containers, same as a Deployment), so the v1.7
@@ -1182,7 +1182,7 @@ func t9cRolloutSelectorTarget(matchLabels map[string]string, containers ...strin
 }
 
 // t9cRollout builds an Argo Rollout workload; the pod-template nest is the
-// Deployment-identical .spec.template.spec.containers (ADR-015 decision 2).
+// Deployment-identical .spec.template.spec.containers (ADR-015 decision 3).
 func t9cRollout(name string, images ...[2]string) *unstructured.Unstructured {
 	containers := make([]any, 0, len(images))
 	for _, pair := range images {

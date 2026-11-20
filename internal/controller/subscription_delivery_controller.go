@@ -262,7 +262,7 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // write surface: cluster-level update/patch on the whitelisted built-in
 // workload kinds ONLY (SSA writes use patch; update is included per the
 // frozen ADR-003 wording) — since v1.8 including argoproj.io rollouts
-// (ADR-015 decision 8) — plus the subscription status subresource and
+// (spec v1.8 D8) — plus the subscription status subresource and
 // Events in both namespaces (dual-namespace audit, ADR-003 §4). No wildcard
 // verbs, no other workload kinds.
 //

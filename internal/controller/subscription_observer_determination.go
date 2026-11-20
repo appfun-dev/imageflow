@@ -106,10 +106,13 @@ type healthVerdict struct {
 }
 
 // workloadFacts carries the ADR-006 observation fields extracted from a FRESH
-// read of one built-in workload, normalized across the three kinds.
+// read of one built-in workload, normalized across the built-in kinds.
 type workloadFacts struct {
 	// kind is the bounded observer kind label (observerKindDeployment /
-	// observerKindStatefulSet / observerKindDaemonSet).
+	// observerKindStatefulSet / observerKindDaemonSet / observerKindJob /
+	// observerKindCronJob / observerKindRollout). The seventh value of the
+	// bounded vocabulary, observerKindOther (non-observable classes), is
+	// folded at the caller and never stored here.
 	kind string
 	uid  types.UID
 	// namespace of the workload (pod-scan scope).

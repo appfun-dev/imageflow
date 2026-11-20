@@ -1,6 +1,6 @@
 package controller
 
-// v1.8-01 (issue #92, ADR-015 decisions 2/8/9) envtest suite: Argo Rollout
+// v1.8-01 (issue #92, ADR-015 decisions 3/4/9/10) envtest suite: Argo Rollout
 // delivery against a REAL API server with real Server-Side Apply.
 //
 //   - Lane A (TestRolloutDeliveryEnvtestSSAWritePath): the shared

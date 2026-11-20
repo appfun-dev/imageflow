@@ -992,8 +992,8 @@ v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo 
 | v1.8-02（#93） | D5 判定矩阵 18 例 | unit · `internal/controller/subscription_observer_test.go` | untrusted 三种 / 三合一 Succeeded（含两负例）/ Failed 三 phase / `pause: {}` → Progressing + `AwaitingPromotion` / pod 镜像失败 / Unknown 类；两跳 RS owner 链 pod 失败 |
 | v1.8-02（#93） | D4 提取 | unit · `internal/controller/subscription_observer_test.go` | unstructured 逐字段提取断言 + `observedGeneration` 字符串防御解析边界表（空白/非数字/小数/溢出/缺失 → 不信任 status） |
 | v1.8-02（#93） | envtest 5+1 例 | envtest · `internal/controller/subscription_observer_argorollout_envtest_test.go` | CRD 在、controller 不在（status 经 /status 子资源手工落库）：5 例 D5 决定性行端到端 + 1 例提取断言（含 API Server Create 剥离 status 的自证） |
-| v1.8-02（#93） | 契约扩充 | unit · `internal/controller/metrics_cardinality_test.go`、`subscription_observer_test.go` | 失败 reason 闭集**负表**加 `AwaitingPromotion`（进 health 词汇、绝不进 failure 指标词汇，ADR-015 决策 8/10）；observer kind 闭集加 `rollout`（系列上限 27→31）；`isEngineOwnedReason` 守卫放行 |
-| v1.8-04（#95） | kind e2e（t87 车道） | kind · `test/e2e/`（CI 安装 argo-rollouts，pin install.yaml） | **占位（本票登记、#95 实填）**：spec D11 场景 (a) 无 pause canary 收敛 Succeeded；(b) `pause: {}` → Progressing + `AwaitingPromotion`；(c) SSA 409 升级明确只在 unit 层（已由 v1.8-01 覆盖）；envtest 无 controller 无法闭环，故收敛判定只在 kind e2e |
+| v1.8-02（#93） | 契约扩充 | unit · `internal/controller/metrics_cardinality_test.go`、`subscription_observer_test.go` | 失败 reason 闭集**负表**加 `AwaitingPromotion`（进 health 词汇、绝不进 failure 指标词汇，ADR-015 决策 8 / spec D10）；observer kind 闭集加 `rollout`（系列上限 27→31）；`isEngineOwnedReason` 守卫放行 |
+| v1.8-04（#95） | kind e2e（t87 车道） | kind · `test/e2e/rollout_e2e_test.go`（CI 安装 argo-rollouts v1.10.2，pin install.yaml） | 两场景表与断言详见下文 v1.8-04 专节：spec D11 (a) 无 pause canary 收敛 Succeeded（真实 digest + 决策 7 三合一全兑现）；(b) `pause: {}` 步停 → Progressing + `AwaitingPromotion`（no-op 播种 Unknown，Consistently 70s 永不 Succeeded）；(c) SSA 409 升级明确只在 unit 层（已由 v1.8-01 覆盖）；envtest 无 controller 无法闭环，故收敛判定只在 kind e2e；本机未实跑（无 Podman）、首跑在 CI `E2E Tests` job |
 
 ## Argo Rollout 投递支持（v1.8-01，#92）
 
@@ -1026,7 +1026,7 @@ v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo 
 - **先礼后兵的预算语义**：force 升级只在「首发 409」单点发生，预算恰为 1/reconcile pass（ADR-015 决策 9）；orphan 接管（首发即 force）与升级重试共用同一 `IsConflict` 错误车道——持续冲突一律诚实 Failed，不做超预算重试；
 - **升级审计无 reasonChanged 门控**：每次真实强制接管都发 Warning（真实集群 event correlator 聚合为 series）；稳态成功 churn 中每次升级都对应真实 ownership 争夺，必须可见；失败词汇表与指标基数均不增（复用 `TargetReasonApplyFailed`/`failureLabelApplyError`）；
 - **foreign vs other-subscription**：首发 force 仍只对 `OwnershipOtherSubscription`（孤儿接管，v1.7 既有语义）触发；foreign manager（如 rollouts-controller）首发展望 409 升级车道——冲突竞态重分类（terminal Conflict、零写入）优先级仍高于强制重试；
-- **RBAC 增量**：`+kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch`（ADR-015 决策 8），`make manifests` 重生成 `config/rbac/role.yaml` 纯增量一个 rule 块；
+- **RBAC 增量**：`+kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch`（spec D8），`make manifests` 重生成 `config/rbac/role.yaml` 纯增量一个 rule 块；
 - **selector 形态零改动**：resolver 与 match-informer 通道是 GVK 无关的（v1.7 #81 车道），Rollout selector 仅需注册表条目，单测与 envtest 双侧证明；
 - **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑），本票无 e2e 车道新增；`test/integration` webhook lane 既有环境限制同 v1.7-02 小节说明。
 ## Argo Rollout 观察与完成判定（v1.8-02，#93）
@@ -1050,7 +1050,7 @@ v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo 
 | `TestObserverArgoRolloutEnvtestExtraction` | envtest 提取：断言 API Server 在 Create 时剥离 status（CRD 声明 status 子资源）、经 `client.Status().Update` 落库后逐字段读回（含 template→corev1.PodSpec 转换） | 已实现（CI 已实跑） |
 | `TestObserverObservableBuiltinKindClassification`（既有，扩充） | 白名单分类表加 Rollout 行：`argoproj.io/v1alpha1, Kind=Rollout` + containerNames→(rollout, true) | 已实现（CI 已实跑） |
 | `TestIsEngineOwnedReason`（既有，扩充） | 非引擎原因列表加 `AwaitingPromotion`——守卫 `isEngineOwnedReason` 判定为 false，允许其写入 entry.Reason | 已实现（CI 已实跑） |
-| `TestDeliveryFailureLabelVocabularyIsClosed`（既有，扩充） | 失败 reason 闭集**负表**加 `HealthReasonAwaitingPromotion`/`"AwaitingPromotion"`：钉死「进 health 词汇、绝不进 failure 指标词汇」（ADR-015 决策 8/10） | 已实现（CI 已实跑） |
+| `TestDeliveryFailureLabelVocabularyIsClosed`（既有，扩充） | 失败 reason 闭集**负表**加 `HealthReasonAwaitingPromotion`/`"AwaitingPromotion"`：钉死「进 health 词汇、绝不进 failure 指标词汇」（ADR-015 决策 8 / spec D10） | 已实现（CI 已实跑） |
 | `TestObserverLabelVocabulariesAreClosed`（既有，扩充） | 观察者 kind 闭集正表加 `argoRolloutGVK→observerKindRollout`；负表保持 third-party/imageFields/无 containerNames→other | 已实现（CI 已实跑） |
 
 ### 变异自证

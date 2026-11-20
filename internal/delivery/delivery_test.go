@@ -37,7 +37,7 @@ var (
 	t9uGVKJob         = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
 	t9uGVKCronJob     = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}
 	// t9uGVKRollout is the Argo Rollouts GVK served since v1.8 (ADR-015
-	// decision 2): same pod-template path as the apps/v1 workloads.
+	// decision 3): same pod-template path as the apps/v1 workloads.
 	t9uGVKRollout = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: t9uKindRollout}
 )
 
@@ -534,7 +534,7 @@ func TestCronJobAdapterIsRegistered(t *testing.T) {
 }
 
 // TestRolloutAdapterIsRegistered pins the v1.8-01 adapter decision (spec D2,
-// ADR-015 decision 2): argoproj.io/v1alpha1 Rollout is a built-in Kind
+// ADR-015 decision 3): argoproj.io/v1alpha1 Rollout is a built-in Kind
 // registered from init, sharing the standard pod-template apply-nest with
 // Deployment — the engine code itself is untouched.
 func TestRolloutAdapterIsRegistered(t *testing.T) {
