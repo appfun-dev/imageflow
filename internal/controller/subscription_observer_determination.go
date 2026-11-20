@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -63,12 +66,33 @@ var observerPodImageFailureReasons = map[string]struct{}{
 // (ADR-006: observedGeneration/conditions/updatedReplicas).
 const progressDeadlineExceededReason = "ProgressDeadlineExceeded"
 
+// argoRolloutGVK is the Argo Rollouts observable built-in kind (v1.8,
+// ADR-015). No argo-rollouts Go module is imported (decision 11): the GVK
+// is spelled out and status is read unstructured.
+var argoRolloutGVK = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: kindRollout}
+
+// argoRolloutFailedPhases is the status.phase vocabulary that proves the
+// rollout failed once the status is trusted (ADR-015 decision 7): Degraded
+// is the upstream terminal failure phase; ReplicaFailure and
+// ProgressDeadlineExceeded are recognized failure names carried in the same
+// field (the latter is shared with the native Deployment signal).
+var argoRolloutFailedPhases = map[string]struct{}{
+	"Degraded":                     {},
+	"ReplicaFailure":               {},
+	progressDeadlineExceededReason: {},
+}
+
 // rolloutDetermination is the observer's honest Rollout-stage verdict for one
 // target entry, plus the message explaining it (rendered onto the transition
 // Event — per-target entry Reason/Message remain engine-owned).
 type rolloutDetermination struct {
 	status  imageflowv1alpha1.RolloutStatus
 	message string
+	// awaitingPromotion marks the Progressing verdict that comes from an Argo
+	// Rollout canary pause step (ADR-015 decision 8): a legitimate steady
+	// state awaiting manual promote, never a failure. The Health stage
+	// surfaces it as the registered HealthReasonAwaitingPromotion reason.
+	awaitingPromotion bool
 }
 
 // healthVerdict carries the Health-stage outcome: status + diagnostic
@@ -126,6 +150,19 @@ type workloadFacts struct {
 	// human-readable messages ("Job <name> completed at <time>").
 	jobName     string // Job resource name (for Job kind)
 	cronJobName string // CronJob resource name (for CronJob kind, when delegating to a Job)
+	// Argo Rollout (v1.8-02, ADR-015 decisions 7/8/11): extracted from the
+	// unstructured status at the API boundary. status.observedGeneration is
+	// a STRING upstream — the defensive parse lands in
+	// rolloutObservedParsed/observedGeneration; a failed parse is honestly
+	// "not yet observed" (untrusted → Progressing, decision 7 rule 1).
+	rolloutObservedParsed bool
+	rolloutPhase          string
+	rolloutStableRS       string
+	rolloutCurrentPodHash string
+	// rolloutPaused: status.pauseConditions is non-empty — the rollout sits
+	// at a canary pause step awaiting manual promote (decision 8).
+	rolloutPaused     bool
+	availableReplicas int32
 }
 
 // observableBuiltinKind reports whether the target's rollout is observable
@@ -148,6 +185,8 @@ func observableBuiltinKind(gvk schema.GroupVersionKind, target imageflowv1alpha1
 		return observerKindJob, true
 	case batchv1.SchemeGroupVersion.WithKind(kindCronJob):
 		return observerKindCronJob, true
+	case argoRolloutGVK:
+		return observerKindRollout, true
 	}
 	return "", false
 }
@@ -335,7 +374,96 @@ func (r *SubscriptionObserverReconciler) getWorkloadFacts(ctx context.Context, g
 		}
 		return facts, true, nil
 	}
+	if gvk == argoRolloutGVK {
+		return r.argoRolloutFacts(ctx, key)
+	}
 	return workloadFacts{}, false, nil
+}
+
+// argoRolloutFacts extracts the ADR-015 decision 11 observation fields from
+// an unstructured Argo Rollout (no argo-rollouts Go module): the ~9 status
+// fields the D5 matrix needs, plus .spec.template.spec converted to the
+// SAME corev1.PodSpec shape the container-state analysis consumes for typed
+// kinds (spec v1.8 D4). All parsing happens here at the API boundary —
+// inside, the facts are trusted.
+func (r *SubscriptionObserverReconciler) argoRolloutFacts(ctx context.Context, key types.NamespacedName) (workloadFacts, bool, error) {
+	var wl unstructured.Unstructured
+	wl.SetGroupVersionKind(argoRolloutGVK)
+	if err := r.reader().Get(ctx, key, &wl); err != nil {
+		return observerFoundFromErr(err)
+	}
+	facts := workloadFacts{
+		kind:      observerKindRollout,
+		uid:       wl.GetUID(),
+		namespace: wl.GetNamespace(),
+		// template: set below; an absent template degrades to an EMPTY
+		// PodSpec so specHoldsDesired honestly reports the declared
+		// containers missing (the engine-owned ContainerNotFound surface).
+		template:   &corev1.PodSpec{},
+		generation: wl.GetGeneration(),
+	}
+	if templateMap, found, err := unstructured.NestedMap(wl.Object, "spec", "template", "spec"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .spec.template.spec of Rollout %s: %w", key, err)
+	} else if found {
+		podSpec := &corev1.PodSpec{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(templateMap, podSpec); err != nil {
+			return workloadFacts{}, false, fmt.Errorf("convert .spec.template.spec of Rollout %s to corev1.PodSpec: %w", key, err)
+		}
+		facts.template = podSpec
+	}
+	if replicas, found, err := unstructured.NestedInt64(wl.Object, "spec", "replicas"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .spec.replicas of Rollout %s: %w", key, err)
+	} else if found {
+		facts.desiredReplicas = int32(replicas)
+	} else {
+		facts.desiredReplicas = 1 // upstream default
+	}
+	rawObserved, found, _ := unstructured.NestedString(wl.Object, "status", "observedGeneration")
+	facts.observedGeneration, facts.rolloutObservedParsed = parseArgoRolloutObservedGeneration(rawObserved, found)
+	facts.rolloutPhase, _, _ = unstructured.NestedString(wl.Object, "status", "phase")
+	facts.rolloutStableRS, _, _ = unstructured.NestedString(wl.Object, "status", "stableRS")
+	facts.rolloutCurrentPodHash, _, _ = unstructured.NestedString(wl.Object, "status", "currentPodHash")
+	pauseConditions, found, err := unstructured.NestedSlice(wl.Object, "status", "pauseConditions")
+	if err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .status.pauseConditions of Rollout %s: %w", key, err)
+	}
+	facts.rolloutPaused = found && len(pauseConditions) > 0
+	if v, found, err := unstructured.NestedInt64(wl.Object, "status", "updatedReplicas"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .status.updatedReplicas of Rollout %s: %w", key, err)
+	} else if found {
+		facts.updatedReplicas = int32(v)
+	}
+	if v, found, err := unstructured.NestedInt64(wl.Object, "status", "replicas"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .status.replicas of Rollout %s: %w", key, err)
+	} else if found {
+		facts.totalReplicas = int32(v)
+	}
+	if v, found, err := unstructured.NestedInt64(wl.Object, "status", "readyReplicas"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .status.readyReplicas of Rollout %s: %w", key, err)
+	} else if found {
+		facts.readyReplicas = int32(v)
+	}
+	if v, found, err := unstructured.NestedInt64(wl.Object, "status", "availableReplicas"); err != nil {
+		return workloadFacts{}, false, fmt.Errorf("read .status.availableReplicas of Rollout %s: %w", key, err)
+	} else if found {
+		facts.availableReplicas = int32(v)
+	}
+	return facts, true, nil
+}
+
+// parseArgoRolloutObservedGeneration is the D4 defensive boundary:
+// status.observedGeneration is a STRING upstream; anything absent or not
+// parseable as an integer means "not yet observed" (untrusted → the D5
+// matrix rule 1 keeps the verdict Progressing).
+func parseArgoRolloutObservedGeneration(raw string, found bool) (int64, bool) {
+	if !found {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 // findDeploymentCondition locates a native Deployment condition (appsv1 has
@@ -416,6 +544,13 @@ func (f workloadFacts) rolloutSucceeded() bool {
 			f.numberAvailable >= f.desiredNumberScheduled &&
 			f.numberReady >= f.desiredNumberScheduled &&
 			f.numberMisscheduled == 0
+	case observerKindRollout:
+		// The ADR-015 decision 7 three-in-one: the status is trusted (the
+		// caller checked observedGeneration covers generation), the
+		// controller reports Healthy, and the stable ReplicaSet is the
+		// current one (stableRS == currentPodHash).
+		return f.rolloutPhase == "Healthy" &&
+			f.rolloutStableRS != "" && f.rolloutStableRS == f.rolloutCurrentPodHash
 	}
 	return false
 }
@@ -431,6 +566,10 @@ func (f workloadFacts) progressSummary() string {
 	case observerKindDaemonSet:
 		return fmt.Sprintf("observedGeneration %d/%d, %d/%d updated, %d/%d available, %d/%d ready, %d misscheduled",
 			f.observedGeneration, f.generation, f.updatedNumberScheduled, f.desiredNumberScheduled, f.numberAvailable, f.desiredNumberScheduled, f.numberReady, f.desiredNumberScheduled, f.numberMisscheduled)
+	case observerKindRollout:
+		return fmt.Sprintf("observedGeneration %d/%d, status.phase %q, stableRS %q vs currentPodHash %q, %d/%d updated, %d/%d ready, %d/%d available",
+			f.observedGeneration, f.generation, f.rolloutPhase, f.rolloutStableRS, f.rolloutCurrentPodHash,
+			f.updatedReplicas, f.desiredReplicas, f.readyReplicas, f.desiredReplicas, f.availableReplicas, f.desiredReplicas)
 	}
 	return fmt.Sprintf("observedGeneration %d/%d", f.observedGeneration, f.generation)
 }
@@ -446,6 +585,10 @@ func (f workloadFacts) successSummary() string {
 	case observerKindDaemonSet:
 		return fmt.Sprintf("observedGeneration %d covers generation %d, %d/%d updated, %d/%d available, %d/%d ready, %d misscheduled",
 			f.observedGeneration, f.generation, f.updatedNumberScheduled, f.desiredNumberScheduled, f.numberAvailable, f.desiredNumberScheduled, f.numberReady, f.desiredNumberScheduled, f.numberMisscheduled)
+	case observerKindRollout:
+		return fmt.Sprintf("observedGeneration %d covers generation %d, status.phase %q, stableRS %q equals currentPodHash, %d/%d updated, %d/%d ready, %d/%d available",
+			f.observedGeneration, f.generation, f.rolloutPhase, f.rolloutStableRS,
+			f.updatedReplicas, f.desiredReplicas, f.readyReplicas, f.desiredReplicas, f.availableReplicas, f.desiredReplicas)
 	}
 	return fmt.Sprintf("observedGeneration %d covers generation %d", f.observedGeneration, f.generation)
 }
@@ -547,26 +690,107 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 			message: fmt.Sprintf("the native Kubernetes rollout controller declared the rollout of %s failed: Progressing condition False with reason %s at generation %d (observedGeneration %d) — progressDeadlineSeconds exceeded", name, progressDeadlineExceededReason, facts.generation, facts.observedGeneration),
 		}
 	}
+	// Argo Rollout determination (v1.8-02, spec v1.8 D5, ADR-015 decision
+	// 7): the ordered matrix on the unstructured-extracted status. Like the
+	// Deployment lane, the Rollout never freezes the reconcile (decision
+	// 12).
+	if facts.kind == observerKindRollout {
+		return determineArgoRollout(facts, name, entry.DesiredImage, pods)
+	}
 	if facts.rolloutSucceeded() {
 		return rolloutDetermination{
 			status:  imageflowv1alpha1.RolloutSucceeded,
 			message: fmt.Sprintf("rollout of %s succeeded per native %s status: %s; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)", entry.DesiredImage, facts.kind, facts.successSummary()),
 		}
 	}
-	if podName, containerName, waitingReason, waitingMessage := scanPodsForImageFailure(pods, entry.DesiredImage); podName != "" {
-		detail := waitingMessage
-		if detail == "" {
-			detail = "no message reported by the kubelet"
-		}
-		return rolloutDetermination{
-			status:  imageflowv1alpha1.RolloutFailed,
-			message: fmt.Sprintf("rollout of %s failed: pod %s container %q cannot start image %s: %s (%s)", entry.DesiredImage, podName, containerName, entry.DesiredImage, waitingReason, authz.TruncateMessage(detail, 512)),
-		}
+	if det, failed := podImageFailureDetermination(pods, entry.DesiredImage); failed {
+		return det
 	}
 	return rolloutDetermination{
 		status:  imageflowv1alpha1.RolloutProgressing,
 		message: fmt.Sprintf("rollout of %s is in progress per native %s status: %s", entry.DesiredImage, facts.kind, facts.progressSummary()),
 	}
+}
+
+// determineArgoRollout applies the ADR-015 decision 7 ordered matrix (spec
+// v1.8 D5) to the unstructured-extracted Rollout status:
+//
+//  1. observedGeneration does not cover generation ⇒ Progressing — the
+//     reported status describes an older spec and cannot prove anything
+//     about the current one (observedGeneration is a STRING upstream; a
+//     failed defensive parse counts as "not yet observed");
+//  2. the three-in-one (observedGeneration covers generation, phase
+//     "Healthy", stableRS equals currentPodHash) ⇒ Succeeded;
+//  3. phase ∈ {Degraded, ReplicaFailure, ProgressDeadlineExceeded} ⇒ Failed;
+//  4. status.pauseConditions set ⇒ Progressing carrying the registered
+//     AwaitingPromotion reason — a canary pause step is a legitimate steady
+//     state awaiting manual promote, never a failure (decision 8);
+//  5. a pod of this workload stuck starting the desired image ⇒ Failed
+//     (the same pod-level signal the Deployment lane uses);
+//  6. anything else ⇒ Progressing.
+func determineArgoRollout(facts workloadFacts, name, desiredImage string, pods []*corev1.Pod) rolloutDetermination {
+	if !facts.rolloutObservedParsed {
+		return rolloutDetermination{
+			status: imageflowv1alpha1.RolloutProgressing,
+			message: fmt.Sprintf("rollout of %s is in progress per native %s status: status.observedGeneration is absent or not a number (the Argo Rollouts controller reports it as a string) — the status cannot prove the rollout for generation %d yet (ADR-015 decision 7)",
+				desiredImage, facts.kind, facts.generation),
+		}
+	}
+	if facts.observedGeneration != facts.generation {
+		return rolloutDetermination{
+			status: imageflowv1alpha1.RolloutProgressing,
+			message: fmt.Sprintf("rollout of %s is in progress per native %s status: status.observedGeneration %d does not cover generation %d — the reported status describes an older spec and cannot prove the rollout (ADR-015 decision 7)",
+				desiredImage, facts.kind, facts.observedGeneration, facts.generation),
+		}
+	}
+	if facts.rolloutSucceeded() {
+		return rolloutDetermination{
+			status: imageflowv1alpha1.RolloutSucceeded,
+			message: fmt.Sprintf("rollout of %s succeeded per native %s status: %s; the health stage is reported separately and is never derived from rollout success (ADR-005 §3)",
+				desiredImage, facts.kind, facts.successSummary()),
+		}
+	}
+	if _, failed := argoRolloutFailedPhases[facts.rolloutPhase]; failed {
+		return rolloutDetermination{
+			status: imageflowv1alpha1.RolloutFailed,
+			message: fmt.Sprintf("rollout of %s failed: the Argo Rollouts controller reports status.phase %q (observedGeneration %d covers generation %d)",
+				desiredImage, facts.rolloutPhase, facts.observedGeneration, facts.generation),
+		}
+	}
+	if facts.rolloutPaused {
+		return rolloutDetermination{
+			status:            imageflowv1alpha1.RolloutProgressing,
+			awaitingPromotion: true,
+			message: fmt.Sprintf("rollout of %s is paused per native %s status: status.pauseConditions is set — awaiting promotion (manual promote) to continue; a canary pause step is a legitimate steady state, not a failure (ADR-015 decision 8): %s",
+				desiredImage, facts.kind, facts.progressSummary()),
+		}
+	}
+	if det, failed := podImageFailureDetermination(pods, desiredImage); failed {
+		return det
+	}
+	return rolloutDetermination{
+		status:  imageflowv1alpha1.RolloutProgressing,
+		message: fmt.Sprintf("rollout of %s is in progress per native %s status: %s", desiredImage, facts.kind, facts.progressSummary()),
+	}
+}
+
+// podImageFailureDetermination is the shared pod-level failure signal: a pod
+// of this workload stuck starting the desired image (ErrImagePull family) ⇒
+// Failed. CrashLoopBackOff is deliberately EXCLUDED (a running-then-crashing
+// container is the Health stage's domain).
+func podImageFailureDetermination(pods []*corev1.Pod, desiredImage string) (rolloutDetermination, bool) {
+	podName, containerName, waitingReason, waitingMessage := scanPodsForImageFailure(pods, desiredImage)
+	if podName == "" {
+		return rolloutDetermination{}, false
+	}
+	detail := waitingMessage
+	if detail == "" {
+		detail = "no message reported by the kubelet"
+	}
+	return rolloutDetermination{
+		status:  imageflowv1alpha1.RolloutFailed,
+		message: fmt.Sprintf("rollout of %s failed: pod %s container %q cannot start image %s: %s (%s)", desiredImage, podName, containerName, desiredImage, waitingReason, authz.TruncateMessage(detail, 512)),
+	}, true
 }
 
 // determineHealth applies the Health-stage determination order (spec v1.5
@@ -589,13 +813,13 @@ func determineRollout(facts workloadFacts, target imageflowv1alpha1.Subscription
 // (spec v1.5 D3): the observer never fabricates health it could not
 // observe. The function is pure and returns a healthVerdict with D6-format
 // reason/message for persistence on TargetDeliveryStatus.
-func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod, desiredImage string, kind string) healthVerdict {
+func determineHealth(rollout rolloutDetermination, pods []*corev1.Pod, desiredImage string, kind string) healthVerdict {
 	// Job/CronJob health (T7, spec v1.6): completion-based — derived directly
 	// from the rollout verdict. No pod-scan is performed for batch workloads:
 	// the Job's completion result IS the health signal. A completed Job is
 	// Healthy, a failed Job is Unhealthy, and anything else is Unknown.
 	if kind == observerKindJob || kind == observerKindCronJob {
-		switch rollout {
+		switch rollout.status {
 		case imageflowv1alpha1.RolloutSucceeded:
 			return healthVerdict{
 				status:  imageflowv1alpha1.HealthHealthy,
@@ -612,16 +836,26 @@ func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod
 			return healthVerdict{
 				status:  imageflowv1alpha1.HealthUnknown,
 				reason:  "WaitingForRollout",
-				message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout),
+				message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout.status),
 			}
 		}
 	}
-	// Deployment/STS/DS: rollout gate check.
-	if rollout != imageflowv1alpha1.RolloutSucceeded {
+	// Long-running workloads (Deployment/STS/DS and the v1.8 Argo Rollout):
+	// rollout gate check. An Argo Rollout paused at a canary step carries the
+	// registered AwaitingPromotion reason (ADR-015 decision 8) instead of the
+	// generic WaitingForRollout.
+	if rollout.status != imageflowv1alpha1.RolloutSucceeded {
+		if rollout.awaitingPromotion {
+			return healthVerdict{
+				status:  imageflowv1alpha1.HealthUnknown,
+				reason:  HealthReasonAwaitingPromotion,
+				message: fmt.Sprintf("health stage is not evaluated: the rollout is paused awaiting promotion (manual promote, ADR-015 decision 8), health assessment requires rollout Succeeded (ADR-005 §3)"),
+			}
+		}
 		return healthVerdict{
 			status:  imageflowv1alpha1.HealthUnknown,
 			reason:  "WaitingForRollout",
-			message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout),
+			message: fmt.Sprintf("health stage is not evaluated: rollout is %s, health assessment requires rollout Succeeded (ADR-005 §3)", rollout.status),
 		}
 	}
 	return scanPodsForHealth(pods, desiredImage, kind)
@@ -637,7 +871,7 @@ func determineHealth(rollout imageflowv1alpha1.RolloutStatus, pods []*corev1.Pod
 // deterministic verdict when several match at once.
 func (r *SubscriptionObserverReconciler) listWorkloadPods(ctx context.Context, facts workloadFacts) ([]*corev1.Pod, error) {
 	ownerUIDs := map[types.UID]struct{}{}
-	if facts.kind == observerKindDeployment {
+	if facts.kind == observerKindDeployment || facts.kind == observerKindRollout {
 		var rsList appsv1.ReplicaSetList
 		if err := r.client.List(ctx, &rsList, client.InNamespace(facts.namespace)); err != nil {
 			return nil, err

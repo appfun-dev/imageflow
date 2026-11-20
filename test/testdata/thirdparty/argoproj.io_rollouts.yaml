@@ -1,0 +1,43 @@
+# Minimal Argo Rollouts CRD stand-in for envtest (v1.8-02 / ADR-015 decision
+# 11: ImageFlow carries zero compile-time argo-rollouts dependency; this
+# test-only fixture gives the API server just enough schema to persist
+# Rollout objects — .spec.template.spec for the corev1.PodSpec conversion and
+# .status for the D5 determination matrix — without vendoring the upstream
+# CRD).
+#
+# The root-level x-kubernetes-preserve-unknown-fields keeps every field the
+# observer contract (spec v1.8 D4) reads, notably:
+#   - spec.replicas                        (desired replica count)
+#   - spec.template.spec                   (converted to corev1.PodSpec)
+#   - status.observedGeneration            (a STRING upstream)
+#   - status.phase / stableRS / currentPodHash
+#   - status.pauseConditions[]
+#   - status.{replicas,updatedReplicas,readyReplicas,availableReplicas}
+#
+# The status subresource must stay declared: the tests write the crafted
+# status through client.Status().Update, and without it the API server has
+# no /status endpoint and the write fails.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rollouts.argoproj.io
+spec:
+  group: argoproj.io
+  scope: Namespaced
+  names:
+    kind: Rollout
+    listKind: RolloutList
+    plural: rollouts
+    singular: rollout
+    shortNames:
+      - ro
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

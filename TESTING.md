@@ -977,3 +977,60 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **零写入的证明强度**：越限场景不止断言镜像未变，还断言 managedFields 中**不存在**订阅的 field manager（`imageflow.appfun.dev/sub-<ns>-<name>`，与 `internal/delivery.FieldManagerFor` 同构，<128 字符故无哈希后缀）；
 - **NoMatches/MatchLimitExceeded 事件断言同时钉住类型与文案**：`type|message` 行断言 Warning 类型 + 引擎消息的稳定子串（`matched zero live objects`/`legal empty match set`/`ADR-014 decision 8`；`over the hard limit of 3`/`--selector-match-limit`/`remaining 1 are NOT delivered`），文案漂移会 RED；
 - **本机未实跑声明**：本机 Podman socket 拒连、kind 集群无法创建（同 v1.7-02/07/08 小节），本车道**首跑在 CI/有 Podman 的环境**；本机验收为编译级证据——`go build ./...`、`go vet ./test/e2e/...`、`gofmt -l .` 全清洁，`go test -c ./test/e2e/ -o /dev/null` 编译通过，`go test ./test/e2e/ -run xxx -count=1` 返回 `ok ... [no tests to run]`。
+
+## Argo Rollout 观察与完成判定（v1.8-02，#93）
+
+本票（ADR-015，docs/spec/imageflow-v1.8-argo-rollouts-support.md D4/D5/D6/D10）把 Argo Rollout（`argoproj.io/v1alpha1`）
+纳入 observer 内建 Kind 白名单：unstructured 提取 `status.observedGeneration`（字符串，防御解析）/`status.phase`/
+`status.stableRS`/`status.currentPodHash`/`status.pauseConditions` 与 4 个 replica 计数字段（D4，零新 Go 依赖，
+`runtime.DefaultUnstructuredConverter` 把 `.spec.template.spec` 转成与 Deployment 同构的 `corev1.PodSpec` 复用容器
+状态分析），D5 判定矩阵（untrusted→Progressing；三合一→Succeeded；Degraded/ReplicaFailure/ProgressDeadlineExceeded
+→Failed；pause→Progressing+AwaitingPromotion；reconcile 永不冻结）。本车道两层：unit 判定表（假客户端）+ envtest
+（CRD 在、controller 不在——真实 API Server，手工 status 经 /status 子资源落库）。
+
+| 测试名 | 行为 | 状态 |
+|---|---|---|
+| `TestObserverDetermineArgoRolloutVerdictStates` | D5 判定矩阵 18 例（untrusted 三种：observedGeneration 空串/非数字/小于 generation；Succeeded 三合一：phase=Healthy + stableRS==currentPodHash + observedGeneration==generation，及 stableRS 为空、两者不等两个负例；Failed 三种 phase；Paused 无 pauseConditions 非 pause；pause→Progressing+AwaitingPromotion 且 message 含 "awaiting promotion"；pod ImagePullBackOff→Failed；镜像漂移/缺容器/缺 template→Unknown；Succeeded 后 health 走 v1.5 native health=NoMatchingPods） | 已实现（CI 已实跑） |
+| `TestObserverGetWorkloadFactsArgoRolloutExtraction` | D4 提取逐字段断言：generation=3/observedGeneration 字符串 "3"→int64 3（parsed=true）、phase/stableRS/currentPodHash/pauseConditions→rolloutPaused、replicas 4 计数、spec.replicas、template 转换出 `corev1.PodSpec{Containers:[app@digest]}` | 已实现（CI 已实跑） |
+| `TestParseArgoRolloutObservedGeneration` | 字符串防御解析边界表：`"3"`/`" 3 "`→(3,true)；`""`/`"abc"`/`"3.5"`/int64 溢出→(0,false)；字段缺失→(0,false) | 已实现（CI 已实跑） |
+| `TestObserverDetermineArgoRolloutPodImageFailureAndReplicaSetChain` | Pod 枚举两跳 owner 链（Rollout→ReplicaSet→Pod）：RS 以 Rollout UID 为 owner、Pod 以 RS UID 为 owner 时被列出，pod ImagePullBackOff→Failed（消息 "cannot start image"） | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutAwaitingPromotionHealthMessage` | health 语义：rollout Progressing+awaitingPromotion → Health Unknown + Reason=AwaitingPromotion，message 含 "awaiting promotion"（ADR-015 决策 8：合法稳态，非 NotReady） | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutEnvtestVerdicts` | envtest（CRD 在、controller 不在）：5 例 D5 决定性行端到端走 observeTarget——succeeded 三合一（health=NoMatchingPods，D6 移交 v1.5 native health）、paused→Progressing+AwaitingPromotion、Degraded→Failed（health=WaitingForRollout）、observedGeneration 缺失→Progressing（untrusted）、stale→Progressing；断言 kindLabel=`rollout` 进指标词汇 | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutEnvtestExtraction` | envtest 提取：断言 API Server 在 Create 时剥离 status（CRD 声明 status 子资源）、经 `client.Status().Update` 落库后逐字段读回（含 template→corev1.PodSpec 转换） | 已实现（CI 已实跑） |
+| `TestObserverObservableBuiltinKindClassification`（既有，扩充） | 白名单分类表加 Rollout 行：`argoproj.io/v1alpha1, Kind=Rollout` + containerNames→(rollout, true) | 已实现（CI 已实跑） |
+| `TestIsEngineOwnedReason`（既有，扩充） | 非引擎原因列表加 `AwaitingPromotion`——守卫 `isEngineOwnedReason` 判定为 false，允许其写入 entry.Reason | 已实现（CI 已实跑） |
+| `TestDeliveryFailureLabelVocabularyIsClosed`（既有，扩充） | 失败 reason 闭集**负表**加 `HealthReasonAwaitingPromotion`/`"AwaitingPromotion"`：钉死「进 health 词汇、绝不进 failure 指标词汇」（ADR-015 决策 8/10） | 已实现（CI 已实跑） |
+| `TestObserverLabelVocabulariesAreClosed`（既有，扩充） | 观察者 kind 闭集正表加 `argoRolloutGVK→observerKindRollout`；负表保持 third-party/imageFields/无 containerNames→other | 已实现（CI 已实跑） |
+
+### 变异自证
+
+- 判定表按 spec §D5 原文 5 步顺序构造，每例断言 status + message 稳定子串 + awaitingPromotion 标志三件套——
+  删掉六步矩阵中任何一步（如跳过 untrusted 检查直接信 phase）至少 3 例 RED；
+- `TestParseArgoRolloutObservedGeneration` 的溢出/小数/空白边界直接对着 `strconv.ParseInt` 的拒绝面，把
+  「非数字视为不匹配（不信任 status）」从注释变成可证伪行为；
+- envtest 的 `t93eCreateRollout` 先断言 API Server **剥离**了 Create 携带的 status——若 fixture CRD 漏声明
+  status 子资源，该断言立即 RED，防止「测试自己骗自己」（手工 status 根本没有落库）；
+- 负表断言（`AwaitingPromotion` 不属于 failure 指标词汇）是反向变异防护：将来若有人把它注册成失败原因，
+  metrics 契约测试 RED 而不是静默污染告警指标。
+
+### 契约文档同步
+
+- `docs/metrics-contract.md`：`kind` 词汇行加 `rollout`（ADR-015 v1.8，#93）；观察者系列上限 6 kinds×4+3=27 →
+  **7 kinds×4+3=31**；
+- `docs/ops.md` Reason 词汇表：Health 原因行加 `AwaitingPromotion`（注明 ADR-015 决策 8 合法稳态、永不进 failure 词汇）；
+- `docs/scenario-map.md` 场景 11（rollout 四态分别报告）补 Argo Rollout 车道两条用例（unit 判定表 + envtest）；
+- `GLOSSARY.md`：AwaitingPromotion 词条在 ADR-015 wave C 已落地，本票无变更；
+- `docs/spec/imageflow-v1.8-argo-rollouts-support.md` D12 要求的 ops/TESTING/scenario-map 三处登记至此全部落账。
+
+### 覆盖率要点
+
+- **CRD 在、controller 不在是本票指定形态**：envtest 只装 `test/testdata/thirdparty/argoproj.io_rollouts.yaml`
+  （最小 CRD：根级 `x-kubernetes-preserve-unknown-fields` + status 子资源），不跑任何 Argo 控制器——所有 status
+  由测试手工经 /status 子资源写入，正是「observer 读的就是上游控制器写的那个形状」的最小可信证明；
+- **transition 语义决定断言面**：`out.detMessage` 只在计划了 rollout 状态翻转时携带——Progressing→Progressing
+  不翻转、消息为空是**正确行为**，故 progressing 三例以 priorStatus=Unknown 播种（翻转携带消息），succeeded/failed
+  两例以 Progressing 播种；这是断言形态而非测试绕行；
+- **零新依赖验证**：`go.mod` 无 diff；unstructured/converter 全部来自已在依赖树里的 `k8s.io/apimachinery`；
+- **本机实跑声明**：unit 层（`go test ./internal/controller/...`）与 envtest 层均本机实跑通过
+  （`KUBEBUILDER_ASSETS` 指向主 checkout 的 `bin/k8s/1.33.0-darwin-arm64`，worktree 不带该目录）；
+  e2e kind 车道本机无 Podman 不在本票范围（本票无 e2e 用例要求）。

@@ -102,16 +102,26 @@ const (
 // Observer-owned reasons (T11 extends the frozen T9 TargetReason* vocabulary —
 // engine reasons are never redefined). Rollout reasons are written onto
 // recentDeliveries records the observer heals. Health reasons (NotReady,
-// AllContainersReady, NoMatchingPods, WaitingForRollout, JobCompleted, etc.)
-// are written onto per-target entry Reason/Message when the entry has no
-// engine-owned reason (isEngineOwnedReason guard); the delivery engine's
-// ImageApplied-stage explanation takes priority. The observer's rollout WHY
-// also travels in Events + the StatusPolicyEvaluated Condition.
+// AllContainersReady, NoMatchingPods, WaitingForRollout, JobCompleted,
+// AwaitingPromotion, etc.) are written onto per-target entry Reason/Message
+// when the entry has no engine-owned reason (isEngineOwnedReason guard); the
+// delivery engine's ImageApplied-stage explanation takes priority. The
+// observer's rollout WHY also travels in Events + the StatusPolicyEvaluated
+// Condition.
 const (
 	TargetReasonRolloutProgressing = "RolloutProgressing"
 	TargetReasonRolloutSucceeded   = "RolloutSucceeded"
 	TargetReasonRolloutFailed      = "RolloutFailed"
 	TargetReasonRolloutUnknown     = "RolloutUnknown"
+)
+
+// Health reasons the observer registers (v1.5 D6 vocabulary, extended by
+// ADR-015 decision 8). HealthReasonAwaitingPromotion marks an Argo Rollout
+// paused at a canary step awaiting manual promote: a legitimate steady
+// state, never a failure, and never part of the delivery failure metric
+// label vocabulary.
+const (
+	HealthReasonAwaitingPromotion = "AwaitingPromotion"
 )
 
 // Event reasons for observed rollout outcomes (dual-namespace audit surface,
@@ -984,7 +994,7 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		// (evaluateTargetWithCUE above already planned their health
 		// transition, v1.3 behavior unchanged).
 		if target.StatusPolicyRef == nil || target.StatusPolicyRef.HealthKey == "" {
-			hv := determineHealth(out.rollout, pods, entry.DesiredImage, facts.kind)
+			hv := determineHealth(det, pods, entry.DesiredImage, facts.kind)
 			out.health = hv.status
 			out.healthReason = hv.reason
 			out.healthMessage = hv.message
