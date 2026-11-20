@@ -170,7 +170,8 @@ const (
 	// targets leave matchedObjects nil), a selector entry has NO name and
 	// a matched count ("|3|Applied|Succeeded" — the aggregate entry is
 	// keyed by the selector, D8).
-	t86sTargetsDumpPth  = `{range .status.targets[*]}{.targetRef.name}{"|"}{.matchedObjects}{"|"}{.reason}{"|"}{.rolloutStatus}{"\n"}{end}`
+	t86sTargetsDumpPth = `{range .status.targets[*]}{.targetRef.name}{"|"}{.matchedObjects}{"|"}` +
+		`{.reason}{"|"}{.rolloutStatus}{"\n"}{end}`
 	t86sEntryNamePth    = `{.status.targets[0].targetRef.name}`
 	t86sEntrySelPth     = `{.status.targets[0].targetRef.labelSelector.matchLabels.t86s-app}`
 	t86sEntryMatchedPth = `{.status.targets[0].matchedObjects}`
@@ -704,7 +705,8 @@ spec:
 			g.Expect(t86sEntry(t86sChurnSub, t86sEntryMatchedPth)).To(Equal("3"))
 			g.Expect(t86sEntry(t86sChurnSub, t86sEntryReasonPth)).To(Equal("Applied"))
 			g.Expect(t86sEntry(t86sChurnSub, t86sEntryRolloutPth)).To(Equal("Succeeded"),
-				"gate the retag on the heal: the founding record must be TERMINAL Succeeded so the later latest-wins merge has nothing in-flight to flip")
+				"gate the retag on the heal: the founding record must be TERMINAL Succeeded "+
+					"so the later latest-wins merge has nothing in-flight to flip")
 		}, "3m", "2s").Should(Succeed())
 
 		By("removing the match label — the informer shrinks the set, no polling (US-25/US-4)")

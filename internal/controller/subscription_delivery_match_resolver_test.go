@@ -164,7 +164,7 @@ func (f *t81rFixture) informerCount() int {
 
 // start runs resolver.Start in the background and waits until the run
 // context is stored (getOrCreate rejects registrations before Start).
-func (f *t81rFixture) start() context.Context {
+func (f *t81rFixture) start() {
 	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -191,7 +191,6 @@ func (f *t81rFixture) start() context.Context {
 		cancel()
 		<-done
 	})
-	return ctx
 }
 
 func (f *t81rFixture) resolve(ref imageflowv1alpha1.TargetReference) ([]string, error) {
@@ -364,10 +363,11 @@ func TestNewDynamicListerWatcherCarriesSelectorServerSide(t *testing.T) {
 	lw := newDynamicListerWatcher(dyn)(context.Background(),
 		schema.GroupVersionResource{Version: "v1", Resource: "pods"}, t81rNamespace, "app=checkout")
 
-	if _, err := lw.List(metav1.ListOptions{}); err != nil {
+	lwc := cache.ToListerWatcherWithContext(lw)
+	if _, err := lwc.ListWithContext(context.Background(), metav1.ListOptions{}); err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	w, err := lw.Watch(metav1.ListOptions{})
+	w, err := lwc.WatchWithContext(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("Watch: %v", err)
 	}

@@ -67,11 +67,11 @@ type listerWatcherFactory func(ctx context.Context, gvr schema.GroupVersionResou
 func newDynamicListerWatcher(dyn dynamic.Interface) listerWatcherFactory {
 	return func(ctx context.Context, gvr schema.GroupVersionResource, namespace, selector string) cache.ListerWatcher {
 		return &cache.ListWatch{
-			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
 				options.LabelSelector = selector
 				return dyn.Resource(gvr).Namespace(namespace).List(ctx, options)
 			},
-			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
 				options.LabelSelector = selector
 				return dyn.Resource(gvr).Namespace(namespace).Watch(ctx, options)
 			},

@@ -443,17 +443,17 @@ func (r *SubscriptionDeliveryReconciler) Reconcile(
 		return ctrl.Result{}, nil
 	}
 
-	source := r.resolveSource(ctx, &sub)
-	if source.err != nil {
-		return ctrl.Result{}, source.err
+	srcState := r.resolveSource(ctx, &sub)
+	if srcState.err != nil {
+		return ctrl.Result{}, srcState.err
 	}
-	source.spec = sub.Spec.Source
-	source.name = fmt.Sprintf("%s in namespace %s", sub.Spec.Source.Name, sub.Spec.Source.Namespace)
+	srcState.spec = sub.Spec.Source
+	srcState.name = fmt.Sprintf("%s in namespace %s", sub.Spec.Source.Name, sub.Spec.Source.Namespace)
 
 	fieldManager := delivery.FieldManagerFor(sub.Namespace, sub.Name)
-	pass := r.deliverAllTargets(ctx, &sub, source, fieldManager)
+	pass := r.deliverAllTargets(ctx, &sub, srcState, fieldManager)
 
-	transition, err := r.syncDeliveryStatus(ctx, req.NamespacedName, source, pass)
+	transition, err := r.syncDeliveryStatus(ctx, req.NamespacedName, srcState, pass)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -672,7 +672,7 @@ func (p *deliveryPass) joinedError() error {
 func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
-	source sourceState,
+	srcState sourceState,
 	fieldManager string,
 ) deliveryPass {
 	pass := deliveryPass{outcomes: make([]deliveryOutcome, 0, len(sub.Spec.Targets))}
@@ -691,7 +691,7 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 		}
 		seen[targetKey] = true
 
-		for _, outcome := range r.deliverTarget(ctx, sub, source, target, fieldManager) {
+		for _, outcome := range r.deliverTarget(ctx, sub, srcState, target, fieldManager) {
 			// Since issue #82 a selector target yields exactly ONE aggregate
 			// outcome whose ref stays selector-form, so outcome keys are
 			// unique per spec target by construction — overlapping selector
@@ -731,7 +731,7 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
-	source sourceState,
+	srcState sourceState,
 	target *imageflowv1alpha1.SubscriptionTarget,
 	fieldManager string,
 ) []deliveryOutcome {
@@ -760,11 +760,11 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 				"zero writes", authz.FormatTarget(ref)))}
 	}
 
-	if source.reason != "" {
+	if srcState.reason != "" {
 		// Source not resolved (or violating the write contract): honest
 		// per-target report, zero writes.
-		out = out.failed(source.reason, source.message)
-		if source.waiting {
+		out = out.failed(srcState.reason, srcState.message)
+		if srcState.waiting {
 			out.requeue = waitingStateRequeue
 		}
 		return []deliveryOutcome{out}
@@ -774,7 +774,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	// every outcome from here on, even failures (users see WHAT would be
 	// delivered).
 	out.setDesired = true
-	out.desiredImage = source.desiredImage
+	out.desiredImage = srcState.desiredImage
 
 	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
 	kindAdapter, pathAdapter, class, supported := delivery.Classify(gvk, hasPaths)
@@ -784,10 +784,10 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 	}
 
 	if ref.LabelSelector != nil && ref.Name == "" {
-		return r.deliverSelectorTarget(ctx, sub, source, target, out, fieldManager,
+		return r.deliverSelectorTarget(ctx, sub, srcState, target, out, fieldManager,
 			kindAdapter, pathAdapter, hasPaths)
 	}
-	return []deliveryOutcome{r.deliverObjectTarget(ctx, sub, source, target, ref, out, fieldManager,
+	return []deliveryOutcome{r.deliverObjectTarget(ctx, sub, srcState, target, ref, out, fieldManager,
 		kindAdapter, pathAdapter, hasPaths)}
 }
 
@@ -812,7 +812,7 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
-	source sourceState,
+	srcState sourceState,
 	target *imageflowv1alpha1.SubscriptionTarget,
 	base deliveryOutcome,
 	fieldManager string,
@@ -896,7 +896,7 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 			objectOutcomes = append(objectOutcomes, objOut)
 			continue
 		}
-		objOut = r.deliverObjectTarget(ctx, sub, source, target, objectRef, objOut,
+		objOut = r.deliverObjectTarget(ctx, sub, srcState, target, objectRef, objOut,
 			fieldManager, kindAdapter, pathAdapter, hasPaths)
 		objectOutcomes = append(objectOutcomes, objOut)
 		// Per-object waiting/transient states bubble to the aggregate: the
@@ -910,7 +910,7 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 		}
 	}
 	out.objectOutcomes = objectOutcomes
-	aggregateSelectorOutcome(&out, objectOutcomes, source)
+	aggregateSelectorOutcome(&out, objectOutcomes, srcState)
 	if exceeded {
 		// Worst-state override (issue #83, ADR-014 decision 7): Failed
 		// outranks every per-object fold, so the quota breach becomes the
@@ -935,7 +935,7 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 // Event/metric planning in planEffects. Delivery facts aggregate over the
 // ACTIVE objects only — T8-frozen (preserveEntry) members count towards
 // matched but never vote.
-func aggregateSelectorOutcome(out *deliveryOutcome, objectOutcomes []deliveryOutcome, source sourceState) {
+func aggregateSelectorOutcome(out *deliveryOutcome, objectOutcomes []deliveryOutcome, srcState sourceState) {
 	active := make([]*deliveryOutcome, 0, len(objectOutcomes))
 	for i := range objectOutcomes {
 		if !objectOutcomes[i].preserveEntry {
@@ -1036,7 +1036,7 @@ func aggregateSelectorOutcome(out *deliveryOutcome, objectOutcomes []deliveryOut
 		} else {
 			out.message = authz.TruncateMessage(fmt.Sprintf(
 				"all %d matched objects hold %s and are owned by this subscription's SSA "+
-					"field manager (ADR-008 exclusivity registry)", len(active), source.desiredImage), 1024)
+					"field manager (ADR-008 exclusivity registry)", len(active), srcState.desiredImage), 1024)
 			out.resetRetry = true
 		}
 	} else {
@@ -1063,7 +1063,7 @@ func aggregateSelectorOutcome(out *deliveryOutcome, objectOutcomes []deliveryOut
 func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
-	source sourceState,
+	srcState sourceState,
 	target *imageflowv1alpha1.SubscriptionTarget,
 	ref imageflowv1alpha1.TargetReference,
 	out deliveryOutcome,
@@ -1074,7 +1074,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 ) deliveryOutcome {
 	gvk := schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind)
 
-	plan, obj, failure := r.planDelivery(ctx, out, target, source, ref, gvk,
+	plan, obj, failure := r.planDelivery(ctx, out, target, srcState, ref, gvk,
 		kindAdapter, pathAdapter, hasPaths)
 	if failure != nil {
 		return *failure
@@ -1086,7 +1086,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 	// reference IT writes — the digest for Digest, the tag string only for
 	// Tag (drift stays visible via resolvedDigest), the composite for
 	// DigestWithTag.
-	allEqual := uniform && observed == source.desiredImage
+	allEqual := uniform && observed == srcState.desiredImage
 	out.setObserved = true
 	out.observedImage = observed
 
@@ -1108,7 +1108,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 			out.setImageApplied = true
 			out.imageApplied = allEqual
 			out.setDesired = true
-			out.desiredImage = source.desiredImage
+			out.desiredImage = srcState.desiredImage
 			out.setObserved = true
 			out.observedImage = observed
 			rollout := imageflowv1alpha1.RolloutConflict
@@ -1125,7 +1125,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 		// Equal-and-owned: NO write of any kind (AC: 相等不产生 patch).
 		out.converged = true
 		out.locator = locatorSummary(target)
-		return r.convergedOutcome(out, source)
+		return r.convergedOutcome(out, srcState)
 	}
 
 	force := len(conflicted) > 0 // orphaned ImageFlow ownership detected above
@@ -1159,7 +1159,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 			out.setImageApplied = true
 			out.imageApplied = allEqual
 			out.setDesired = true
-			out.desiredImage = source.desiredImage
+			out.desiredImage = srcState.desiredImage
 			out.setObserved = true
 			out.observedImage = observed
 			rollout := imageflowv1alpha1.RolloutConflict
@@ -1208,7 +1208,7 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 	out.claimedOwnership = allEqual
 	out.previousValue = observed
 	out.locator = locatorSummary(target)
-	return r.convergedOutcome(out, source)
+	return r.convergedOutcome(out, srcState)
 }
 
 // planDelivery performs the pre-write half of the write contract for one
@@ -1221,7 +1221,7 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 	ctx context.Context,
 	out deliveryOutcome,
 	target *imageflowv1alpha1.SubscriptionTarget,
-	source sourceState,
+	srcState sourceState,
 	ref imageflowv1alpha1.TargetReference,
 	gvk schema.GroupVersionKind,
 	kindAdapter delivery.KindAdapter,
@@ -1255,9 +1255,9 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 	var plan *delivery.Plan
 	var planErr error
 	if hasPaths {
-		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, source.desiredImage)
+		plan, planErr = pathAdapter.Plan(obj, target.ImageFields, srcState.desiredImage)
 	} else {
-		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, source.desiredImage)
+		plan, planErr = kindAdapter.Plan(obj, target.ContainerNames, srcState.desiredImage)
 	}
 	if planErr != nil {
 		var missing *delivery.ContainersNotFoundError
@@ -1292,10 +1292,10 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 	// ADR-005 §2 + ADR-012 §6 last-mile guard: the engine only ever writes a
 	// value matching the grammar of the selected imageReferenceFormat,
 	// whatever upstream produced.
-	if !referenceMatchesFormat(source.format, source.desiredImage) {
+	if !referenceMatchesFormat(srcState.format, srcState.desiredImage) {
 		out = out.failed(TargetReasonInvalidImageReference, fmt.Sprintf(
 			"resolved reference %q does not match the imageReferenceFormat=%s grammar; "+
-				"zero writes (ADR-005 §2, ADR-012 §6)", source.desiredImage, source.format))
+				"zero writes (ADR-005 §2, ADR-012 §6)", srcState.desiredImage, srcState.format))
 		return nil, obj, &out
 	}
 	return plan, obj, nil
@@ -1306,25 +1306,25 @@ func (r *SubscriptionDeliveryReconciler) planDelivery(
 // subscription).
 func (r *SubscriptionDeliveryReconciler) convergedOutcome(
 	out deliveryOutcome,
-	source sourceState,
+	srcState sourceState,
 ) deliveryOutcome {
 	out.setDesired = true
-	out.desiredImage = source.desiredImage
+	out.desiredImage = srcState.desiredImage
 	out.setObserved = true
-	out.observedImage = source.desiredImage
+	out.observedImage = srcState.desiredImage
 	out.setImageApplied = true
 	out.imageApplied = true
 	out.reason = TargetReasonApplied
-	if source.resolvedDigest != "" {
+	if srcState.resolvedDigest != "" {
 		// Tag/DigestWithTag: the fields hold the formatted reference; the
 		// message keeps the digest truth visible alongside it.
 		out.message = fmt.Sprintf("all declared image fields (%s) hold %s (digest %s) and are "+
 			"owned by this subscription's SSA field manager (ADR-008 exclusivity registry)",
-			out.locator, source.desiredImage, source.digest)
+			out.locator, srcState.desiredImage, srcState.digest)
 	} else {
 		out.message = fmt.Sprintf("all declared image fields (%s) hold digest %s and are owned by "+
 			"this subscription's SSA field manager (ADR-008 exclusivity registry)",
-			out.locator, source.digest)
+			out.locator, srcState.digest)
 	}
 	out.resetRetry = true
 	if out.delivered {

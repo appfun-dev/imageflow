@@ -3149,15 +3149,6 @@ func t11uNamedDeployment(name, image string, st appsv1.DeploymentStatus) *appsv1
 	return d
 }
 
-func t11uEntryByName(sub *imageflowv1alpha1.ImageSubscription, name string) *imageflowv1alpha1.TargetDeliveryStatus {
-	for i := range sub.Status.Targets {
-		if sub.Status.Targets[i].TargetRef.Name == name {
-			return &sub.Status.Targets[i]
-		}
-	}
-	return nil
-}
-
 // TestObserverSelectorTargetAggregateWorstCase is the table-driven observe
 // contract for selector targets (issue #82, ADR-014 decisions 5/8, spec v1.7
 // D7/D8): every matched object is determined freshly through the SAME

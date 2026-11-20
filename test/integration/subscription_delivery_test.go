@@ -164,6 +164,34 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 
 	// --- helpers ------------------------------------------------------------
 
+	// startDeliveryManager boots a delivery-only manager for one selector
+	// lane (t81s/t84): the T8 gate surface is written directly by the lane
+	// (t9iAuthorize), keeping the assertions on the match-and-deliver path.
+	// It returns the manager's cancel func and done channel for AfterAll.
+	startDeliveryManager := func(deliveryName string) (context.CancelFunc, chan struct{}) {
+		scheme := runtime.NewScheme()
+		Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
+		Expect(imageflowv1alpha1.AddToScheme(scheme)).To(Succeed())
+		mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+			Scheme: scheme,
+			Metrics: metricsserver.Options{
+				BindAddress: "0",
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(controller.RegisterSubscriptionDelivery(mgr, deliveryName,
+			controller.Options{Clock: clock.Real{}, Config: config.Config{}})).To(Succeed())
+		mgrCtx, mgrCancel := context.WithCancel(ctx)
+		mgrDone := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(mgrDone)
+			Expect(mgr.Start(mgrCtx)).To(Succeed())
+		}()
+		Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
+		return mgrCancel, mgrDone
+	}
+
 	// t9iAudit counts every mutating call of the reconciler under test. The
 	// zero-write guarantees (T8 gate, terminal Conflict, steady state) are
 	// assertions on these counters; blockStatus simulates a crash between
@@ -1157,30 +1185,8 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 		}
 
 		BeforeAll(func() {
-			scheme := runtime.NewScheme()
-			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-			Expect(imageflowv1alpha1.AddToScheme(scheme)).To(Succeed())
-			mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-				Scheme: scheme,
-				Metrics: metricsserver.Options{
-					BindAddress: "0",
-				},
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// Delivery-only manager: the T8 gate surface is written directly
-			// by the lane (t9iAuthorize), keeping the assertions on the #81
-			// match-and-deliver path.
-			Expect(controller.RegisterSubscriptionDelivery(mgr, t81sDeliveryName,
-				controller.Options{Clock: clock.Real{}, Config: config.Config{}})).To(Succeed())
-			var mgrCtx context.Context
-			mgrCtx, mgrCancel = context.WithCancel(ctx)
-			mgrDone = make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(mgrDone)
-				Expect(mgr.Start(mgrCtx)).To(Succeed())
-			}()
-			Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
+			// #81 match-and-deliver lane.
+			mgrCancel, mgrDone = startDeliveryManager(t81sDeliveryName)
 		})
 
 		AfterAll(func() {
@@ -1353,30 +1359,8 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 		}
 
 		BeforeAll(func() {
-			scheme := runtime.NewScheme()
-			Expect(clientgoscheme.AddToScheme(scheme)).To(Succeed())
-			Expect(imageflowv1alpha1.AddToScheme(scheme)).To(Succeed())
-			mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-				Scheme: scheme,
-				Metrics: metricsserver.Options{
-					BindAddress: "0",
-				},
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// Delivery-only manager, same discipline as the t81s lane: the T8
-			// gate is written directly by t9iAuthorize so the assertions stay
-			// on the #84 dynamic-set path.
-			Expect(controller.RegisterSubscriptionDelivery(mgr, t84DeliveryName,
-				controller.Options{Clock: clock.Real{}, Config: config.Config{}})).To(Succeed())
-			var mgrCtx context.Context
-			mgrCtx, mgrCancel = context.WithCancel(ctx)
-			mgrDone = make(chan struct{})
-			go func() {
-				defer GinkgoRecover()
-				defer close(mgrDone)
-				Expect(mgr.Start(mgrCtx)).To(Succeed())
-			}()
-			Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
+			// #84 dynamic-set lane, same discipline as the t81s lane.
+			mgrCancel, mgrDone = startDeliveryManager(t84DeliveryName)
 		})
 
 		AfterAll(func() {

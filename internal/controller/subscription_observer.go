@@ -589,8 +589,41 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 		return
 	}
 
-	verdicts := make([]selectorObjectVerdict, 0, len(names))
-	skipped := 0
+	verdicts, skipped, abort := r.observeSelectorVerdicts(ctx, target, names, entry.DesiredImage, pass)
+	if abort {
+		return
+	}
+	if len(verdicts) == 0 && skipped > 0 {
+		// Every matched object was unobservable this pass: keep the persisted
+		// aggregate (the engine's membership lane converges the match set).
+		return
+	}
+
+	agg := foldSelectorRollout(out, entry, len(names), verdicts)
+	foldSelectorHealth(out, entry, verdicts)
+	foldSelectorEvalResults(out, target, verdicts, pass)
+
+	pass.outcomes = append(pass.outcomes, *out)
+	if agg == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
+		// Poll fallback: an in-flight aggregate rollout is re-judged on a
+		// bounded cadence until it reaches a terminal result.
+		pass.requeue = waitingStateRequeue
+	}
+}
+
+// observeSelectorVerdicts determines every matched object freshly through the
+// SAME per-object pipeline as named targets and returns the per-object
+// verdicts. abort=true means a transient observation failure: NO aggregate
+// verdict this pass — partial knowledge must not move the aggregate; the
+// errors bubble to the reconcile result (backoff + full re-judgement).
+func (r *SubscriptionObserverReconciler) observeSelectorVerdicts(
+	ctx context.Context,
+	target *imageflowv1alpha1.SubscriptionTarget,
+	names []string,
+	desiredImage string,
+	pass *observerPass,
+) (verdicts []selectorObjectVerdict, skipped int, abort bool) {
+	verdicts = make([]selectorObjectVerdict, 0, len(names))
 	for _, name := range names {
 		objectRef := target.TargetRef
 		objectRef.Name = name
@@ -605,7 +638,7 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 			Status: imageflowv1alpha1.ImageSubscriptionStatus{
 				Targets: []imageflowv1alpha1.TargetDeliveryStatus{{
 					TargetRef:    objectRef,
-					DesiredImage: entry.DesiredImage,
+					DesiredImage: desiredImage,
 				}},
 			},
 		}
@@ -625,7 +658,7 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 			// partial knowledge must not move the aggregate. The errors bubble
 			// to the reconcile result (backoff + full re-judgement).
 			pass.errs = append(pass.errs, objOut.errs...)
-			return
+			return nil, 0, true
 		}
 		verdict := objOut.rollout
 		if verdict == "" {
@@ -652,12 +685,15 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 			evalErrReason: objOut.evalErrReason,
 		})
 	}
-	if len(verdicts) == 0 && skipped > 0 {
-		// Every matched object was unobservable this pass: keep the persisted
-		// aggregate (the engine's membership lane converges the match set).
-		return
-	}
+	return verdicts, skipped, false
+}
 
+// foldSelectorRollout folds the per-object verdicts worst-case with the
+// engine's EXPORTED ranking — never a private re-derivation (ADR-014
+// decision 5) — and plans the aggregate rollout transition. Returns the
+// folded aggregate rollout.
+func foldSelectorRollout(out *observerOutcome, entry imageflowv1alpha1.TargetDeliveryStatus,
+	matched int, verdicts []selectorObjectVerdict) imageflowv1alpha1.RolloutStatus {
 	// Worst-case fold with the engine's EXPORTED ranking — never a private
 	// re-derivation (ADR-014 decision 5). The legal empty match set
 	// aggregates to Unknown (decision 8, spec v1.7 D7): Unknown outranks
@@ -679,12 +715,17 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 		// surface; the observer does not race it.
 	default:
 		out.transition = &rolloutTransition{from: entry.RolloutStatus, to: agg}
-		out.detMessage = selectorAggregateDetMessage(len(names), verdicts, agg)
+		out.detMessage = selectorAggregateDetMessage(matched, verdicts, agg)
 	}
+	return agg
+}
 
-	// Health folds worst-case (Unhealthy > Unknown > Healthy) over the object
-	// verdicts; when no object has a health opinion at all (evaluator
-	// deferred / non-native class) the aggregate keeps none — honestly.
+// foldSelectorHealth folds health worst-case (Unhealthy > Unknown > Healthy)
+// over the object verdicts; when no object has a health opinion at all
+// (evaluator deferred / non-native class) the aggregate keeps none —
+// honestly.
+func foldSelectorHealth(out *observerOutcome, entry imageflowv1alpha1.TargetDeliveryStatus,
+	verdicts []selectorObjectVerdict) {
 	if hv, ok := aggregateSelectorHealth(verdicts); ok {
 		out.health = hv.status
 		out.healthReason = hv.reason
@@ -693,10 +734,14 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 			out.healthTransition = &healthTransition{from: entry.HealthStatus, to: hv.status}
 		}
 	}
+}
 
-	// CUE evaluation results for the StatusPolicyEvaluated Condition (T4,
-	// ADR-013 D6): one aggregated result per selector target — success only
-	// when every object's evaluation succeeded.
+// foldSelectorEvalResults folds the CUE evaluation results for the
+// StatusPolicyEvaluated Condition (T4, ADR-013 D6): one aggregated result
+// per selector target — success only when every object's evaluation
+// succeeded.
+func foldSelectorEvalResults(out *observerOutcome, target *imageflowv1alpha1.SubscriptionTarget,
+	verdicts []selectorObjectVerdict, pass *observerPass) {
 	if target.StatusPolicyRef != nil && hasCUEKeys(target.StatusPolicyRef) {
 		result := targetEvalResult{ref: target.TargetRef, success: true}
 		for _, v := range verdicts {
@@ -726,13 +771,6 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 				break
 			}
 		}
-	}
-
-	pass.outcomes = append(pass.outcomes, *out)
-	if agg == imageflowv1alpha1.RolloutProgressing && pass.requeue == 0 {
-		// Poll fallback: an in-flight aggregate rollout is re-judged on a
-		// bounded cadence until it reaches a terminal result.
-		pass.requeue = waitingStateRequeue
 	}
 }
 
