@@ -1,7 +1,7 @@
 # ADR-009：测试策略与 Allure 可追溯性基线
 
-- 状态：Accepted
-- 日期：2026-10-16
+- 状态：Amended（2026-11-20，issue #89）
+- 日期：2026-10-16（初版）；2026-11-20（修订）
 - 决策人：项目负责人（grilling 第 1–5 轮全部采纳）
 - 关联：Spec issue #1（`Spec: ImageFlow v1 — 镜像流目录、订阅投递与结果观察（vanilla Kubernetes）`）、ADR-001~008、TESTING.md
 
@@ -84,6 +84,7 @@ test/
 - 所有 commit 的测试必须至少属于一个 testify/suite 并生成 Allure 层级。
 - AllureID + Spec / TMS / User Story 链接仅对「追踪到 GitHub issue 或 Spec」的测试强制。
 - 纯内部工具 / 辅助测试可省略 link，但需用 `allure.WithDescription` 说明用途。
+- **internal/controller 纯 stdlib 单测 lane 豁免（2026-11-20 修订，issue #89）**：`internal/controller/` 包内存量单测（纯 `testing` + 表驱动，无 testify/suite、无 Allure 层级）豁免于本条第一款「必须至少属于一个 testify/suite 并生成 Allure 层级」的强制要求。该 lane 的可追溯性由两个承载物承担：TESTING.md 中各版本的测试矩阵节（用例 ↔ 断言对照表，随 ticket 逐节登记），以及测试代码注释中的决策编号 citation（ADR-### / issue #）。v1.7（#78–#86）新增的约 2400 行 `internal/controller/` 单测沿用同一惯例；后续若要对该 lane 引入 testify/suite + Allure 层级，须先修订本条款再动测试代码。
 
 ## 备选方案
 
@@ -110,3 +111,9 @@ test/
 - `allure-go` 具体 pin 版本与 `go.mod` 依赖解析细节 —— 随首个示例测试一起落地时确定。
 - CI 中 Allure 结果的上传与失败策略（是否阻断合并、历史趋势存储）—— 后续 DevOps 决策。
 - Allure Testplan 过滤（`ALLURE_TESTPLAN_PATH`）在 PR 流水线中的启用方式 —— 后续细化。
+
+## 修订记录
+
+| 日期 | 变更 | 理由 |
+|------|------|------|
+| 2026-11-20 | Amended：§7 增补 internal/controller 纯 stdlib 单测 lane 的追溯豁免/过渡说明，追溯承载物 = TESTING.md 测试矩阵 + 决策编号 citation | issue #89：存量 19 个 `internal/controller/*_test.go`（含 v1.7 新增约 2400 行）为纯 `testing` 表驱动，与 §7 原第一款字面冲突；经拍板走豁免/过渡路线，不强制迁移、不开迁移票 |

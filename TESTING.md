@@ -498,6 +498,12 @@ T12 之前已落地的 `test/integration/` 与 `test/e2e/` Ginkgo 套件继续�
 - 既有 Ginkgo 用例的重构可分批进行，不必一次性全量迁移。
 - 在 Allure 报告未覆盖既有 Ginkgo 套件期间，可追溯性继续由 `docs/scenario-map.md` 与 ticket evidence comment 承担。
 
+同理，`internal/controller/` 包的纯 stdlib 单测 lane（纯 `testing` + 表驱动，无 testify/suite、无 Allure 层级）按 [ADR-009 §7](docs/adr/ADR-009-testing-strategy.md) 的豁免/过渡条款继续维护：
+
+- 该 lane 的可追溯性由本文件各版本测试矩阵节（用例 ↔ 断言对照表）与测试代码注释中的决策编号 citation（ADR-### / issue #）承担；
+- 新增 `internal/controller/` 单测沿用同一惯例，直至 ADR-009 修订收回该豁免；
+- 若要对存量单测引入 testify/suite + Allure 层级，须先修订 ADR-009 §7，再分批迁移。
+
 ## BuildRun Watcher 测试矩阵（v1.1，T7）
 
 BuildRun Watcher 测试覆盖三层，对齐 ADR-009 + spec §Testing Decisions。

@@ -14,7 +14,7 @@
 | Workload Kind、Deployment、StatefulSet、DaemonSet | ADR-006 | 内建 Workload 首批 Kind | Accepted |
 | Registry、Quay、OCI | ADR-007 | 外部 Registry = Quay | Accepted |
 | 投递语义、字段级独占、最坏态聚合、Superseded | ADR-008 | 投递语义 | Accepted |
-| 测试策略、Allure、可追溯性 | ADR-009 | 测试策略与 Allure 可追溯性基线 | Accepted |
+| 测试策略、Allure、可追溯性 | ADR-009 | 测试策略与 Allure 可追溯性基线 | Amended (v1.7) |
 | Metrics、指标暴露、HTTPS、authn/authz | ADR-010 | 指标暴露形态 | Amended (v1.4) |
 | BuildRun Watcher、注解语法、Feature Gate | ADR-011 | BuildRun Watcher v1.1 实现契约 | Accepted |
 | imageReferenceFormat、写入格式、枚举 | ADR-012 | imageReferenceFormat 枚举 | Accepted |
@@ -33,7 +33,7 @@
 | v1.4 | ADR-010 修订 (Secure Metrics) |
 | v1.5 | ADR-013 修订 (Native Health Determination) |
 | v1.6 | ADR-006 修订 (Job/CronJob 内建 Kind) |
-| v1.7 | ADR-014 (Label Selector 多目标 / Selector Target) |
+| v1.7 | ADR-014 (Label Selector 多目标 / Selector Target)；ADR-009 修订（internal/controller 纯单测 lane 豁免，#89） |
 
 ## 使用说明
 
