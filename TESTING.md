@@ -978,6 +978,40 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **NoMatches/MatchLimitExceeded 事件断言同时钉住类型与文案**：`type|message` 行断言 Warning 类型 + 引擎消息的稳定子串（`matched zero live objects`/`legal empty match set`/`ADR-014 decision 8`；`over the hard limit of 3`/`--selector-match-limit`/`remaining 1 are NOT delivered`），文案漂移会 RED；
 - **本机未实跑声明**：本机 Podman socket 拒连、kind 集群无法创建（同 v1.7-02/07/08 小节），本车道**首跑在 CI/有 Podman 的环境**；本机验收为编译级证据——`go build ./...`、`go vet ./test/e2e/...`、`gofmt -l .` 全清洁，`go test -c ./test/e2e/ -o /dev/null` 编译通过，`go test ./test/e2e/ -run xxx -count=1` 返回 `ok ... [no tests to run]`。
 
+## Argo Rollout 投递支持（v1.8-01，#92）
+
+### Adapter 单元测试（`internal/delivery/delivery_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestRolloutAdapterIsRegistered` | `argoproj.io/v1alpha1, Kind=Rollout` 精确 GVK 命中内建注册表（D2：init 注册，零引擎改动） | 已实现 |
+| `TestBuiltInPlanDeclaresOnlyTheNamedContainerImages`（Rollout 行） | 表驱动沿用五内建 Kind 同一缝：Rollout fixture 的 Plan 只声明具名容器字段，路径为标准 apply-nest `.spec.template.spec.containers`（与 Deployment 同形） | 已实现（表加行） |
+| `TestClassifyServesFirstBatchAndRefusesTheRest`（Rollout 行） | Classify 对 Rollout 走 KindAdapter 车道；不新增分类枚举 | 已实现（表加行） |
+
+### 引擎单元测试（`internal/controller/subscription_delivery_controller_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySSAConflictEscalatesForceOnce` | 首发不 force 遇 409（foreign manager `rollouts-controller` 持有 image 字段，上游 argo/argo-rollouts#3281 形态）→ 升级 force 重试**恰一次**（applies=2：conflict 1 + success 1）→ digest 落盘且字段归订阅 field manager 所有；恰 1 条 Warning `ApplyConflictEscalated` 事件**命名目标与冲突 manager**；值变更投递的双命名空间 ImageApplied 审计不变（ADR-015 决策 9 先礼后兵） | 已实现 |
+| `TestSubscriptionDeliverySSAConflictPersistentFailsHonestly` | 强制重试仍 409（budget 1/reconcile pass 用尽）：如实 Failed（`ApplyFailed`、消息承认 forced retry 预算耗尽）、**无 retry bookkeeping**（RetryCount=0，非 transient）、正常等待 requeue（`waitingStateRequeue`）而非 workqueue 退避风暴；对象零写入；`failures{apply_error}`=1；升级事件与失败 Warning 各 1 条 | 已实现 |
+| `TestSubscriptionDeliveryDeliversToNamedRollout` | named 形态端到端：一次 apply + 一次 status write，digest 落盘、字段归订阅 manager、Applied 条目引用 Rollout kind | 已实现 |
+| `TestSubscriptionDeliverySelectorFanOutToRollouts` | selector 形态自动通用（v1.7 路径零改动）：resolver 以 Rollout selector 键被查一次，2 成员各一次 SSA 写入，单条 selector 聚合 entry（matched=2、Rollout kind 回显） | 已实现 |
+
+### envtest 集成（`internal/controller/subscription_delivery_rollout_envtest_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestRolloutDeliveryEnvtestSSAWritePath`（lane A） | 共享环境装 vendored Rollout CRD（`test/testdata/thirdparty/argoproj.io_rollouts.yaml`，结构式 schema、containers 为 name 键 map-list）而**无 rollouts-controller**：CR 经真实 API server admission 原样往返 pod-template 巢；一次投递经真实 SSA 写入 digest 且 managedFields 含订阅 manager 的 Apply 条目；Applied 条目 + ImageApplied 事件；第二次 pass 稳态零写入（rollout 与订阅的 resourceVersion 均不变） | 已实现（本机 `KUBEBUILDER_ASSETS` 实跑通过） |
+| `TestRolloutDeliveryEnvtestKindNotInstalled`（lane B） | 专用环境只装 imageflow CRD（无 Rollout CRD）：named Rollout target 的 REST-mapping miss 如实映射为 `KindNotInstalled` 等待态（spec D9，不新增枚举），正常等待 requeue、零写入 | 已实现（本机实跑通过） |
+
+### 覆盖率要点
+
+- **先礼后兵的预算语义**：force 升级只在「首发 409」单点发生，预算恰为 1/reconcile pass（ADR-015 决策 9）；orphan 接管（首发即 force）与升级重试共用同一 `IsConflict` 错误车道——持续冲突一律诚实 Failed，不做超预算重试；
+- **升级审计无 reasonChanged 门控**：每次真实强制接管都发 Warning（真实集群 event correlator 聚合为 series）；稳态成功 churn 中每次升级都对应真实 ownership 争夺，必须可见；失败词汇表与指标基数均不增（复用 `TargetReasonApplyFailed`/`failureLabelApplyError`）；
+- **foreign vs other-subscription**：首发 force 仍只对 `OwnershipOtherSubscription`（孤儿接管，v1.7 既有语义）触发；foreign manager（如 rollouts-controller）首发展望 409 升级车道——冲突竞态重分类（terminal Conflict、零写入）优先级仍高于强制重试；
+- **RBAC 增量**：`+kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch`（ADR-015 决策 8），`make manifests` 重生成 `config/rbac/role.yaml` 纯增量一个 rule 块；
+- **selector 形态零改动**：resolver 与 match-informer 通道是 GVK 无关的（v1.7 #81 车道），Rollout selector 仅需注册表条目，单测与 envtest 双侧证明；
+- **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑），本票无 e2e 车道新增；`test/integration` webhook lane 既有环境限制同 v1.7-02 小节说明。
 ## Argo Rollout 观察与完成判定（v1.8-02，#93）
 
 本票（ADR-015，docs/spec/imageflow-v1.8-argo-rollouts-support.md D4/D5/D6/D10）把 Argo Rollout（`argoproj.io/v1alpha1`）
