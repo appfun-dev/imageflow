@@ -1908,6 +1908,207 @@ func TestSupersededEventPlannedOnLatestWins(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// v1.7-07 #84 (unit): per-object Superseded for selector targets (ADR-014
+// decision 10, spec D9). The record flip stays aggregate latest-wins; the
+// per-object audit rides one dual-namespace Event per object actually
+// overwritten by the newer tag. Label-removed objects keep their last image
+// and are never named; a supersede pass that overwrote zero objects still
+// audits the aggregate flip honestly on the subscription side.
+// ---------------------------------------------------------------------------
+
+// t11uSelectorRef is the selector-shape target reference the per-object
+// supersede lane keys on (LabelSelector set, Name empty).
+func t11uSelectorRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uAppsAPI, Kind: kindDeployment,
+		Namespace:     t11uNamespace,
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+	}
+}
+
+// t11uObjectNameRef is the per-object name-shape reference the engine's
+// fan-out carries in each object outcome.
+func t11uObjectNameRef(name string) imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uAppsAPI, Kind: kindDeployment,
+		Namespace: t11uNamespace, Name: name,
+	}
+}
+
+// t11uObjectOutcome builds one per-object fan-out outcome: delivered marks an
+// object actually overwritten by the newer tag in this pass; a conflict-skipped
+// or converged object carries delivered=false (zero value-changing writes).
+func t11uObjectOutcome(name string, delivered bool) deliveryOutcome {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind(kindDeployment))
+	obj.SetNamespace(t11uNamespace)
+	obj.SetName(name)
+	return deliveryOutcome{ref: t11uObjectNameRef(name), delivered: delivered, targetObject: obj}
+}
+
+func TestSupersededEventsPerObjectForSelectorTargets(t *testing.T) {
+	selectorRef := t11uSelectorRef()
+	// In-flight record: delivery of RefA never finished its rollout.
+	oldRecord := t11uSeededRecord(selectorRef, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute))
+	// The superseding pass delivers RefB.
+	newRecord := t11uSeededRecord(selectorRef, t11uRefA, t11uRefB, t11uStart)
+	commonFragments := []string{
+		"latest-wins", "ADR-008", "ADR-014 decision 10", "Superseded",
+		t11uRefA, t11uRefB, t11uSourceLogical,
+		"no retry", "no cross-target rollback",
+	}
+	assertFragments := func(t *testing.T, msg string, frags []string) {
+		t.Helper()
+		for _, want := range frags {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("message %q missing audit fragment %q", msg, want)
+			}
+		}
+	}
+
+	t.Run("every overwritten object gets its own dual-namespace event", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref: selectorRef,
+			objectOutcomes: []deliveryOutcome{
+				t11uObjectOutcome("web-1", true),
+				t11uObjectOutcome("web-2", true),
+			},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 2 {
+			t.Fatalf("planned events = %+v, want one per overwritten object", transition.events)
+		}
+		for i, want := range []string{"web-1", "web-2"} {
+			ev := transition.events[i]
+			if ev.eventType != "Normal" || ev.reason != EventReasonDeliverySuperseded {
+				t.Fatalf("event %d = %+v, want Normal %s", i, ev, EventReasonDeliverySuperseded)
+			}
+			if !ev.targetSide || ev.targetObject == nil {
+				t.Fatalf("event %d must ride the overwritten object (dual namespace): %+v", i, ev)
+			}
+			rode, ok := ev.targetObject.(*unstructured.Unstructured)
+			if !ok || rode.GetName() != want {
+				t.Fatalf("event %d rides %+v, want the %s object", i, ev.targetObject, want)
+			}
+			assertFragments(t, ev.message, append(commonFragments,
+				"apps/v1 Deployment "+t11uNamespace+"/"+want))
+		}
+	})
+
+	t.Run("a label-removed object is never named superseded", func(t *testing.T) {
+		// web-1 left the match set before RefB arrived: the fan-out only
+		// reports web-2, so only web-2 may be recorded as overwritten.
+		outcomes := []deliveryOutcome{{
+			ref:            selectorRef,
+			objectOutcomes: []deliveryOutcome{t11uObjectOutcome("web-2", true)},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want exactly the web-2 supersede", transition.events)
+		}
+		ev := transition.events[0]
+		assertFragments(t, ev.message, append(commonFragments,
+			"apps/v1 Deployment "+t11uNamespace+"/web-2"))
+		if strings.Contains(ev.message, "web-1") {
+			t.Fatalf("the departed object must not be named superseded: %q", ev.message)
+		}
+	})
+
+	t.Run("a conflict-skipped object was not overwritten", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref: selectorRef,
+			objectOutcomes: []deliveryOutcome{
+				t11uObjectOutcome("web-1", true),
+				t11uObjectOutcome("web-2", false), // conflict skip: zero writes
+			},
+		}}
+		transition := &deliveryTransition{}
+		mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want only the overwritten web-1", transition.events)
+		}
+		ev := transition.events[0]
+		assertFragments(t, ev.message, append(commonFragments,
+			"apps/v1 Deployment "+t11uNamespace+"/web-1"))
+		if strings.Contains(ev.message, "web-2") {
+			t.Fatalf("the conflict-skipped object must not be named superseded: %q", ev.message)
+		}
+	})
+
+	t.Run("zero overwritten objects still audit the aggregate flip", func(t *testing.T) {
+		outcomes := []deliveryOutcome{{
+			ref:            selectorRef,
+			objectOutcomes: []deliveryOutcome{t11uObjectOutcome("web-2", false)},
+		}}
+		transition := &deliveryTransition{}
+		merged := mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{oldRecord},
+			[]imageflowv1alpha1.DeliveryResult{newRecord},
+			5, outcomes, transition,
+		)
+		if merged[1].RolloutResult != imageflowv1alpha1.RolloutSuperseded {
+			t.Fatalf("aggregate latest-wins flip must stay, got %+v", merged[1])
+		}
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want the honest aggregate fallback", transition.events)
+		}
+		ev := transition.events[0]
+		if ev.targetSide || ev.targetObject != nil {
+			t.Fatalf("the aggregate-only supersede must stay subscription-side: %+v", ev)
+		}
+		assertFragments(t, ev.message, append(commonFragments, "zero"))
+	})
+
+	t.Run("the named form keeps its per-target event verbatim", func(t *testing.T) {
+		// The named shape is the regression anchor (full vocabulary pinned by
+		// TestSupersededEventPlannedOnLatestWins): one event, target-side,
+		// and it must NOT mutate into the per-object wording.
+		named := t11uDeployRef()
+		targetObj := &unstructured.Unstructured{}
+		targetObj.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind(kindDeployment))
+		targetObj.SetNamespace(t11uNamespace)
+		targetObj.SetName(t11uDeployName)
+		outcomes := []deliveryOutcome{{ref: named, targetObject: targetObj}}
+		transition := &deliveryTransition{}
+		mergeRecentDeliveries(
+			[]imageflowv1alpha1.DeliveryResult{t11uSeededRecord(named, t11uRefB, t11uRefA, t11uStart.Add(-time.Minute))},
+			[]imageflowv1alpha1.DeliveryResult{t11uSeededRecord(named, t11uRefA, t11uRefB, t11uStart)},
+			5, outcomes, transition,
+		)
+		if len(transition.events) != 1 {
+			t.Fatalf("planned events = %+v, want exactly one", transition.events)
+		}
+		ev := transition.events[0]
+		if !strings.HasPrefix(ev.message, "Delivery superseded (latest-wins, ADR-008):") {
+			t.Fatalf("named message must stay verbatim: %q", ev.message)
+		}
+		if !ev.targetSide || ev.targetObject == nil {
+			t.Fatalf("named event must stay dual-namespace: %+v", ev)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Engine steady state preserves the observer's rollout verdict (T9 mergeEntry
 // contract — rolloutSet == nil keeps the persisted value; R3: reasons stay
 // engine-owned on both sides)

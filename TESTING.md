@@ -869,6 +869,36 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **observer 与 engine-owned 终态**：`NoMatches`/`MatchLimitExceeded` 均列入 observer 的 selector 门禁与 `isEngineOwnedReason` 冻结集——observer 不改写、不与 engine 强制的 rollout 拉锯；成员缩回限内后 engine 翻转 Reason，observer 车道自动恢复观察（Failed 是可 transition 态，无卡死）；#83 时代 `observeTarget` 内的结构式守卫（`LabelSelector != nil && Name == ""` 跳过）保留为防御；v1.7-04 的「永不出现 selector 形态条目」断言自 #82 起被完全更替——selector target 恒一条聚合 entry；
 - **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑）；`test/integration` webhook lane `[BeforeAll]` 超时与 Manager metrics 单跑 flake 为本机既有环境问题（同 v1.7-02 小节说明）。
 
+## 动态集行为：摘 label 保留 + per-object Superseded（v1.7-07，#84）
+
+### 引擎单元测试（`internal/controller/subscription_delivery_controller_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySelectorDynamicSetLifecycle` | 单订阅动态集全生命周期六阶段（ADR-014 决策 3/10、spec D9）：phase 0 合法空集零写入（matched=0、NoMatches）；phase 1 成员加入 → 下一 pass 立即投递当前 digest（applies=1、web-1=digestA、非成员零写入、record 1 条 in-flight、ImageApplied 双命名空间）；phase 2 第二个成员加入已收敛目标 → 只投递新成员、同 digest 不翻转历史（窗口 2 条均 digestA 非 Superseded）；phase 3 web-1 摘 label → 镜像保留（不回收）、matched 缩至 1、零 churn 零事件；phase 4 新 tag → 只覆盖集内 web-2（web-1 保 digestA、web-3 未入集不动）、聚合 entry digestB/Progressing、窗口 [digestB in-flight, digestA Superseded ×2]（聚合 latest-wins）、DeliverySuperseded 事件 4 条（2 翻转 × web-2 × 双命名空间）全部点名 web-2 且无一提及 web-1；phase 5 tag 移动后新成员加入 → 立即获得**当前** digestB（web-2 零写入）、同 image 不翻转（窗口 4 条：2 条 digestB 非 Superseded + 2 条 Superseded 尾部保持终态）、事件仅 web-3 ImageApplied 双命名空间 | 已实现 |
+
+### 状态写入器单元测试（`internal/controller/subscription_observer_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSupersededEventsPerObjectForSelectorTargets` | per-object Superseded 纯函数语义（`mergeRecentDeliveries`→`supersededEvents`，ADR-014 决策 10、spec D9）：selector 形态记录翻转保持聚合 latest-wins 不变；每个**实际被新 tag 覆盖写入**的对象（objectOutcomes.delivered）各得一条 DeliverySuperseded 事件，targetSide+targetObject 骑对应对象（双命名空间），消息含 latest-wins/ADR-008/ADR-014 decision 10/对象 ref/old+new image/源/no retry/no cross-target rollback；摘 label 对象不在本 pass objectOutcomes → 永不被点名（消息不含其名字）；冲突跳过对象（delivered=false）不记；零覆盖翻转（如 conflict 车道记录）→ 恰 1 条订阅侧聚合事件（!targetSide）诚实声明 zero overwritten；named 形态回归锚：恰 1 事件、targetSide、消息前缀逐字 `Delivery superseded (latest-wins, ADR-008):` 不突变 | 已实现 |
+
+> 既有回归锚继续钉住 named 行为：`TestSupersededEventPlannedOnLatestWins`（消息词汇全量）与 `subscription_delivery_format_envtest_test.go` 的双命名空间计数（==2）。
+
+### envtest 集成（`test/integration/subscription_delivery_test.go`，t84 lane）
+
+- `t84-envtest-dynamic-set-label-removal-retention-and-per-object-superseded`（独立 Ordered Context，production registrar `subscription-delivery-t84`）：初始扇出双成员 digestA/matched=2；**摘 web-1 label 经服务端过滤 informer 的 DELETE 通道驱动 reconcile**（apiserver 对离开 selector 的对象发携带 PrevObject 旧 labels 的 DELETED 事件，`subsForMatchedObject` 客户端复核通过 → 订阅入队）→ matched 缩至 1、Reason 保持 Applied、web-1 镜像保留 digestA 不回收；retag digestC → 只覆盖集内 web-2、web-1 保 digestA 不算 Superseded、窗口首条 digestC、digestA 记录翻转 Superseded；DeliverySuperseded 事件（按 t84-stream 过滤）≥2 条（订阅侧+对象侧）、全部点名 web-2 无一提及 web-1、对象侧副本骑 web-2 Deployment（双命名空间实证）；tag 移动后新建 web-3 → 立即获得当前 digestC、matched=2。本机以 `KUBEBUILDER_ASSETS`（`bin/k8s/1.33.0-darwin-arm64`）实跑通过（7.2s）。
+
+### 覆盖率要点
+
+- **per-object Superseded 的实现位置**：`internal/controller/subscription_delivery_status.go` 新增 `supersededEvents`（`mergeRecentDeliveries` 翻转处调用）：named 形态原样委托既有 `supersededEvent`（T11 词汇逐字不变）；selector 形态从同 canonical key 聚合 outcome 的 `objectOutcomes` 过滤 `delivered==true`（=实际被新 tag 覆盖写入），每对象一条事件骑该对象；记录翻转本身（聚合 latest-wins）与翻转条件完全不动；
+- **「覆盖写入」的判定**：`objectOutcomes[i].delivered` 仅在值变更 apply 落地时为 true（冲突跳过、已收敛零写入、Job immutable 特例均为 false）——Superseded 以**实际投递**为准（ADR-008），与决策 10 一致；
+- **摘 label 不记 Superseded 的机制**：退出匹配集的对象根本不出现在本 pass 的 `objectOutcomes` 里（resolver 只报告当前成员），故任何 supersede 事件都点不到它的名；其已写镜像不回收（无 rollback 路径存在）、仅从 matched 计数与聚合折叠中消失；零覆盖翻转（全员冲突/收敛时聚合记录仍按 latest-wins 翻转）走订阅侧兜底事件，明确声明 zero objects overwritten；
+- **新成员立即投递**：引擎侧无新代码——#81 的 informer 事件通道（ADD/UPDATE/DELETE → `subsForMatchedObject` → 入队）+ 每 pass 全量重解析匹配集已保证「下次 reconcile 投递当前 desired image」；本票用单测 phase 0→1/1→2/4→5 与 t84 lane（tag 移动后新建对象直接拿 digestC）把端到端行为钉死，未发现缺口，故未补实现；
+- **事件词汇零新增**（与 #85 并行约束）：per-object 审计复用既有 `EventReasonDeliverySuperseded`/Normal/1024 截断与双命名空间发射机制（`emitPlannedEffects`），未新增指标、未动 `delivery_metrics.go` 标签集；
+- **watch DELETE 语义实证**：t84 lane 首次用真实 API server（1.33）证明摘 label 触发链无缺口——DELETED 事件携旧（匹配时）labels 到达客户端复核，`subscription_delivery_watches_test.go` 的「non-matching labels map nothing」pin 与该行为一致，无需修改 watch 实现；
+- **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑）；`test/integration` webhook lane `[BeforeAll]` 超时为本机既有环境问题（同 v1.7-02 小节说明）。
+
 ## Metrics 基数收口（v1.7-08，#85）
 
 ### 基数回归单元测试（`internal/controller/metrics_cardinality_test.go`）
