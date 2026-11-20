@@ -59,6 +59,20 @@
 - **TTL GC**：场景 16 的 kind/envtest 腿 + `t4-ttl-gc-deletes-successful-mapping-after-injected-clock-passes-success-ttl`、
   `t4-ttl-gc-applies-uniformly-to-the-import-task-kind`、`t7-ttl-gc-collects-completed-import-tasks-with-the-t4-machinery`（envtest）。
 
+## v1.7 Selector Target 场景（spec #77 / ADR-014，非 §15 编号）
+
+v1.7 引入 Selector Target（ADR-014），新增五个验收场景，全部由 `test/e2e/selector_e2e_test.go` 的
+t86 车道承载（`Describe(..., Label("t86"), Ordered)`，双命名空间，manager 带 `--selector-match-limit=3`）。
+Allure 标注：AllureID **IF-86** · TMS **IF-86** / **SPEC-77**（issues/86、issues/77）。
+
+| 场景 | 命名用例（kind · test/e2e/selector_e2e_test.go） | 覆盖要点 |
+|---|---|---|
+| 多匹配投递 | `t86-e2e-selector-fanout-delivers-one-digest-to-every-matched-deployment` | 3 成员（=limit，等值合法边界）全部持有 digest；status 仅一条聚合条目（name 空、selector 原样回显、`matchedObjects=3`、Reason=Applied）；observer 折叠 Succeeded；每对象双命名空间 ImageApplied 审计 |
+| 扩容拾取 | `t86-e2e-scale-out-new-member-picks-up-current-digest-without-a-trigger` | 新建同标签 Deployment 被服务端过滤 informer 拾取（无轮询、无人工触发），自动拿到当前 digest；`matchedObjects` 2→3；observer 对扩大集合重新折叠回 Succeeded |
+| 摘 label 保留 | `t86-e2e-label-removal-retains-image-shrinks-matched-never-supersedes-departed` | 摘标签后 `matchedObjects` 3→2、Reason 保持 Applied；离开者镜像保留不回收且 managedFields 仍持有订阅 field manager；全程无 Superseded；retag 只覆盖在册成员（在途翻转竞态由 unit 假时钟 + envtest t84 车道确定性覆盖） |
+| 零匹配（NoMatches） | `t86-e2e-zero-match-reports-unknown-nomatches-warning-and-unblocks-siblings` | ghost selector 条目 `matchedObjects=0` + Unknown/NoMatches；订阅侧恰一条 Warning；聚合保持 Unknown 不降级 Failed（ADR-014 决策 8）；具名 sibling 正常治愈、不被阻塞 |
+| 超限（MatchLimitExceeded） | `t86-e2e-match-limit-breach-delivers-sorted-prefix-and-reports-failed` | 4 成员 > limit 3：仅字典序前缀投递，第 4 个零写入（managedFields 无订阅 field manager 为证）；`matchedObjects=4` 报全量观测数；条目与聚合均 Failed + MatchLimitExceeded；Warning 消息含 limit 与 `--selector-match-limit` 指引 |
+
 ## 附加证据（CI 跳过、可选启用）
 
 设置 `IMAGEFLOW_E2E_REGISTRY_HOST/_REPO/_TAG`（+可选 `_PULL_SECRET/_REGISTRY_CA/_PUSH_USERNAME/_PUSH_PASSWORD`）后，

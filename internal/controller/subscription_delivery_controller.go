@@ -703,7 +703,7 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 			// seen[targetKey] gate above.
 			outcomeKey := imageflowv1alpha1.CanonicalTargetKey(outcome.ref)
 			if seenOutcomes[outcomeKey] {
-				log.FromContext(ctx).V(1).Info("skipping duplicate per-object delivery outcome",
+				log.FromContext(ctx).V(1).Info("skipping duplicate target outcome (defensive key-uniqueness guard)",
 					"subscription", sub.Namespace+"/"+sub.Name,
 					"target", authz.FormatTarget(outcome.ref))
 				continue
