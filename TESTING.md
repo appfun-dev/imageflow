@@ -768,6 +768,8 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 | `TestSubscriptionDeliverySelectorLabelRemovalPrunesEntryKeepsImage` | 摘 label 后条目被 stale-pruning 剪除、已写镜像保留（不回收、零回滚写入）、records append-only 不变（ADR-014 决策 3） | 已实现 |
 | `TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject` | 逐对象 T8 冻结契约：预置 web-1 name 形态 Forbidden 条目 → 该对象零写入、条目 DeepEqual 保留，web-2 正常投递 | 已实现 |
 
+> **#82 更替说明**：上表中涉及 status 条目形态的断言（FanOut 的「逐对象 name 形态条目」、ZeroMatches 的「零条目」、Overlap 的「1 个条目」、LabelRemoval 的「条目剪除」、Forbidden 的「不出现 selector 形态条目」）已由 v1.7-05 的聚合语义更替（见下节）；SSA 扇出、冲突跳过、resolver 纪律等 per-object 写路径断言仍然有效。
+
 ### Watch 映射单元测试（`internal/controller/subscription_delivery_watches_test.go`）
 
 | 用例 | 断言 | 状态 |
@@ -779,14 +781,16 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 
 | 用例 | 断言 | 状态 |
 |---|---|---|
-| `TestObserverSelectorEntriesObservedPerObject` | 引擎写入的 name 形态条目经合成 target（selector 的 locators/policy + 条目的 name ref）逐对象独立观察：web-1 Succeeded（record 治愈、双命名空间事件、指标）、web-2 仍 Progressing、聚合 worst-state Progressing + 有界轮询 requeue | 已实现 |
-| `TestObserverSelectorThirdPartyEntryHonestUnknown` | 第三方 CRD（EdgeService）selector 条目如实 Unknown：不轮询、不伪造裁决、Reason/Message 保持引擎所有、聚合 Unknown、仅订阅侧 1 条 RolloutUnknown 事件（ADR-014 决策 6、spec D11） | 已实现 |
+| `TestObserverSelectorEntriesObservedPerObject` | 引擎写入的 name 形态条目经合成 target（selector 的 locators/policy + 条目的 name ref）逐对象独立观察：web-1 Succeeded（record 治愈、双命名空间事件、指标）、web-2 仍 Progressing、聚合 worst-state Progressing + 有界轮询 requeue | 已被 #82 更替 |
+| `TestObserverSelectorThirdPartyEntryHonestUnknown` | 第三方 CRD（EdgeService）selector 条目如实 Unknown：不轮询、不伪造裁决、Reason/Message 保持引擎所有、聚合 Unknown、仅订阅侧 1 条 RolloutUnknown 事件（ADR-014 决策 6、spec D11） | 已被 #82 更替 |
+
+> **#82 更替说明**：observer 的 selector 观察在 #82 改为 per-target 聚合（name 形态合成条目观察被删除），上表两用例由 v1.7-05 小节的 `TestObserverSelectorTargetAggregateWorstCase` / `TestObserverSelectorThirdPartyAggregateHonestUnknown` 取代。
 
 ### envtest 集成（`test/integration/subscription_delivery_test.go`，manager lane）
 
 | 用例 | 断言 | 状态 |
 |---|---|---|
-| `t81s-envtest-selector-fan-out-per-object-ssa-conflict-skip-and-label-driven-reconcile` | 生产接线（`RegisterSubscriptionDelivery` 含真实 matchResolver + dynamic informer）：rival 先独占 web-2 → selector 订阅扇出，web-1 真实 SSA 投递（真实 managedFields 归 selector 订阅所有）、web-2 冲突跳过（rival 所有权不变、镜像不变、entry Conflict 含冲突方名、Warning `DeliveryConflict` 事件落在订阅上）；给 web-3 打 label → 服务端过滤 informer 事件驱动 reconcile、新成员即时投递；全程 status 只有 name 形态条目 | 已实现 |
+| `t81s-envtest-selector-fan-out-per-object-ssa-conflict-skip-and-label-driven-reconcile` | 生产接线（`RegisterSubscriptionDelivery` 含真实 matchResolver + dynamic informer）：rival 先独占 web-2 → selector 订阅扇出，web-1 真实 SSA 投递（真实 managedFields 归 selector 订阅所有）、web-2 冲突跳过（rival 所有权不变、镜像不变、聚合 entry Conflict 含冲突方名与被争对象名、matched=2、Warning `DeliveryConflict` 事件落在订阅上）；给 web-3 打 label → 服务端过滤 informer 事件驱动 reconcile、新成员即时投递且 matched 增至 3；全程 status 只有 1 条 selector 形态聚合条目（#82） | 已实现 |
 
 ### 覆盖率要点
 
@@ -795,6 +799,31 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **诚实性**：结束态对象（Completed Pod/Job）在匹配解析层排除；零匹配零 status 面；未接线 resolver 如实 InvalidTarget；第三方 CRD 观察如实 Unknown；
 - **范围边界**：status 聚合精化/matched 计数/NoMatches Condition 属 #82，匹配数上限属 #83，本票不实现；
 - **已知环境限制**：`test/integration` webhook lane 的 `[BeforeAll]` 超时与 e2e Podman 依赖为本机既有环境问题（同 v1.7-02 小节说明）。
+
+## Status 聚合 + matched 计数 + NoMatches（v1.7-05，#82）
+
+### API 面（`api/v1alpha1/imagesubscription_types.go`）
+
+- `TargetDeliveryStatus` 新增 `MatchedObjects *int32`（json `matchedObjects,omitempty`，`Minimum=0`）：selector target 专属的匹配集计数（ADR-014 决策 5/8、spec v1.7 D8）。指针语义：named target 恒为 `nil`，selector target 零匹配为 `&0`。**只由投递引擎写入**（成员变化经 match-informer 驱动 reconcile 刷新），observer 只读不写。CRD 清单与 deepcopy 经 `make manifests generate` 再生，diff 无无关混入。
+
+### 聚合折叠单元测试（`internal/controller/subscription_delivery_controller_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestAggregateSelectorOutcomeFoldsWorstState` | 纯折叠函数 `aggregateSelectorOutcome` 表驱动 10 例：delivered 集折 Progressing + 合成 Applied 消息 + resetRetry；converged 集不强制 rollout（observer 车道）；conflict 压过 delivered 兄弟（rolloutSet=Conflict、reason=Conflict、消息点名对象）；首个失败按匹配序定 reason；T8 冻结对象只计数不投票（单 active 退化 passthrough、全冻结零事实）；observed 非 uniform 诚实写空、部分观察保留 persisted；一个确认未 applied 破 AND 保证；单对象退化消息/locator passthrough | 已实现 |
+
+### 投递扇出单元测试（#81 用例按 #82 语义重写）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySelectorFanOutPerObjectSSA` | 2 对象各 1 次 SSA apply（applies=2、statusWrites=1）；status 恒 1 条 selector 形态聚合 entry（matched=2、Progressing/Applied）；records=1（per-target，D8）；ImageApplied 事件 per-object 双命名空间共 4 条；applies{success}=2、latency 2 样本；稳态零写零事件 | 已重写 |
+| `TestSubscriptionDeliverySelectorConflictSkipsOnlyContestedObject` | 1 条聚合 entry：Reason/RolloutStatus=Conflict、ImageApplied=false、消息含冲突方订阅名与被争对象名、matched=2；record 1 条 Conflict；Warning `DeliveryConflict` 1 条；delivered 兄弟保留 2 条 ImageApplied 事件；failures{conflict}=1、applies{success}=1 | 已重写 |
+| `TestSubscriptionDeliverySelectorConflictSteadyZeroChurnAndRecovery` | 冲突生命周期三段：稳态零写零事件零 record（contested 聚合永不到 freshConverged，不重复确认兄弟）；稳态冲突中新成员加入 → 照常投递 + 双命名空间审计事件 + matched=3，但不记 Applied record（聚合仍 Conflict）；被争对象离开匹配集 → 聚合恢复（Reason=Applied、RolloutStatus Conflict→Progressing 交回 observer 车道、matched=1、Conflict condition 翻 False、confirmed record + 事件恰一次） | 已实现（新增） |
+| `TestSubscriptionDeliverySelectorZeroMatchesNoMatchesSurface` | 零匹配反转 #81 零表面：1 条 entry Unknown/NoMatches/matched=0（非 nil）+ 恰 1 条 Warning `NoMatches` 事件 + 订阅聚合 Unknown；对象零写、零 record；NoMatches 不进 failure 指标词汇表（failures{no_matches} 不存在）；不阻塞同订阅其它 target；稳态零写零事件 | 已重写 |
+| `TestSubscriptionDeliverySelectorOverlapKeepsPerTargetEntries` | 两个 selector target 匹配同一对象：resolve 各跑一次、apply 只 1 次（SSA 幂等）；各得一条聚合 entry（matched 各 1）、2 条 record、4 条事件（A valueChanged + B confirmed）——聚合按 target 独立，不再 per-object 去重 | 已重写 |
+| `TestSubscriptionDeliverySelectorLabelRemovalShrinksMatchedKeepsImage` | 摘 label：entry 恒 1 条，matched 2→1 触发恰一次 status 写；已投递镜像保留不回收；records append-only 无 churn；零事件 | 已重写 |
+| `TestSubscriptionDeliverySelectorForbiddenEntryPreservedPerObject` | 冻结对象只计数不投票：预置 name 形态 Forbidden entry DeepEqual 原样保留（stale-pruning 豁免）+ selector 聚合 entry 出现（matched=2 含冻结对象、active-only 事实）；web-2 正常投递 | 已重写 |
+| `TestSubscriptionDeliverySelectorWithoutResolverIsHonest` / `TestSubscriptionDeliverySelectorResolveErrorMapping` | #81 断言原样有效（InvalidTarget 如实上报 / NoKindMatchError→KindNotInstalled+requeue、一般错误→ApplyFailed transient） | 不变 |
 
 ## 匹配数硬上限（v1.7-06，#83）
 
@@ -806,23 +835,36 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 
 ### 引擎单元测试（`internal/controller/subscription_delivery_controller_test.go`，"Selector targets: match-count hard limit" 节）
 
+> #82/#83 合并后，本节断言改写在聚合表面上：breach 压过 per-object 折叠（rolloutSet 强制 Failed、Reason=`MatchLimitExceeded`），matched 仍计**全量**观测成员（含被截断者——成员是事实，投递受限），record 恒 per-target 一条。
+
 | 用例 | 断言 | 状态 |
 |---|---|---|
-| `TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports` | limit=2、匹配 3（名字排序）：只投递前 2 个（applies=2、statusWrites=1；web-3 零写入、无条目）；selector 键出现 `MatchLimitExceeded` 条目（Failed、消息含观测数 3 与上限 2）；聚合 Failed；恰好 1 条 Warning 事件（含 flag 名与两个数量）；`failures{match_limit_exceeded}`=1；稳态第二次 pass 零写入零事件、条目 Message 不变（事件去重免费获得） | 已实现 |
-| `TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded` | 恰等于上限（2/2）不触发：正常扇出 applies=2、无 selector 键条目（Targets 全为 name 形态）、无 Warning、聚合 Progressing | 已实现 |
-| `TestSubscriptionDeliverySelectorMatchLimitDefaultFifty` | 零值 `config.Config{}` 经构造器归一化回退默认 50：51 个匹配（web-000..web-050）只投递前 50、web-050 零写入无条目；selector 键条目消息含 51/50 | 已实现 |
-| `TestSubscriptionDeliverySelectorMatchLimitQuotaExcludesCompletedObjects` | 配额针对「有效匹配集」（ADR-014 决策 13）：Job 类 target、3 个匹配其一 `Complete=True`，fake-client lister 替身（resolver 接口注释钦定模式）排除后有效集 2 = limit → 不超限（applies=2、无 selector 键条目、无 Warning）；Completed Job 零写入 | 已实现 |
+| `TestSubscriptionDeliverySelectorMatchLimitTruncatesAndReports` | limit=2、匹配 3（名字排序）：只投递前 2 个（applies=2、statusWrites=1；web-3 零写入）；status 恒 1 条 selector 聚合 entry：Failed/`MatchLimitExceeded`（消息含观测数 3 与上限 2）、matched=3（全量成员含截断者）、delivered prefix 聚合事实 ImageApplied=true/ObservedImage=DesiredImage=digest；record 1 条（selector 键、NewImage=digest）；聚合 Failed；恰好 1 条 Warning（含 flag 名与两个数量）；ImageApplied 事件 per-object 双命名空间 4 条；`failures{match_limit_exceeded}`=1；稳态第二次 pass 零写入零事件、条目 Message 不变 | 已按聚合语义重写 |
+| `TestSubscriptionDeliverySelectorMatchLimitBoundaryNotExceeded` | 恰等于上限（2/2）不触发：正常扇出 applies=2；1 条聚合 entry（matched=2、`assertT9cDeliveredEntry`）；聚合 Progressing；无 Warning | 已按聚合语义重写 |
+| `TestSubscriptionDeliverySelectorMatchLimitDefaultFifty` | 零值 `config.Config{}` 经构造器归一化回退默认 50：51 个匹配（web-000..web-050）只投递前 50、web-050 零写入；聚合 entry Failed/`MatchLimitExceeded`、matched=51、消息含 51/50 | 已按聚合语义重写 |
+| `TestSubscriptionDeliverySelectorQuotaExcludesCompletedObjects` | 配额针对「有效匹配集」（ADR-014 决策 13）：Job 类 target、3 个匹配其一 `Complete=True`，fake-client lister 替身（resolver 接口注释钦定模式）排除后有效集 2 = limit → 不超限；聚合 entry 正常报告（Applied/Progressing/matched=2——Completed 从不进匹配集，不占配额）；Completed Job 零写入、无 Warning | 已按聚合语义重写 |
 
 ### Observer 单元测试（`internal/controller/subscription_observer_test.go`）
 
 | 用例 | 断言 | 状态 |
 |---|---|---|
-| `TestObserverSkipsMatchLimitExceededSelectorEntry` | selector 键条目是引擎所有的 target 级终态报告：observer 跳过（不轮询、不改写、不报错——interceptor 注入真实 API 对空 name Get 的 "resource name may not be empty" 非 NotFound 错误形态，裸 fake client 会把它退化为 NotFound，故无守卫时本测试为真 RED）；name 形态条目照常观察（web-1 Succeeded、web-2 Progressing）；有界轮询 requeue；聚合保持 worst-state Failed | 已实现 |
+| `TestObserverSelectorTargetAggregateWorstCase` | 表驱动 6 例覆盖票面全 verdict 路径（全 Succeeded、混 Failed、混 Unknown、Progressing、零匹配、单对象退化）：per-object verdict 永不落 status；聚合 worst-case（`AggregateRolloutStatus` 同排名）落 selector entry；transition 事件恰 1 条仅订阅侧，文案含有界摘要（`worst-case aggregate X over N matched object(s): web-1=…`，上限 5 个 + `+N more`）；record 按聚合治愈/保持 in-flight；observer 不写 matched（`MatchedObjects==nil`）；engine-owned Reason/Message 不被 observer 覆写；Progressing 聚合保持有界轮询 requeue；零匹配聚合 Unknown + 事件含「matched zero live objects」 | 已实现（取代 #81 per-object 观察用例） |
+| `TestObserverSelectorThirdPartyAggregateHonestUnknown` | 第三方 CRD selector 聚合如实 Unknown：不轮询、不伪造裁决、Reason/Message 保持引擎所有、record in-flight、1 条订阅侧 RolloutUnknown 事件含 `edge-1=Unknown`、指标 {other,unknown}=1 | 已重写 |
+| `TestObserverSkipsMatchLimitExceededSelectorEntry` | selector 键条目是引擎所有的 target 级终态报告：observer 在**门禁处跳过整个 target**（先于 match resolution——matcher 零调用、零轮询、零改写、零事件、RequeueAfter=0、ResourceVersion 不变）；interceptor 注入真实 API 对空 name Get 的 "resource name may not be empty" 非 NotFound 错误形态（裸 fake client 会退化为 NotFound，故无守卫时本测试为真 RED）；聚合保持 Failed | 已按聚合语义重写 |
+
+### envtest 集成（`test/integration/subscription_delivery_test.go`，manager lane）
+
+- `t81s-envtest-selector-fan-out-per-object-ssa-conflict-skip-and-label-driven-reconcile` 断言按 #82 更新：全程 status 只有 1 条 selector 形态聚合 entry（matched=2→3 随成员增长、Conflict 消息含冲突方与被争对象名）；per-object SSA/冲突跳过/label 驱动 reconcile 的生产接线断言不变。本机以 `KUBEBUILDER_ASSETS`（`bin/k8s/1.33.0-darwin-arm64`）实跑通过。
 
 ### 覆盖率要点
 
-- **判定时机**：上限检查位于 `deliverSelectorTarget` 中 matchResolver 返回有效匹配集（已排除结束态对象）之后、逐对象扇出之前；截断按名字排序取前 `limit` 个，行为确定；超限部分不投递、不 requeue、不报错（终态语义同 Conflict）；
-- **报告路径**：selector 键条目 Failed + Reason `MatchLimitExceeded`（rolloutSet 强制终态）；Warning 事件经 `planEffects` reasonChanged 路径自动发出（消息含上限值与实际观测数量），第二次 pass 持久化 reason 相同即不重发；`deliveryFailureLabel` 新增 `match_limit_exceeded`（指标 reason 词汇 11→12）；
-- **归一化单点**：`NewSubscriptionDeliveryReconciler` 对 `SelectorMatchLimit <= 0` 回退 `config.DefaultSelectorMatchLimit`——零值配置（存量测试、嵌入方）不会以 limit=0 误伤全部匹配；flag 层 Validate 另行拒绝非正值；
-- **与 v1.7-04 的关系**：其「永不出现 selector 形态条目」断言自 #83 起仅在未超限时成立；超限 target 例外出现 selector 键条目，observer 以结构式守卫（`LabelSelector != nil && Name == ""`）跳过——该守卫同时覆盖 #82 未来的 selector 键聚合条目；超限 target 的最终聚合状态呈现由 #82 最坏态规则接管，本票未改聚合逻辑；
-- **已知环境限制**：同 v1.7-04 小节（e2e Podman、`test/integration` webhook `[BeforeAll]`、Manager metrics 单跑 flake 均为本机既有环境问题）。
+- **聚合位置**：engine 在 `deliverSelectorTarget` 内折叠出单条聚合 outcome（`aggregateSelectorOutcome` 纯函数，可单测）；observer 在 `observeSelectorTarget` 内对每对象复用 named 车道 `observeTarget` 合成 ephemeral verdict 后聚合，两侧共用 `AggregateRolloutStatus` 排名（Failed > Conflict > Unknown > Progressing > Superseded > Succeeded）；
+- **matched 所有权**：只由 engine 写（informer 成员事件驱动刷新）；observer 只读——单元测试双侧 pin `MatchedObjects` 的写与不写；
+- **per-object 明细只走 Events**（spec D8）：投递/确认/失败 Warning/冲突 Warning 全部按对象计划（`planDeliveryEvents`、per-object failure 循环），latency/applies/failures 指标按对象计数；status 有界 3/5/5 合约不变，record 恒 per-target 一条；
+- **NoMatches 为合法态**（ADR-014 决策 8）：Warning 事件有、failure 指标无（词汇表刻意排除）；零匹配按 Unknown 参与订阅聚合，不阻塞其它 target；
+- **Conflict 生命周期**：worst-state 压过 delivered 兄弟（record 跟随最坏态）；稳态零 churn；被争对象离开匹配集后聚合恢复 Conflict→Progressing（observer 的 Conflict 门禁会跳过 entry，engine 必须显式交还车道，否则永久卡死）；
+- **上限判定时机（#83）**：上限检查位于 `deliverSelectorTarget` 中 matchResolver 返回有效匹配集（已排除结束态对象）之后、逐对象扇出之前；截断按名字排序取前 `limit` 个，行为确定；超限部分不投递、不 requeue、不报错（终态语义同 Conflict）；合并后 breach 覆写聚合折叠——单条聚合 entry Failed/`MatchLimitExceeded`，matched 仍计全量观测成员；
+- **上限报告路径（#83）**：`planEffects` reasonChanged 路径发 Warning（消息含上限值与观测数），第二次 pass 持久化 reason 相同即不重发；`limitSteady` 期间 converged 车道与兄弟 confirmed 事件静默、真实写入照常审计；`deliveryFailureLabel` 新增 `match_limit_exceeded`（指标 reason 词汇 11→12）；
+- **归一化单点（#83）**：`NewSubscriptionDeliveryReconciler` 对 `SelectorMatchLimit <= 0` 回退 `config.DefaultSelectorMatchLimit`——零值配置（存量测试、嵌入方）不会以 limit=0 误伤全部匹配；flag 层 Validate 另行拒绝非正值；
+- **observer 与 engine-owned 终态**：`NoMatches`/`MatchLimitExceeded` 均列入 observer 的 selector 门禁与 `isEngineOwnedReason` 冻结集——observer 不改写、不与 engine 强制的 rollout 拉锯；成员缩回限内后 engine 翻转 Reason，observer 车道自动恢复观察（Failed 是可 transition 态，无卡死）；#83 时代 `observeTarget` 内的结构式守卫（`LabelSelector != nil && Name == ""` 跳过）保留为防御；v1.7-04 的「永不出现 selector 形态条目」断言自 #82 起被完全更替——selector target 恒一条聚合 entry；
+- **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑）；`test/integration` webhook lane `[BeforeAll]` 超时与 Manager metrics 单跑 flake 为本机既有环境问题（同 v1.7-02 小节说明）。

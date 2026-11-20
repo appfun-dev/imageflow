@@ -172,6 +172,12 @@ const (
 	// TargetReasonKindNotInstalled means the target GVK is not served by the
 	// cluster (CRD absent); waiting state, mirrors the T8 gate vocabulary.
 	TargetReasonKindNotInstalled = "KindNotInstalled"
+	// TargetReasonNoMatches marks the legal empty match set of a selector
+	// target (ADR-014 decision 8, spec v1.7 D7): zero live objects carry the
+	// selector's labels. It is a legitimate waiting state, NOT a failure —
+	// the entry stays Unknown, a Warning Event names the condition, and the
+	// other targets of the subscription are unaffected.
+	TargetReasonNoMatches = "NoMatches"
 	// TargetReasonMatchLimitExceeded reports a selector target whose
 	// effective match set exceeded --selector-match-limit (ADR-014 decision
 	// 7, issue #83): the matches beyond the bound are NOT delivered and the
@@ -192,6 +198,11 @@ const (
 	// EventReasonUnsupportedTarget announces an Unsupported per-target reason:
 	// Warning on the subscription.
 	EventReasonUnsupportedTarget = "UnsupportedTarget"
+	// EventReasonNoMatches announces the legal empty match set of a selector
+	// target (ADR-014 decision 8): Warning on the subscription, zero writes.
+	// It is deliberately absent from the delivery-failure metric vocabulary —
+	// an empty match set is a legitimate state, not a delivery failure.
+	EventReasonNoMatches = "NoMatches"
 	// EventReasonDeliveryHistoryTruncated announces recentDeliveries overflow;
 	// dropped entries live in kube Events and the audit log (ADR-008).
 	EventReasonDeliveryHistoryTruncated = "DeliveryHistoryTruncated"
@@ -777,15 +788,24 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 		kindAdapter, pathAdapter, hasPaths)}
 }
 
-// deliverSelectorTarget fans one selector target out over its current match
-// set (issue #81, spec D3): the resolver's per-tuple informer cache decides
-// membership (server-side label filtering, terminal objects excluded), and
-// every matched object goes through the exact same per-object write contract
-// as a named target. Zero matches produce zero outcomes — no entry, no
-// event (the NoMatches status surface is #82's scope). The effective match
-// set is bounded by --selector-match-limit (issue #83, ADR-014 decision 7):
-// matches beyond the bound are not delivered and the target reports
-// Failed/MatchLimitExceeded with a Warning event.
+// deliverSelectorTarget resolves one selector target's current match set and
+// delivers every matched object under the exact same per-object write
+// contract as a named target (issue #81, spec D3): the resolver's per-tuple
+// informer cache decides membership (server-side label filtering, terminal
+// objects excluded). On the status surface it aggregates back to ONE
+// per-target outcome (issue #82, ADR-014 decision 5/8, spec v1.7 D8): the
+// selector-form entry carries the worst-state aggregate and the matched
+// count, one delivery record is planned per target, and the per-object
+// detail (delivery confirmations, conflict identity, failure reasons)
+// travels on Events and metrics planned from objectOutcomes — the bounded
+// status contract (ADR-008: 3/5/5) is unchanged. The legal empty match set
+// (ADR-014 decision 8) yields Unknown + Reason=NoMatches + a Warning Event
+// with matched=0: not a failure, and sibling targets of the same
+// subscription are unaffected. The effective match set is bounded by
+// --selector-match-limit (issue #83, ADR-014 decision 7): matches beyond the
+// bound see zero writes and the aggregate reports Failed with Reason
+// MatchLimitExceeded — the breach outranks every per-object fold (worst
+// state), while matched still counts the full observed membership.
 func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
@@ -815,52 +835,223 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 		return []deliveryOutcome{base.transient(TargetReasonApplyFailed,
 			fmt.Sprintf("resolving the match set of selector target %s: %v", authz.FormatTarget(ref), err))}
 	}
-	if len(names) == 0 {
-		return nil
-	}
 	// Hard match limit (issue #83, ADR-014 decision 7): the resolver already
 	// excluded terminal objects, so len(names) is the effective match set
 	// that counts against the quota. Names come back in sorted order, so the
 	// truncation deterministically keeps the first limit entries and the rest
-	// are never delivered. The selector-keyed outcome reports
-	// Failed/MatchLimitExceeded; its Warning event rides the planEffects
-	// reasonChanged path and stops repeating once persisted.
+	// are never delivered. In the aggregated world (issue #82) the breach
+	// rides the single per-target outcome: it overrides the fold to
+	// Failed/MatchLimitExceeded after aggregation, and its Warning event
+	// rides the planEffects reasonChanged path, stopping once persisted.
 	observed := len(names)
 	limit := r.config.SelectorMatchLimit
 	exceeded := observed > limit
 	if exceeded {
 		names = names[:limit]
 	}
-	outcomes := make([]deliveryOutcome, 0, len(names)+1)
-	if exceeded {
-		limitOut := base.failed(TargetReasonMatchLimitExceeded, fmt.Sprintf(
-			"selector target %s matched %d objects, over the hard limit of %d "+
-				"(--selector-match-limit): delivered the first %d in sorted name order, "+
-				"the remaining %d are NOT delivered; completed objects never count toward the quota",
-			authz.FormatTarget(ref), observed, limit, limit, observed-limit))
-		failed := imageflowv1alpha1.RolloutFailed
-		limitOut.rolloutSet = &failed
-		outcomes = append(outcomes, limitOut)
+
+	// The aggregate outcome: the ref stays selector-form, so the status merge
+	// keeps exactly ONE entry per selector target. matched counts the FULL
+	// observed membership — over-limit objects are matched facts even though
+	// they see zero writes (membership is a fact; delivery is bounded).
+	// Resolver names are sorted, so per-object facts (and the "first
+	// failure") are in stable match order.
+	out := base
+	out.setMatched = true
+	out.matched = int32(observed)
+
+	if len(names) == 0 {
+		// ADR-014 decision 8 / spec v1.7 D7: the legal empty match set. The
+		// explicit Unknown pull-back rescues a stale optimistic aggregate
+		// (e.g. Succeeded from objects that have since lost their labels);
+		// membership informer events re-deliver the moment a matching object
+		// appears — no polling involved.
+		unknown := imageflowv1alpha1.RolloutUnknown
+		out.rolloutSet = &unknown
+		out.reason = TargetReasonNoMatches
+		out.message = fmt.Sprintf(
+			"selector target %s matched zero live objects (legal empty match set, "+
+				"ADR-014 decision 8); delivery replays when a matching object appears",
+			authz.FormatTarget(ref))
+		return []deliveryOutcome{out}
 	}
+	objectOutcomes := make([]deliveryOutcome, 0, len(names))
 	for _, name := range names {
 		objectRef := ref
 		objectRef.Name = name
 		objectRef.LabelSelector = nil
-		out := base
-		out.ref = objectRef
+		objOut := base
+		objOut.ref = objectRef
 		// T8 frozen contract, per object: a persisted name-form Forbidden
-		// entry wins for that object alone; the rest of the match set is
-		// unaffected.
+		// entry freezes THAT object alone — it still counts towards matched
+		// (membership is a fact) but contributes no delivery facts to the
+		// aggregate; its entry survives the status merge's stale pruning via
+		// the Forbidden exemption.
 		if idx := findTargetEntry(sub.Status.Targets, objectRef); idx >= 0 &&
 			sub.Status.Targets[idx].Reason == TargetReasonForbidden {
-			out.preserveEntry = true
-			outcomes = append(outcomes, out)
+			objOut.preserveEntry = true
+			objectOutcomes = append(objectOutcomes, objOut)
 			continue
 		}
-		outcomes = append(outcomes, r.deliverObjectTarget(ctx, sub, source, target, objectRef, out,
-			fieldManager, kindAdapter, pathAdapter, hasPaths))
+		objOut = r.deliverObjectTarget(ctx, sub, source, target, objectRef, objOut,
+			fieldManager, kindAdapter, pathAdapter, hasPaths)
+		objectOutcomes = append(objectOutcomes, objOut)
+		// Per-object waiting/transient states bubble to the aggregate: the
+		// smallest requeue wins and the first transient error drives backoff.
+		if objOut.requeue > 0 && (out.requeue == 0 || objOut.requeue < out.requeue) {
+			out.requeue = objOut.requeue
+		}
+		if objOut.retryDelta > 0 && out.retryDelta == 0 {
+			out.retryDelta = objOut.retryDelta
+			out.err = objOut.err
+		}
 	}
-	return outcomes
+	out.objectOutcomes = objectOutcomes
+	aggregateSelectorOutcome(&out, objectOutcomes, source)
+	if exceeded {
+		// Worst-state override (issue #83, ADR-014 decision 7): Failed
+		// outranks every per-object fold, so the quota breach becomes the
+		// aggregate's own report — Failed/MatchLimitExceeded naming both the
+		// observed count and the bound. The truncated members still saw zero
+		// writes; the delivered prefix keeps its per-object Events below.
+		failed := imageflowv1alpha1.RolloutFailed
+		out.rolloutSet = &failed
+		out.reason = TargetReasonMatchLimitExceeded
+		out.message = fmt.Sprintf(
+			"selector target %s matched %d objects, over the hard limit of %d "+
+				"(--selector-match-limit): delivered the first %d in sorted name order, "+
+				"the remaining %d are NOT delivered; completed objects never count toward the quota",
+			authz.FormatTarget(ref), observed, limit, limit, observed-limit)
+	}
+	return []deliveryOutcome{out}
+}
+
+// aggregateSelectorOutcome folds the per-object match-set facts into the
+// single per-target outcome (issue #82, ADR-014 decision 5/8, spec v1.7 D8).
+// It is a pure fold: objectOutcomes keep the per-object truth for the
+// Event/metric planning in planEffects. Delivery facts aggregate over the
+// ACTIVE objects only — T8-frozen (preserveEntry) members count towards
+// matched but never vote.
+func aggregateSelectorOutcome(out *deliveryOutcome, objectOutcomes []deliveryOutcome, source sourceState) {
+	active := make([]*deliveryOutcome, 0, len(objectOutcomes))
+	for i := range objectOutcomes {
+		if !objectOutcomes[i].preserveEntry {
+			active = append(active, &objectOutcomes[i])
+		}
+	}
+	if len(active) == 0 {
+		// Every matched object is T8-frozen: no delivery facts to aggregate.
+		// Reason/Message stay persisted (the merge honors an empty reason)
+		// and the rollout stays where the observer/engine left it.
+		return
+	}
+
+	var firstFailure *deliveryOutcome
+	failedCount, convergedCount := 0, 0
+	observedReporters, appliedReporters := 0, 0
+	observedImage := ""
+	observedUniform, allApplied := true, true
+	for _, obj := range active {
+		if obj.delivered {
+			out.delivered = true
+		}
+		if obj.conflictNow {
+			out.conflictNow = true
+		}
+		if obj.converged {
+			convergedCount++
+		}
+		if obj.reason != TargetReasonApplied {
+			failedCount++
+			if firstFailure == nil {
+				firstFailure = obj // resolver order: the stable "first" failure
+			}
+		}
+		if obj.setObserved {
+			observedReporters++
+			if observedReporters == 1 {
+				observedImage = obj.observedImage
+			} else if obj.observedImage != observedImage {
+				observedUniform = false
+			}
+		}
+		if obj.setImageApplied {
+			appliedReporters++
+			if !obj.imageApplied {
+				allApplied = false
+			}
+		}
+	}
+	out.converged = convergedCount == len(active)
+
+	// ObservedImage: full knowledge (every object reported, uniform) writes
+	// the value; a confirmed non-uniform set is honestly blank; a partial
+	// read keeps the persisted value (transient failure does not blank truth
+	// the previous pass established).
+	switch {
+	case observedReporters == len(active) && observedUniform:
+		out.setObserved = true
+		out.observedImage = observedImage
+	case observedReporters > 1 && !observedUniform:
+		out.setObserved = true
+		out.observedImage = ""
+	}
+	// ImageApplied: full knowledge writes the AND; a confirmed non-applied
+	// object dominates even under partial knowledge — one object not holding
+	// the image already breaks the aggregate guarantee.
+	switch {
+	case appliedReporters == len(active):
+		out.setImageApplied = true
+		out.imageApplied = allApplied
+	case appliedReporters > 0 && !allApplied:
+		out.setImageApplied = true
+		out.imageApplied = false
+	}
+
+	// Worst-state rollout consequences of THIS delivery pass (ADR-014
+	// decision 5): Conflict outranks an in-flight delivery; otherwise any
+	// value change keeps Progressing. With neither, the persisted aggregate
+	// stays — the observer lane owns observation-driven transitions.
+	switch {
+	case out.conflictNow:
+		conflict := imageflowv1alpha1.RolloutConflict
+		out.rolloutSet = &conflict
+	case out.delivered:
+		progressing := imageflowv1alpha1.RolloutProgressing
+		out.rolloutSet = &progressing
+	}
+
+	// Reason/Message: all-applied keeps the converged surface; otherwise the
+	// FIRST failure in match order names the aggregate reason and a bounded
+	// summary carries the per-target truth (per-object detail lives on the
+	// Events, spec v1.7 D8).
+	if firstFailure == nil {
+		out.reason = TargetReasonApplied
+		if len(active) == 1 {
+			out.message = active[0].message
+			out.resetRetry = active[0].resetRetry
+		} else {
+			out.message = authz.TruncateMessage(fmt.Sprintf(
+				"all %d matched objects hold %s and are owned by this subscription's SSA "+
+					"field manager (ADR-008 exclusivity registry)", len(active), source.desiredImage), 1024)
+			out.resetRetry = true
+		}
+	} else {
+		out.reason = firstFailure.reason
+		if len(active) == 1 {
+			out.message = firstFailure.message
+		} else {
+			out.message = authz.TruncateMessage(fmt.Sprintf(
+				"selector target matched %d object(s); %d require attention — first in match order %s: %s",
+				len(active), failedCount, firstFailure.ref.Name, firstFailure.message), 1024)
+		}
+	}
+	if len(active) == 1 {
+		// Degenerate single-object match set: keep the object as the
+		// target-side Event object and carry its locator.
+		out.targetObject = active[0].targetObject
+		out.locator = active[0].locator
+	}
 }
 
 // deliverObjectTarget converges ONE concrete object (named target, or one
@@ -1160,6 +1351,17 @@ type deliveryOutcome struct {
 	observedImage   string
 	setImageApplied bool
 	imageApplied    bool
+
+	// Selector-target aggregation (issue #82, ADR-014 decision 5/8, spec v1.7
+	// D8): setMatched/matched carry the match-set size of a selector-form
+	// target — 0 is the legal empty match set (Reason=NoMatches); named
+	// targets never set it. objectOutcomes carry the per-object facts of the
+	// match set in resolver order (sorted names); Events and failure metrics
+	// are planned per object from them while the aggregate outcome itself
+	// owns the single status entry and the single delivery record.
+	setMatched     bool
+	matched        int32
+	objectOutcomes []deliveryOutcome
 
 	// rolloutSet forces the per-target rollout state when non-nil (delivery
 	// consequences only: Progressing on a value-changing apply, terminal

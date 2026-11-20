@@ -138,6 +138,15 @@ type TargetDeliveryStatus struct {
 	// +optional
 	ImageApplied bool `json:"imageApplied"`
 
+	// MatchedObjects is the number of live objects in this selector target's
+	// match set at the last delivery pass (ADR-014 decision 5/8, spec v1.7
+	// D8). Set for selector-form targets only — including the legal empty
+	// match set (0, Reason=NoMatches); named targets leave it nil. Per-object
+	// detail never enters status: it travels on Events (spec v1.7 D8).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MatchedObjects *int32 `json:"matchedObjects,omitempty"`
+
 	// RolloutStatus is the rollout dimension for this target, including the
 	// Superseded/Conflict terminal states (ADR-008).
 	// +optional
