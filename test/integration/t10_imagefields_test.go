@@ -554,10 +554,21 @@ var _ = Describe("T10 third-party imageFields delivery", Label("t10"), Ordered, 
 				To(Equal(metav1.ConditionFalse), "with the resolver registered the target is supported")
 
 			events := t10iDrainEvents(recorder)
-			Expect(events).To(HaveLen(2), "dual-namespace ImageApplied events")
+			applied, escalated := 0, 0
 			for _, e := range events {
-				Expect(e).To(ContainSubstring(controller.EventReasonImageApplied))
+				switch {
+				case strings.Contains(e, controller.EventReasonApplyConflictEscalated):
+					escalated++
+				case strings.Contains(e, controller.EventReasonImageApplied):
+					applied++
+				}
 			}
+			// First ImageFlow write against the client-created object
+			// escalates 409→force once (ADR-015 decision 9), then the
+			// dual-namespace ImageApplied pair lands.
+			Expect(events).To(HaveLen(3), "dual-namespace ImageApplied plus the SSA escalation audit")
+			Expect(applied).To(Equal(2), "dual-namespace ImageApplied events")
+			Expect(escalated).To(Equal(1), "first-write SSA escalation audit (ADR-015 decision 9)")
 		})
 
 		It("t10i-envtest-minimal-field-update-leaves-undeclared-fields-and-ownership-untouched", func() {

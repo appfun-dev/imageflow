@@ -195,6 +195,13 @@ const (
 	// EventReasonDeliveryConflict announces the terminal first-wins Conflict:
 	// Warning on the subscription (zero writes were performed).
 	EventReasonDeliveryConflict = "DeliveryConflict"
+	// EventReasonApplyConflictEscalated announces one SSA 409 → forced-retry
+	// escalation (ADR-015 decision 9, 先礼后兵): Warning on the subscription,
+	// naming the target and the conflicting manager the API server reported.
+	// One event per escalated object per pass — the audit trail of every
+	// forced takeover (e.g. the rollouts-controller's normalization grabs,
+	// upstream argo/argo-rollouts#3281).
+	EventReasonApplyConflictEscalated = "ApplyConflictEscalated"
 	// EventReasonUnsupportedTarget announces an Unsupported per-target reason:
 	// Warning on the subscription.
 	EventReasonUnsupportedTarget = "UnsupportedTarget"
@@ -1169,11 +1176,30 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 			return out
 		}
 		out.targetObject = fresh
+		// ADR-015 decision 9 (先礼后兵): the first attempt never forces; on a
+		// 409 the pass escalates to exactly ONE forced retry and records the
+		// escalation for the audit Event. The server message names the
+		// conflicting manager (e.g. the rollouts-controller of #3281).
+		out.ssaEscalated = true
+		out.ssaEscalationDetail = applyErr.Error()
 		applyErr = r.applyOnce(ctx, plan, fieldManager, true)
 	}
 	if applyErr != nil {
 		r.metrics.applies.WithLabelValues(applyResultError).Inc()
 		switch {
+		case apierrors.IsConflict(applyErr):
+			// The forced retry ALSO conflicted (or the forced orphan takeover
+			// did): the other manager keeps the field. Report Failed honestly
+			// and settle at the normal waiting requeue — the retry budget
+			// (1 per reconcile pass, ADR-015 decision 9) is exhausted, so no
+			// workqueue-backoff storm on top of it.
+			out = out.failed(TargetReasonApplyFailed, fmt.Sprintf(
+				"server-side apply to %s still conflicts after the single forced retry "+
+					"(retry budget 1 per reconcile pass exhausted, ADR-015 decision 9): %v; "+
+					"delivery retries at the normal requeue interval",
+				authz.FormatTarget(ref), applyErr))
+			out.requeue = waitingStateRequeue
+			return out
 		case apierrors.IsForbidden(applyErr):
 			out = out.transient(TargetReasonApplyForbidden, fmt.Sprintf(
 				"the API server denied this controller's write to %s: %v; fix the manager RBAC "+
@@ -1392,6 +1418,13 @@ type deliveryOutcome struct {
 	previousValue    string
 	converged        bool // target ended the pass equal-and-owned
 	conflictNow      bool // terminal Conflict detected this pass
+
+	// ssaEscalated marks that this pass met an SSA 409 apply-conflict and
+	// escalated to the single forced retry (ADR-015 decision 9, retry budget
+	// 1 per reconcile pass); ssaEscalationDetail carries the API server's
+	// conflict message, which names the conflicting field manager.
+	ssaEscalated        bool
+	ssaEscalationDetail string
 
 	// targetObject is the fresh target read, used as the target-namespace
 	// Event involved object (nil when the object was never read).

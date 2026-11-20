@@ -328,8 +328,12 @@ func TestDeliveryFormatEnvtestDigestKeepsV1Behavior(t *testing.T) {
 					sub.Status.RecentDeliveries)
 			}
 			events := drainFakeEvents(f.recorder)
-			if len(events) != 2 || countEventsWithReason(events, EventReasonImageApplied) != 2 {
-				t.Fatalf("expected dual-namespace ImageApplied events, got %v", events)
+			// First ImageFlow write against a client-created object escalates
+			// 409→force once; the audit Warning precedes the ImageApplied pair
+			// (ADR-015 decision 9).
+			if len(events) != 3 || countEventsWithReason(events, EventReasonApplyConflictEscalated) != 1 ||
+				countEventsWithReason(events, EventReasonImageApplied) != 2 {
+				t.Fatalf("expected the SSA escalation audit plus dual-namespace ImageApplied events, got %v", events)
 			}
 		})
 	}
@@ -365,8 +369,9 @@ func TestDeliveryFormatEnvtestTagWritesTagAndResolvedDigest(t *testing.T) {
 			sub.Status.RecentDeliveries)
 	}
 	events := drainFakeEvents(f.recorder)
-	if len(events) != 2 || countEventsWithReason(events, EventReasonImageApplied) != 2 ||
-		!strings.Contains(events[0], t5fTagRef) {
+	if len(events) != 3 || countEventsWithReason(events, EventReasonApplyConflictEscalated) != 1 ||
+		countEventsWithReason(events, EventReasonImageApplied) != 2 ||
+		!strings.Contains(events[1], t5fTagRef) {
 		t.Fatalf("delivery events must name the written tag reference: %v", events)
 	}
 
@@ -438,8 +443,9 @@ func TestDeliveryFormatEnvtestDigestWithTagWritesComposite(t *testing.T) {
 		t.Fatalf("composite entry mismatch: %+v", entry)
 	}
 	events := drainFakeEvents(f.recorder)
-	if len(events) != 2 || countEventsWithReason(events, EventReasonImageApplied) != 2 ||
-		!strings.Contains(events[0], t5fCompositeA) {
+	if len(events) != 3 || countEventsWithReason(events, EventReasonApplyConflictEscalated) != 1 ||
+		countEventsWithReason(events, EventReasonImageApplied) != 2 ||
+		!strings.Contains(events[1], t5fCompositeA) {
 		t.Fatalf("delivery events must name the written composite: %v", events)
 	}
 
