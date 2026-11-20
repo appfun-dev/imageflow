@@ -79,7 +79,7 @@ var cardFrozenFamilies = map[string][]string{
 
 // cardAllowedLabelValues is the closed label-value vocabulary per family and
 // key. Values are bounded by construction: 3 apply results + 12 failure
-// reasons + 6 kinds + 4 rollout results + 3 health results.
+// reasons + 7 kinds + 4 rollout results + 3 health results.
 var cardAllowedLabelValues = map[string]map[string][]string{
 	metricNameDeliveryApplies: {
 		"result": {applyResultSuccess, applyResultConflict, applyResultError},
@@ -97,7 +97,7 @@ var cardAllowedLabelValues = map[string]map[string][]string{
 	metricNameObserverRolloutOutcomes: {
 		"kind": {
 			observerKindDeployment, observerKindStatefulSet, observerKindDaemonSet,
-			observerKindJob, observerKindCronJob, observerKindOther,
+			observerKindJob, observerKindCronJob, observerKindRollout, observerKindOther,
 		},
 		"result": {
 			observerResultProgressing, observerResultSucceeded,
@@ -275,13 +275,17 @@ func TestDeliveryFailureLabelVocabularyIsClosed(t *testing.T) {
 	}
 	// Anything outside the failure vocabulary must never become a label
 	// value. ADR-014 decision 8 keeps the legal empty match set out of the
-	// metrics on purpose; object names are identities, not reasons.
+	// metrics on purpose; ADR-015 decision 8 keeps AwaitingPromotion (a
+	// legitimate steady state, not a failure) out of it too; object names are
+	// identities, not reasons.
 	for _, reason := range []string{
 		TargetReasonNoMatches,
 		TargetReasonApplied,
+		HealthReasonAwaitingPromotion,
 		"",
 		"NoMatches",
 		"Applied",
+		"AwaitingPromotion",
 		"web-1",
 		"web-2",
 		"checkout-api",
@@ -339,7 +343,7 @@ func TestObserverLabelVocabulariesAreClosed(t *testing.T) {
 
 	kindAllowed := map[string]bool{
 		observerKindDeployment: true, observerKindStatefulSet: true, observerKindDaemonSet: true,
-		observerKindJob: true, observerKindCronJob: true, observerKindOther: true,
+		observerKindJob: true, observerKindCronJob: true, observerKindRollout: true, observerKindOther: true,
 	}
 	observableTarget := imageflowv1alpha1.SubscriptionTarget{ContainerNames: []string{"app"}}
 	for gvk, wantKind := range map[schema.GroupVersionKind]string{
@@ -348,6 +352,7 @@ func TestObserverLabelVocabulariesAreClosed(t *testing.T) {
 		appsv1.SchemeGroupVersion.WithKind(kindDaemonSet):   observerKindDaemonSet,
 		batchv1.SchemeGroupVersion.WithKind(kindJob):        observerKindJob,
 		batchv1.SchemeGroupVersion.WithKind(kindCronJob):    observerKindCronJob,
+		argoRolloutGVK: observerKindRollout,
 	} {
 		got, ok := observableBuiltinKind(gvk, observableTarget)
 		if !ok || got != wantKind || !kindAllowed[got] {
