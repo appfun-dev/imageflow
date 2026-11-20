@@ -898,3 +898,37 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **事件词汇零新增**（与 #85 并行约束）：per-object 审计复用既有 `EventReasonDeliverySuperseded`/Normal/1024 截断与双命名空间发射机制（`emitPlannedEffects`），未新增指标、未动 `delivery_metrics.go` 标签集；
 - **watch DELETE 语义实证**：t84 lane 首次用真实 API server（1.33）证明摘 label 触发链无缺口——DELETED 事件携旧（匹配时）labels 到达客户端复核，`subscription_delivery_watches_test.go` 的「non-matching labels map nothing」pin 与该行为一致，无需修改 watch 实现；
 - **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑）；`test/integration` webhook lane `[BeforeAll]` 超时为本机既有环境问题（同 v1.7-02 小节说明）。
+
+## Metrics 基数收口（v1.7-08，#85）
+
+### 基数回归单元测试（`internal/controller/metrics_cardinality_test.go`）
+
+> #85 审计结论：T9/T11 现有标签集合规——对象名/命名空间/UID 从未进入任何标签键或标签值；selector 扇出的 latency/applies/failures 计数是 per-object 的（粒度合规），标签维度恒为 subscription+target 级。本节为**回归钉住**而非修复，三层设防（ADR-014 决策 11、spec v1.7 D10、ADR-010 受控标签集）。
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestMetricsCardinalityFrozenLabelKeySets` | 定义层：newDeliveryMetrics()+newObserverMetrics() 注册进私有 PedanticRegistry、各触碰一条合法 series 后 gather 恰为冻结的 6 个 family；每条 series 的标签键集合与契约**完全相等**（latency={}、applies={result}、failures={reason}、truncated={}、rollout={kind,result}、health={result}）；cardForbiddenLabelKeys 全表（name/namespace/uid/object/target/workload/pod/container/subscription/stream/tag/image 等）永不出现 | 已实现 |
+| `TestDeliveryFailureLabelVocabularyIsClosed` | 词汇层：12 个 TargetReason 失败原因恰好映射到对应 snake_case 标签（ok=true）；其余一切——NoMatches/Applied 合法非失败态、空串、对象名/命名空间/订阅名/镜像引用形状的字符串、未来新增 reason——恒 `("", false)`，未登记原因永不计数 | 已实现 |
+| `TestObserverLabelVocabulariesAreClosed` | 词汇层：observerResultLabel 把全部 RolloutStatus（含 Superseded/Conflict/空串/任意字符串）折叠进 4 值闭集；observerHealthLabel 同理 3 值；observableBuiltinKind 只映射 5 个 builtin GVK 到有界 kind 常量，第三方 GVK / imageFields / 无 containers 恒 `("", false)`（调用方折叠为 `other` 常量，raw kind 串永不作标签值） | 已实现 |
+| `TestSelectorDeliveryMetricsNeverCarryObjectIdentity` | 行为层：表驱动 5 条 selector 车道真实 reconcile（全量匹配 3 对象、ghost 匹配、limit=2 截断、per-object 冲突、零匹配合法态），每车道以私有 registry gather 全部发射 series 并断言 family ⊆ 冻结契约、键集精确相等、标签值 ∈ 封闭词汇、键/值不含任何对象身份片段（web-/ghost/uid85/team-checkout/checkout/live/quay.io/sha256）；车道计数钉住非真空（applies{success}=3/2/2/1、latency (3,1800s)、failures{target_not_found\|match_limit_exceeded\|conflict}=1、零匹配车道 failures/applies 零 series——NoMatches 永不进标签） | 已实现 |
+| `TestSelectorObserverMetricsNeverCarryObjectIdentity` | 行为层：双对象 selector worst-case 折叠（web-1 Succeeded + web-2 deadline Failed → 聚合 Failed）：对象名只出现在 Events（`web-1=Succeeded`/`web-2=Failed`——D10 per-object 可观测性由 Events 承担）；指标面恰 1 条 rollout{deployment,failed} series + 1 条 health series（per 聚合 transition，永不 per object）；同套冻结契约 + 身份片段断言 | 已实现 |
+
+### 变异自证（mutation check，证明断言非真空；变异验证后均已还原）
+
+- `deliveryFailureLabel` 默认分支放行未知 reason（`return reason, true`）→ 词汇层 12 例 FAIL + 行为层各车道 FAIL（`reason="Applied"`/`"NoMatches"` 越出封闭词汇）；
+- per-object 失败标签拼入对象名（`label+"|"+obj.ref.Name`，subscription_delivery_status.go 的 objectOutcomes 循环）→ 行为层 ghost/冲突车道 FAIL（`reason="target_not_found|web-ghost"`、`"conflict|web-1"` 同时命中「越出封闭词汇」与「携带对象身份片段」两条断言）；
+- `observerResultLabel` 默认分支透传原始状态串 → 词汇层 FAIL（Superseded/Conflict/空串/`web-1` 全部泄出为标签值）。
+
+### 契约文档同步（`docs/metrics-contract.md`）
+
+- §T9 基数段后新增 selector 维度说明：计数 per-object、标签恒 subscription+target 级、对象名/UID 永不进标签、NoMatches 不计数（ADR-014 决策 8）、match_limit_exceeded 为 target 级计数（每次截断 pass 计 1，不按被排除对象逐个计）；
+- §T11 修正既有漂移：kind 词汇补 `job`/`cronjob`（v1.6 #74 引入的 builtin kind，文档此前未同步），series 上限 19→27（6 kinds × 4 results + 3 health）；补 selector 聚合折叠说明（每聚合 transition 恰一条 rollout sample + 一条 health sample）；
+- `internal/controller/subscription_observer_metrics.go` rollout Help 字符串同步为 `(deployment|statefulset|daemonset|job|cronjob|other)`（Help 为元数据文案，不属于 §Stability 的 names/label-keys 契约面）。
+
+### 覆盖率要点
+
+- **三层设防**：定义层（collector 定义中不存在身份维度）→ 词汇层（未登记值拿不到标签）→ 行为层（真实车道 gather 结果无身份）——任何一层被将来的改动突破，测试都 RED；
+- **计数粒度与标签维度分离**：per-object 计数（latency/applies/failures 按对象计）合规且被车道计数断言钉住；违规的只有标签维度出现对象身份——正是 ADR-014 决策 11 划定的边界；
+- **私有 registry 收集缝**：`prometheus.NewPedanticRegistry()` + `collectors()`/`registerDeliveryMetrics`/`registerObserverMetrics` 既有缝，不污染进程级 `ctrlmetrics.Registry`；fixture 的 metrics 每测试独立构造，series 不串台；
+- **与 #84 并行边界**：本小节零行为代码改动（唯一实现侧 diff 是 Help 字符串文案）；`observerResultLabel` 对 Superseded/Conflict 的折叠在词汇层已断言，#84 改动行为路径不影响本约束；
+- **已知环境限制**：同 v1.7-02 小节（e2e 需 Podman，本机不跑；`test/integration` webhook lane `[BeforeAll]` 超时为本机既有环境问题）；本小节全部为纯单元测试，不依赖 envtest/Podman。
