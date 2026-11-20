@@ -548,8 +548,15 @@ func (r *SubscriptionObserverReconciler) observeSelectorTarget(
 	}
 	entry := sub.Status.Targets[idx]
 	// The same frozen gates as observeTarget: T8-owned, never-delivered and
-	// engine-terminal entries are not observable by this lane.
+	// engine-terminal entries are not observable by this lane. NoMatches and
+	// MatchLimitExceeded join the set (issues #82/#83): both are engine-owned
+	// target-level reports — the engine forces the rollout (Unknown / Failed)
+	// on every pass, so an observer transition here would only ping-pong the
+	// status. Recovery is engine-driven: the exit flips Reason once the match
+	// set changes, and this lane resumes on the next pass.
 	if entry.Reason == TargetReasonForbidden ||
+		entry.Reason == TargetReasonNoMatches ||
+		entry.Reason == TargetReasonMatchLimitExceeded ||
 		entry.DesiredImage == "" ||
 		entry.RolloutStatus == imageflowv1alpha1.RolloutConflict ||
 		entry.Reason == TargetReasonConflict ||
@@ -817,6 +824,14 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 	}
 	if entry.RolloutStatus == imageflowv1alpha1.RolloutSuperseded {
 		return nil // defensive: entry-level Superseded is terminal
+	}
+	if ref.LabelSelector != nil && ref.Name == "" {
+		// Selector-keyed entries are engine-owned target-level reports (the
+		// MatchLimitExceeded report of issue #83; the same shape #82 will use
+		// for its aggregate entry), not observable objects: there is no name
+		// to poll, and a real API client rejects an empty-name Get. The
+		// per-object name-form entries are observed by observeSelectorEntries.
+		return nil
 	}
 
 	out := &observerOutcome{ref: ref, kindLabel: observerKindOther, rollout: entry.RolloutStatus}
@@ -1657,6 +1672,8 @@ func isEngineOwnedReason(reason string) bool {
 		TargetReasonInvalidTarget,
 		TargetReasonInvalidImageField,
 		TargetReasonKindNotInstalled,
+		TargetReasonNoMatches,
+		TargetReasonMatchLimitExceeded,
 		TargetReasonForbidden:
 		return true
 	}

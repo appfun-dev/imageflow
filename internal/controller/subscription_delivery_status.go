@@ -287,9 +287,16 @@ func planEffects(
 	freshConverged := base.DesiredImage == source.desiredImage &&
 		base.ImageApplied &&
 		base.Reason == TargetReasonApplied
+	// Steady quota breach (issues #82 × #83): the persisted entry already
+	// reports MatchLimitExceeded and this pass re-folds to the same breach.
+	// The converged lane and the sibling confirmation events stay silent —
+	// the terminal report persists unchanged with zero churn — while real
+	// writes (a prefix member delivered) are still recorded and audited.
+	limitSteady := base.Reason == TargetReasonMatchLimitExceeded &&
+		out.reason == TargetReasonMatchLimitExceeded
 
 	switch {
-	case out.conflictNow:
+	case out.conflictNow && out.reason != TargetReasonMatchLimitExceeded:
 		// Terminal Conflict transition (ADR-008): recorded with the Conflict
 		// outcome; zero writes were performed on the contested object. For a
 		// selector aggregate this lane WINS over a delivered sibling on EVERY
@@ -316,8 +323,8 @@ func planEffects(
 		// v1.7 D8); Events and latency samples stay per-object so a two-object
 		// fan-out still reports two ImageApplied events and two samples.
 		plan.record = newDeliveryRecord(source, out, base.DesiredImage, now)
-		planDeliveryEvents(plan, out, source, now, freshConverged, false)
-	case out.converged && !freshConverged:
+		planDeliveryEvents(plan, out, source, now, freshConverged, limitSteady)
+	case out.converged && !freshConverged && !limitSteady:
 		// Ownership takeover (orphan/user field already at the digest) or
 		// crash recovery before the status write: the subscription now
 		// guarantees the field — record it once (gate: persisted entry not
@@ -339,6 +346,20 @@ func planEffects(
 			message:   authz.TruncateMessage(out.message, 1024),
 		})
 		return
+	}
+	if out.reason == TargetReasonMatchLimitExceeded {
+		// Issue #83, ADR-014 decision 7: the quota breach is a target-level
+		// Warning + failure metric. No return — the per-object loop below
+		// still surfaces failures among the delivered prefix (objects never
+		// carry MatchLimitExceeded themselves, so nothing double-counts).
+		plan.events = append(plan.events, plannedEvent{
+			eventType: corev1.EventTypeWarning,
+			reason:    deliveryEventReason(out.reason),
+			message:   authz.TruncateMessage(out.message, 1024),
+		})
+		if label, isFailure := deliveryFailureLabel(out.reason); isFailure {
+			plan.failureLabels = append(plan.failureLabels, label)
+		}
 	}
 	if len(out.objectOutcomes) > 0 {
 		// Selector aggregate: per-object failure Warnings and metrics — the
@@ -778,6 +799,8 @@ func deliveryFailureLabel(reason string) (label string, ok bool) {
 		return failureLabelKindNotInstalled, true
 	case TargetReasonConflict:
 		return failureLabelConflict, true
+	case TargetReasonMatchLimitExceeded:
+		return failureLabelMatchLimitExceeded, true
 	}
 	return "", false
 }

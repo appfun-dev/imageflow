@@ -178,6 +178,12 @@ const (
 	// the entry stays Unknown, a Warning Event names the condition, and the
 	// other targets of the subscription are unaffected.
 	TargetReasonNoMatches = "NoMatches"
+	// TargetReasonMatchLimitExceeded reports a selector target whose
+	// effective match set exceeded --selector-match-limit (ADR-014 decision
+	// 7, issue #83): the matches beyond the bound are NOT delivered and the
+	// target itself reports Failed with a Warning Event naming the bound and
+	// the observed count.
+	TargetReasonMatchLimitExceeded = "MatchLimitExceeded"
 )
 
 // Event reasons of the delivery surface (Event.reason vocabulary). Every
@@ -382,6 +388,12 @@ func NewSubscriptionDeliveryReconciler(
 	}
 	if metrics == nil {
 		metrics = newDeliveryMetrics()
+	}
+	if cfg.SelectorMatchLimit <= 0 {
+		// Zero-value configs (tests, embedders) fall back to the documented
+		// default so the hard bound is always positive — a limit of 0 would
+		// reject every match. Single normalization point (issue #83).
+		cfg.SelectorMatchLimit = config.DefaultSelectorMatchLimit
 	}
 	return &SubscriptionDeliveryReconciler{
 		client:    cl,
@@ -778,16 +790,22 @@ func (r *SubscriptionDeliveryReconciler) deliverTarget(
 
 // deliverSelectorTarget resolves one selector target's current match set and
 // delivers every matched object under the exact same per-object write
-// contract as a named target (issue #81, spec D3). On the status surface it
-// aggregates back to ONE per-target outcome (issue #82, ADR-014 decision 5/8,
-// spec v1.7 D8): the selector-form entry carries the worst-state aggregate
-// and the matched count, one delivery record is planned per target, and the
-// per-object detail (delivery confirmations, conflict identity, failure
-// reasons) travels on Events and metrics planned from objectOutcomes — the
-// bounded status contract (ADR-008: 3/5/5) is unchanged. The legal empty
-// match set (ADR-014 decision 8) yields Unknown + Reason=NoMatches + a
-// Warning Event with matched=0: not a failure, and sibling targets of the
-// same subscription are unaffected.
+// contract as a named target (issue #81, spec D3): the resolver's per-tuple
+// informer cache decides membership (server-side label filtering, terminal
+// objects excluded). On the status surface it aggregates back to ONE
+// per-target outcome (issue #82, ADR-014 decision 5/8, spec v1.7 D8): the
+// selector-form entry carries the worst-state aggregate and the matched
+// count, one delivery record is planned per target, and the per-object
+// detail (delivery confirmations, conflict identity, failure reasons)
+// travels on Events and metrics planned from objectOutcomes — the bounded
+// status contract (ADR-008: 3/5/5) is unchanged. The legal empty match set
+// (ADR-014 decision 8) yields Unknown + Reason=NoMatches + a Warning Event
+// with matched=0: not a failure, and sibling targets of the same
+// subscription are unaffected. The effective match set is bounded by
+// --selector-match-limit (issue #83, ADR-014 decision 7): matches beyond the
+// bound see zero writes and the aggregate reports Failed with Reason
+// MatchLimitExceeded — the breach outranks every per-object fold (worst
+// state), while matched still counts the full observed membership.
 func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	ctx context.Context,
 	sub *imageflowv1alpha1.ImageSubscription,
@@ -817,12 +835,30 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 		return []deliveryOutcome{base.transient(TargetReasonApplyFailed,
 			fmt.Sprintf("resolving the match set of selector target %s: %v", authz.FormatTarget(ref), err))}
 	}
+	// Hard match limit (issue #83, ADR-014 decision 7): the resolver already
+	// excluded terminal objects, so len(names) is the effective match set
+	// that counts against the quota. Names come back in sorted order, so the
+	// truncation deterministically keeps the first limit entries and the rest
+	// are never delivered. In the aggregated world (issue #82) the breach
+	// rides the single per-target outcome: it overrides the fold to
+	// Failed/MatchLimitExceeded after aggregation, and its Warning event
+	// rides the planEffects reasonChanged path, stopping once persisted.
+	observed := len(names)
+	limit := r.config.SelectorMatchLimit
+	exceeded := observed > limit
+	if exceeded {
+		names = names[:limit]
+	}
+
 	// The aggregate outcome: the ref stays selector-form, so the status merge
-	// keeps exactly ONE entry per selector target. Resolver names are sorted,
-	// so per-object facts (and the "first failure") are in stable match order.
+	// keeps exactly ONE entry per selector target. matched counts the FULL
+	// observed membership — over-limit objects are matched facts even though
+	// they see zero writes (membership is a fact; delivery is bounded).
+	// Resolver names are sorted, so per-object facts (and the "first
+	// failure") are in stable match order.
 	out := base
 	out.setMatched = true
-	out.matched = int32(len(names))
+	out.matched = int32(observed)
 
 	if len(names) == 0 {
 		// ADR-014 decision 8 / spec v1.7 D7: the legal empty match set. The
@@ -839,7 +875,6 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 			authz.FormatTarget(ref))
 		return []deliveryOutcome{out}
 	}
-
 	objectOutcomes := make([]deliveryOutcome, 0, len(names))
 	for _, name := range names {
 		objectRef := ref
@@ -873,6 +908,21 @@ func (r *SubscriptionDeliveryReconciler) deliverSelectorTarget(
 	}
 	out.objectOutcomes = objectOutcomes
 	aggregateSelectorOutcome(&out, objectOutcomes, source)
+	if exceeded {
+		// Worst-state override (issue #83, ADR-014 decision 7): Failed
+		// outranks every per-object fold, so the quota breach becomes the
+		// aggregate's own report — Failed/MatchLimitExceeded naming both the
+		// observed count and the bound. The truncated members still saw zero
+		// writes; the delivered prefix keeps its per-object Events below.
+		failed := imageflowv1alpha1.RolloutFailed
+		out.rolloutSet = &failed
+		out.reason = TargetReasonMatchLimitExceeded
+		out.message = fmt.Sprintf(
+			"selector target %s matched %d objects, over the hard limit of %d "+
+				"(--selector-match-limit): delivered the first %d in sorted name order, "+
+				"the remaining %d are NOT delivered; completed objects never count toward the quota",
+			authz.FormatTarget(ref), observed, limit, limit, observed-limit)
+	}
 	return []deliveryOutcome{out}
 }
 

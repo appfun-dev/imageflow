@@ -52,6 +52,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	imageflowv1alpha1 "github.com/appfun-dev/imageflow/api/v1alpha1"
 	"github.com/appfun-dev/imageflow/internal/clock"
@@ -3259,5 +3260,158 @@ func TestObserverSelectorThirdPartyAggregateHonestUnknown(t *testing.T) {
 	}
 	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindOther, observerResultUnknown)); v != 1 {
 		t.Fatalf("rollout outcome metric = %v, want 1", v)
+	}
+}
+
+// TestObserverSkipsMatchLimitExceededSelectorEntry pins the observer-side
+// contract of issue #83 merged with the #82 aggregate surface: the delivery
+// engine reports an over-limit selector target ON its single per-target
+// aggregate entry (selector-keyed, Failed, Reason MatchLimitExceeded — the
+// breach outranks every per-object fold). The report is terminal and
+// engine-owned, so the observer skips the WHOLE target at its frozen-entry
+// gate — before match resolution: no polling of the delivered prefix, no
+// rewriting of the report, no verdict ping-pong against the engine-enforced
+// Failed rollout. Observation resumes by itself once the engine flips the
+// Reason (membership shrank back under the bound).
+//
+// The stock fake client degrades an empty-name Get into NotFound, which the
+// observer would silently swallow; the real API machinery rejects it
+// client-side ("resource name may not be empty"). The interceptor injects
+// that production error shape, so any nameless poll leaking past the gate
+// surfaces as a reconcile error instead of passing silently.
+func TestObserverSkipsMatchLimitExceededSelectorEntry(t *testing.T) {
+	selectorTarget := t11uSelectorTarget(map[string]string{"app": "web"})
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(selectorTarget.TargetRef)
+	limitEntry := imageflowv1alpha1.TargetDeliveryStatus{
+		TargetRef:      selectorTarget.TargetRef,
+		DesiredImage:   t11uRefA,
+		ObservedImage:  t11uRefA,
+		ImageApplied:   true,
+		RolloutStatus:  imageflowv1alpha1.RolloutFailed,
+		HealthStatus:   imageflowv1alpha1.HealthUnknown,
+		Reason:         TargetReasonMatchLimitExceeded,
+		MatchedObjects: func() *int32 { v := int32(3); return &v }(),
+		Message: "selector target matched 3 objects, over the hard limit of 2 " +
+			"(--selector-match-limit): the remaining 1 are NOT delivered",
+	}
+	succeeded := appsv1.DeploymentStatus{
+		ObservedGeneration: 3,
+		Replicas:           2, UpdatedReplicas: 2, AvailableReplicas: 2, ReadyReplicas: 2,
+		Conditions: []appsv1.DeploymentCondition{{
+			Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue,
+			Reason: "MinimumReplicasAvailable",
+		}},
+	}
+	sub := t11uSub(
+		[]imageflowv1alpha1.SubscriptionTarget{selectorTarget},
+		imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{limitEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutFailed,
+			ObservedGeneration: 1,
+		})
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := imageflowv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add imageflow scheme: %v", err)
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			t11uNamedDeployment("web-1", t11uRefA, succeeded),
+			t11uNamedDeployment("web-2", t11uRefA, succeeded),
+			sub,
+		).
+		WithStatusSubresource(&imageflowv1alpha1.ImageSubscription{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey,
+				obj client.Object, opts ...client.GetOption) error {
+				if key.Name == "" {
+					return fmt.Errorf("resource name may not be empty")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	// The fake strips status from Create for subresource-registered kinds;
+	// persist the seeded status through the subresource, as the fixture does.
+	if err := cl.Status().Update(t11uCtx, sub); err != nil {
+		t.Fatalf("persist seeded status: %v", err)
+	}
+	recorder := record.NewFakeRecorder(256)
+	r := NewSubscriptionObserverReconciler(cl, nil, recorder,
+		clock.NewFake(t11uStart), config.Config{}, newObserverMetrics(), nil)
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {"web-1", "web-2", "web-3"}}}
+	r.SetMatchResolver(matcher)
+
+	res, err := r.Reconcile(t11uCtx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: t11uNamespace, Name: t11uSubName,
+	}})
+	if err != nil {
+		t.Fatalf("the observer must skip the engine-owned match-limit report, got error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("a skipped target has nothing in flight to poll, got requeue %v", res.RequeueAfter)
+	}
+	if len(matcher.calls) != 0 {
+		t.Fatalf("the gate must short-circuit before match resolution, got calls %v", matcher.calls)
+	}
+
+	got := &imageflowv1alpha1.ImageSubscription{}
+	if err := cl.Get(t11uCtx, types.NamespacedName{Namespace: t11uNamespace, Name: t11uSubName}, got); err != nil {
+		t.Fatalf("get sub: %v", err)
+	}
+	// The first pass may still bookkeep the orthogonal StatusPolicyEvaluated
+	// condition (False/NotConfigured — this target declares no CUE policy);
+	// that is every-first-pass behaviour, not a rewrite of the report. From
+	// then on the observer must be completely silent while the report
+	// persists: no polls, no writes, no events.
+	steady := got.ResourceVersion
+	if _, err := r.Reconcile(t11uCtx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: t11uNamespace, Name: t11uSubName,
+	}}); err != nil {
+		t.Fatalf("steady-state pass errored: %v", err)
+	}
+	settled := &imageflowv1alpha1.ImageSubscription{}
+	if err := cl.Get(t11uCtx, types.NamespacedName{Namespace: t11uNamespace, Name: t11uSubName}, settled); err != nil {
+		t.Fatalf("get sub: %v", err)
+	}
+	if settled.ResourceVersion != steady {
+		t.Fatalf("the observer must be silent while the report persists: rv %s -> %s",
+			steady, settled.ResourceVersion)
+	}
+	if len(matcher.calls) != 0 {
+		t.Fatalf("the gate must keep short-circuiting before match resolution, got calls %v", matcher.calls)
+	}
+	got = settled
+
+	// The terminal report survives untouched — still selector-keyed, still
+	// Failed, still the engine's message.
+	if len(got.Status.Targets) != 1 {
+		t.Fatalf("the aggregate entry is the only entry, got %+v", got.Status.Targets)
+	}
+	after := got.Status.Targets[0]
+	if after.TargetRef.Name != "" || after.TargetRef.LabelSelector == nil {
+		t.Fatalf("the match-limit entry must stay selector-keyed, got %+v", after.TargetRef)
+	}
+	if after.RolloutStatus != imageflowv1alpha1.RolloutFailed || after.Reason != TargetReasonMatchLimitExceeded ||
+		after.Message != limitEntry.Message || after.DesiredImage != t11uRefA {
+		t.Fatalf("the observer must not rewrite the terminal report, got %+v", after)
+	}
+	if after.MatchedObjects == nil || *after.MatchedObjects != 3 {
+		t.Fatalf("the observer must not touch the engine-owned matched count, got %+v", after.MatchedObjects)
+	}
+	// Worst-state aggregate stays Failed — the limit report outranks the
+	// healthy prefix objects it is never allowed to poll.
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutFailed {
+		t.Fatalf("aggregate = %q, want Failed", got.Status.RolloutStatus)
+	}
+	select {
+	case ev := <-recorder.Events:
+		t.Fatalf("a skipped target emits nothing, got event %q", ev)
+	default:
 	}
 }
