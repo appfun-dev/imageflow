@@ -692,12 +692,15 @@ func (r *SubscriptionDeliveryReconciler) deliverAllTargets(
 		seen[targetKey] = true
 
 		for _, outcome := range r.deliverTarget(ctx, sub, source, target, fieldManager) {
-			// Selector targets fan out into one outcome PER MATCHED OBJECT
-			// (issue #81); two selector targets in one spec may match the
-			// same object. Delivery already ran for both — only the status
-			// entry is shared, so the first outcome in spec order wins the
-			// entry and duplicates are dropped (keys must stay unique for
-			// the merge, conditions and records contracts).
+			// Since issue #82 a selector target yields exactly ONE aggregate
+			// outcome whose ref stays selector-form, so outcome keys are
+			// unique per spec target by construction — overlapping selector
+			// targets keep independent per-target entries (see
+			// TestSubscriptionDeliverySelectorOverlapKeepsPerTargetEntries).
+			// This dedup layer is a defensive key-uniqueness guarantee only
+			// (the merge, conditions and records contracts require unique
+			// keys); duplicate named targets are already dropped by the
+			// seen[targetKey] gate above.
 			outcomeKey := imageflowv1alpha1.CanonicalTargetKey(outcome.ref)
 			if seenOutcomes[outcomeKey] {
 				log.FromContext(ctx).V(1).Info("skipping duplicate per-object delivery outcome",

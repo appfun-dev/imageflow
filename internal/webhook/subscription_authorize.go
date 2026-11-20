@@ -192,7 +192,7 @@ func (a *subscriptionAuthorizer) authorizeTargets(
 			"creator %q lacks namespace-wide update permission required by %d selector "+
 				"target(s): %s. Selector targets deliver to a dynamic object set, so admission "+
 				"rejects them when the namespace-level SubjectAccessReview denies (#80, "+
-				"ADR-014 决策 4); grant the creator update on the target resource in the "+
+				"ADR-014 decision 4); grant the creator update on the target resource in the "+
 				"namespace and retry",
 			subject.Username, len(deniedSelector), formatDeniedSelectorTargets(deniedSelector)))
 	}

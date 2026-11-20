@@ -826,11 +826,15 @@ func (r *SubscriptionObserverReconciler) observeTarget(ctx context.Context, sub 
 		return nil // defensive: entry-level Superseded is terminal
 	}
 	if ref.LabelSelector != nil && ref.Name == "" {
-		// Selector-keyed entries are engine-owned target-level reports (the
-		// MatchLimitExceeded report of issue #83; the same shape #82 will use
-		// for its aggregate entry), not observable objects: there is no name
-		// to poll, and a real API client rejects an empty-name Get. The
-		// per-object name-form entries are observed by observeSelectorEntries.
+		// Nameless selector-form entries are engine-owned target-level
+		// reports, not observable objects: the issue #82 aggregate entry
+		// (observed by observeSelectorTarget, which folds fresh per-object
+		// verdicts onto it) and the issue #83 MatchLimitExceeded report.
+		// There is no name to poll, and a real API client rejects an
+		// empty-name Get. This guard keeps such legacy/anomalous refs off
+		// the named lane; name-form entries still in status from before the
+		// engine's aggregate write carry a name and are handled by the named
+		// path below.
 		return nil
 	}
 

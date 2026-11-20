@@ -194,6 +194,7 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 | `InvalidTarget` | targetRef 非法（apiVersion/kind/name 缺失等） |
 | `InvalidImageField` | imageFields 路径无效（不存在/非字符串/选择不到元素/原子列表/系统字段/只读/不唯一——message 有按类判别） |
 | `KindNotInstalled` | 目标 Kind 未安装（CRD 缺失） |
+| `NoMatches` | selector target 匹配零个存活对象（合法空匹配集，ADR-014 决策 8）：条目为 selector 形态报告（Unknown）+ 订阅侧 Warning 事件（matched=0），**非失败指标**（刻意不在 failures 指标词汇表内）、不阻塞订阅内其它 target；处置 = 等待对象打标 / 核对 selector——匹配对象一出现，informer 事件即自动补投（无轮询） |
 | `MatchLimitExceeded` | selector target 有效匹配数超过 `--selector-match-limit`（默认 50，ADR-014 决策 7）：超限部分不投递（按名字排序取前 N），条目为 selector 形态终态报告（Failed）；处置 = 收窄 selector / 拆分订阅 / 调大 flag。结束态对象不占配额 |
 | `Forbidden` | T8 授权门拒绝（创建者缺 update 权限）→ 补授权等复核 |
 
@@ -217,7 +218,8 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 `TaskGarbageCollected`；授权：`TargetsForbidden`、`TargetsAuthorized`、
 `MissingCreatorIdentity`；投递：`ImageApplied`（订阅侧+目标侧各一份，目标侧含
 "previous field value: …" 前置值审计）、`DeliveryConflict`、`UnsupportedTarget`、
-`DeliveryHistoryTruncated`、`DeliverySuperseded`、`MatchLimitExceeded`（selector
+`DeliveryHistoryTruncated`、`DeliverySuperseded`、`NoMatches`（selector 合法空匹配集，
+Warning，matched=0，不计入失败指标，#82）、`MatchLimitExceeded`（selector
 匹配数超硬上限，Warning，含上限与实际观测数量，#83）；观察：`RolloutSucceeded`(Normal)、
 `RolloutFailed`(Warning)、`RolloutUnknown`、`RolloutProgressing`（message 带
 `Determination:` 四阶段审计）；镜像视图：`EventSummaryTruncated`。

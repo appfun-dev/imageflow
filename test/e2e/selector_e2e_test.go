@@ -61,7 +61,7 @@ import (
 //     is applied by hand, and the creator SA holds namespace-scoped update
 //     grants in BOTH namespaces so the runtime T8 gate issues Allowed
 //     verdicts — the selector SAR is namespace-scoped (no resourceName,
-//     ADR-014 decision 2) and passes on that grant.
+//     ADR-014 decision 4) and passes on that grant.
 //   - RBAC binds the GENERATED manager-role (config/rbac/role.yaml, marker
 //     union — including the deployment list/watch verbs the selector
 //     informers need) via a lane-scoped ClusterRoleBinding; never a
@@ -680,7 +680,10 @@ spec:
 	// the observer's Succeeded heal, which keeps the semantics race-free),
 	// and no DeliverySuperseded event ever names the departed object. The
 	// in-flight flip (a retag landing BEFORE the heal) is pinned
-	// deterministically by the envtest t84 lane under a fake clock.
+	// deterministically by the unit lane (fake clock: the phase 4 window of
+	// TestSubscriptionDeliverySelectorDynamicSetLifecycle) plus the envtest
+	// t84 lane — which runs a REAL clock (clock.Real{}) and stays
+	// deterministic because it is delivery-only (no observer registered).
 	It("t86-e2e-label-removal-retains-image-shrinks-matched-never-supersedes-departed", func() {
 		founding := t86sFictional("d4")
 		retag := t86sFictional("e5")

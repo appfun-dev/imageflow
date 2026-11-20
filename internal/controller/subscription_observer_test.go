@@ -3122,7 +3122,8 @@ func TestHealthVerdictD6MessageFormats(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #81 (v1.7-04): selector-target entries are observed per object
+// Issue #82 (v1.7-05): one per-target aggregate entry per selector target,
+// observed by observeSelectorTarget (worst-case fold over per-object verdicts)
 // ---------------------------------------------------------------------------
 
 // t11uSelectorTarget renders a selector-form target in the built-in
