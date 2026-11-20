@@ -83,11 +83,13 @@ Multiple worktrees accumulated during development (t1-t12 from v1, v1.1-t2/t3/t4
 
 ## Action Items for v1.2
 
-1. [ ] Add pre-commit hook for `make manifests` verification
-2. [ ] Document envtest RBAC limitation in TESTING.md
-3. [ ] Clean up stale worktrees (`git worktree prune`)
-4. [ ] Investigate subagent failure modes (context limits? tool availability?)
-5. [ ] Consider adding RBAC-focused envtest variant using authorization webhook
+> 核销于 v1.7 retro（2026-11-20）：4/5 完成，#1 转入 v1.8 action items。
+
+1. [ ] Add pre-commit hook for `make manifests` verification — **未完成**，转入 v1.8 action items（`.github/workflows/` 无 manifests 校验）
+2. [x] Document envtest RBAC limitation in TESTING.md — 经 #80 落地：TESTING.md 登记 envtest 缝扩展（共享 `envtestEnv`/`envtestCfg`，`AddUser` 产非 admin 身份做真实 RBAC deny/allow）
+3. [x] Clean up stale worktrees (`git worktree prune`) — v1.7 收官时已清理（wt-80~86 全删，`git worktree list` 仅剩主目录）；已纳入 implement-spec 流程的清理步骤
+4. [x] Investigate subagent failure modes — v1.7 实证：k3-256k 派发两次 mid-run 死亡，换路由（qwen3.8-max/xhigh）+ worktree WIP 接续零重写恢复；教训与对策记入 v1.7 retro「What Could Be Improved #1」
+5. [x] Consider adding RBAC-focused envtest variant using authorization webhook — 经 #80 落地：`TestSelectorTargetSARAdmission` deny/allow 双方向（真实 RBAC + `AddUser` 非 admin 身份，异用户隔离 SAR 缓存键），另有 `t8-envtest-*` 六条真实 RBAC/SAR 拒绝路径车道
 
 ## Conclusion
 
