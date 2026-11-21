@@ -607,27 +607,7 @@ spec:
 		t87sRegister(newMapping, newStream, t87sPauseRef)
 
 		By("Phase 2: updating the subscription to point at the new stream")
-		t87sYAML(t87sPausedSub, fmt.Sprintf(`
-apiVersion: imageflow.appfun.dev/v1alpha1
-kind: ImageSubscription
-metadata:
-  name: %[1]s
-  namespace: %[2]s
-  annotations:
-    imageflow.appfun.dev/created-by: system:serviceaccount:%[2]s:%[3]s
-spec:
-  source:
-    stream: %[4]s
-    tag: %[5]s
-  targets:
-  - targetRef:
-      apiVersion: argoproj.io/v1alpha1
-      kind: Rollout
-      namespace: %[6]s
-      name: %[7]s
-    containerNames: [%[8]s]
-`, t87sPausedSub, t87sNamespace, t87sCreatorSA, newStream, t87sTag,
-			t87sWorkloadNS, t87sPausedRollout, t87sContainer))
+		t87sSubscription(t87sPausedSub, newStream, t87sPausedRollout)
 
 		By("Phase 2: the engine writes the new digest and the rollouts-controller pauses")
 		Eventually(func(g Gomega) {
