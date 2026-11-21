@@ -38,7 +38,7 @@
 | 8 | `containerNames[]` 与 `imageFields[]` 同时出现被拒绝 | `rejects targets that set both containerNames and imageFields`（envtest · test/integration/webhook_test.go）；边界记录：`documents the webhook boundary: the CRD shape allows both locator fields`（envtest · test/integration/catalog_crd_test.go） |
 | 9 | 无效字段路径 / 容器名缺失 / RBAC Forbidden / target NotFound 均报告明确原因 | 路径：`t10-e2e-invalid-field-gets-explicit-status-and-zero-writes`（kind）+ `t10i-envtest-every-invalid-field-class-gets-an-explicit-status-and-zero-writes`（envtest）；容器缺失：`TestSubscriptionDeliveryFailureSurfaces/container-absent-reported`（unit · internal/controller/subscription_delivery_controller_test.go）；Forbidden：`t12-e2e-delivery-stops-while-forbidden-and-resumes-when-regranted`（kind · test/e2e/t12_hardening_e2e_test.go）+ `t8-e2e-real-rbac-grant-and-revocation-flip-the-forbidden-state-within-the-recheck-period`（kind · test/e2e/sar_gate_e2e_test.go）；NotFound：`t9i-envtest-target-created-after-subscription-delivers-on-replay`（envtest）+ `TestSubscriptionDeliveryFailureSurfaces/target-missing-waits-without-writes`（unit） |
 | 10 | 镜像字段已符合期望时不重复 patch | `t9i-envtest-equal-value-reconcile-produces-no-patch`、`t10i-envtest-equal-value-reconcile-of-imagefields-target-produces-no-patch`（envtest）；kind 腿：`t12-e2e-manager-kill-mid-delivery-recovers-to-eventual-consistency-from-persisted-state` 的 Consistently 断言（generation/image/事件数静止） |
-| 11 | rollout progressing / succeeded / failed / unknown 分别报告 | `t11i-envtest-deployment-native-rollout-progression-observed-stage-by-stage`（envtest · progressing 逐阶段）；`t11-e2e-deployment-real-rollout-succeeds-cross-ns-events-mirror-floatup`、`t11-e2e-deployment-real-rollout-fails-and-image-applied-stays-true`（kind · succeeded/failed）；unknown 见场景 12 |
+| 11 | rollout progressing / succeeded / failed / unknown 分别报告 | `t11i-envtest-deployment-native-rollout-progression-observed-stage-by-stage`（envtest · progressing 逐阶段）；`t11-e2e-deployment-real-rollout-succeeds-cross-ns-events-mirror-floatup`、`t11-e2e-deployment-real-rollout-fails-and-image-applied-stays-true`（kind · succeeded/failed）；unknown 见场景 12；Argo Rollout 车道（ADR-015，#93）：`TestObserverDetermineArgoRolloutVerdictStates`（unit · internal/controller/subscription_observer_test.go，D5 矩阵 18 例）+ `TestObserverArgoRolloutEnvtestVerdicts`（envtest · internal/controller/subscription_observer_argorollout_envtest_test.go，CRD 在、controller 不在，手工 status 经 /status 子资源落库）；Argo Rollout 闭环腿（ADR-015 决策 15，#95）：`t87-e2e-rollout-canary-without-pause-converges-succeeded-after-image-write`、`t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded`（kind · test/e2e/rollout_e2e_test.go，真实 rollouts-controller） |
 | 12 | （v1 重述）`statusPolicyRef` 不可用 ⇒ 如实 Unknown | `t11i-envtest-no-status-policy-and-policy-ref-targets-never-fabricate-success`（envtest · test/integration/t11_observer_test.go，含 policyRef 缺失与指向不存在两种腿）；`t11-e2e-deployment-real-rollout-succeeds-cross-ns-events-mirror-floatup`（kind · health Unknown + `StatusPolicyEvaluated=False` Condition）；第三方目标腿：`t10-e2e-multiple-imagefields-paths-deliver-digests-to-a-third-party-crd`（kind · rollout Unknown 永不虚构成功） |
 | 13 | 多订阅修改同一字段触发冲突保护 | `t9-e2e-second-subscription-same-field-terminal-conflict-zero-writes`（kind）；`t10-e2e-same-path-second-subscription-conflicts-with-zero-writes`（kind）；`t9i-envtest-second-subscription-same-field-terminal-conflict-zero-writes`（envtest） |
 | 14 | 控制器重启后重新 reconcile，不丢最终一致性 | `t12-e2e-manager-kill-mid-delivery-recovers-to-eventual-consistency-from-persisted-state`（kind · 投递中途强杀 manager pod → 同 spec 重建 → 纯持久化状态收敛，§12.9 记录不重不丢）；`t9i-envtest-manager-restart-converges-from-persisted-state-without-write-amplification`、`t9i-envtest-crash-before-status-write-recovers-from-persisted-ownership`（envtest）；`t4-rebuilds-registration-state-from-persisted-objects-after-crash-without-duplicate-image-change`（envtest · 登记侧重建） |
@@ -72,6 +72,26 @@ Allure 标注：AllureID **IF-86** · TMS **IF-86** / **SPEC-77**（issues/86、
 | 摘 label 保留 | `t86-e2e-label-removal-retains-image-shrinks-matched-never-supersedes-departed` | 摘标签后 `matchedObjects` 3→2、Reason 保持 Applied；离开者镜像保留不回收且 managedFields 仍持有订阅 field manager；全程无 Superseded；retag 只覆盖在册成员（在途翻转竞态由 unit 假时钟 + envtest t84 车道确定性覆盖） |
 | 零匹配（NoMatches） | `t86-e2e-zero-match-reports-unknown-nomatches-warning-and-unblocks-siblings` | ghost selector 条目 `matchedObjects=0` + Unknown/NoMatches；订阅侧恰一条 Warning；聚合保持 Unknown 不降级 Failed（ADR-014 决策 8）；具名 sibling 正常治愈、不被阻塞 |
 | 超限（MatchLimitExceeded） | `t86-e2e-match-limit-breach-delivers-sorted-prefix-and-reports-failed` | 4 成员 > limit 3：仅字典序前缀投递，第 4 个零写入（managedFields 无订阅 field manager 为证）；`matchedObjects=4` 报全量观测数；条目与聚合均 Failed + MatchLimitExceeded；Warning 消息含 limit 与 `--selector-match-limit` 指引 |
+
+## v1.8 Argo Rollouts 场景（spec #91 / ADR-015，非 §15 编号）
+
+v1.8 把 Argo Rollouts 纳入内建 Kind（ADR-015），策略字段（steps、pause、promote）永远归
+rollouts-controller 所有，ImageFlow 只写标准 pod-template 镜像路径（决策 4）。收敛判定（决策 7
+三合一：observedGeneration 覆盖 generation + phase Healthy + stableRS==currentPodHash）与步停映射
+（决策 8：pauseConditions 非空 ⇒ Progressing + AwaitingPromotion，合法稳态非故障）依赖真实
+rollouts-controller 写 status，因此闭环只能在 kind 车道验证（spec D11：envtest 非替代——CRD 在、
+controller 不在时 native status 永远空白）。CI 的 E2E job 以 pin 的 v1.10.2 install.yaml 安装
+argo-rollouts（`.github/workflows/test-e2e.yml`，与 ADR-015 研究锚点的 stable 通道一致）。
+两个场景全部由 `test/e2e/rollout_e2e_test.go` 的 t87 车道承载
+（`Describe(..., Label("t87"), Ordered)`，双命名空间，事件断言沿用 t11/t86 双 ns 模式）。
+Allure 标注：AllureID **IF-95** · TMS **IF-95** / **SPEC-91**（issues/95、issues/91）。
+
+| 场景 | 命名用例（kind · test/e2e/rollout_e2e_test.go） | 覆盖要点 |
+|---|---|---|
+| 无 pause 收敛（spec D11-a，Story US-8/US-20） | `t87-e2e-rollout-canary-without-pause-converges-succeeded-after-image-write` | `canary: {}` 基础金丝雀 Rollout 从 tag 形态 pre-image 出发；引擎把真实 digest（registry.k8s.io/pause 多架构锚点，kubelet 真拉取）写入 `.spec.template.spec.containers[name].image`；原生门控 phase=Healthy 且 stableRS==currentPodHash（决策 7 三合一全部兑现）；entry Succeeded + Reason=Applied（R3 引擎面）+ health Healthy（ADR-005 §3 门后真 pod 扫描）+ 聚合 Succeeded；双 ns RolloutSucceeded 事件含完整审计四段与 `succeeded per native` 判定语 |
+| pause:{} 步停（spec D11-b，Story US-11/US-21） | `t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded` | Rollout 出生即持目标 digest + `steps: [setWeight:50, pause:{}]`，先门控原生 `pauseConditions[0].reason==CanaryPauseStep` 再建订阅（no-op 投递播种 Unknown → observer Unknown→Progressing 翻转确定性携带判定消息，设计理由见车道文件头）；entry Progressing + health Unknown + Reason 保持 Applied（AwaitingPromotion 只走事件 detMessage，observer 永不覆写引擎面）+ 聚合 Progressing；双 ns RolloutProgressing 事件含 `awaiting promotion` 与 `ADR-015 decision 8`；Consistently 70s（覆盖两个 30s observer 轮询周期）断言永不进入 Succeeded、双 ns 无 RolloutSucceeded 事件 |
+
+SSA 409 升级（spec D11-c）按 spec 规定留在单测层，不进本表。
 
 ## 附加证据（CI 跳过、可选启用）
 

@@ -977,3 +977,151 @@ selector 语法深度校验（#79 review c3 移交），复用 apimachinery `Val
 - **零写入的证明强度**：越限场景不止断言镜像未变，还断言 managedFields 中**不存在**订阅的 field manager（`imageflow.appfun.dev/sub-<ns>-<name>`，与 `internal/delivery.FieldManagerFor` 同构，<128 字符故无哈希后缀）；
 - **NoMatches/MatchLimitExceeded 事件断言同时钉住类型与文案**：`type|message` 行断言 Warning 类型 + 引擎消息的稳定子串（`matched zero live objects`/`legal empty match set`/`ADR-014 decision 8`；`over the hard limit of 3`/`--selector-match-limit`/`remaining 1 are NOT delivered`），文案漂移会 RED；
 - **本机未实跑声明**：本机 Podman socket 拒连、kind 集群无法创建（同 v1.7-02/07/08 小节），本车道**首跑在 CI/有 Podman 的环境**；本机验收为编译级证据——`go build ./...`、`go vet ./test/e2e/...`、`gofmt -l .` 全清洁，`go test -c ./test/e2e/ -o /dev/null` 编译通过，`go test ./test/e2e/ -run xxx -count=1` 返回 `ok ... [no tests to run]`。
+
+## Argo Rollouts 内建 Kind 支持测试矩阵（v1.8，#91）
+
+v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo Rollout（`argoproj.io/v1alpha1`）
+纳入内建 Kind。本节是 v1.8 全部测试 lane 的总览索引（对齐 spec §Testing Decisions 六条缝）；各票的完整用例表、
+断言与覆盖率要点见紧随其后的 v1.8-01 / v1.8-02 小节，此处不重复。
+
+| 票 | Lane | 层 · 文件 | 覆盖要点 |
+|---|---|---|---|
+| v1.8-01（#92） | Adapter 单测 | unit · `internal/delivery/delivery_test.go` | Rollout 精确 GVK 命中内建注册表；Plan 只声明具名容器字段（与 Deployment 同形 apply-nest）；Classify 走 KindAdapter 车道 |
+| v1.8-01（#92） | SSA 升级单测 | unit · `internal/controller/subscription_delivery_controller_test.go` | 首发 409（foreign manager `rollouts-controller` 持有 image 字段，上游 argo/argo-rollouts#3281 形态）→ force 重试恰一次 + Warning `ApplyConflictEscalated`；持续冲突如实 Failed（预算 1/pass 用尽，无 retry bookkeeping）；named / selector 两投递形态端到端 |
+| v1.8-01（#92） | envtest 双 lane | envtest · `internal/controller/subscription_delivery_rollout_envtest_test.go` | lane A：vendored Rollout CRD（无 rollouts-controller）真实 SSA 写路径 + 二次 pass 稳态零写入；lane B：无 CRD → `KindNotInstalled` 等待态（spec D9） |
+| v1.8-02（#93） | D5 判定矩阵 18 例 | unit · `internal/controller/subscription_observer_test.go` | untrusted 三种 / 三合一 Succeeded（含两负例）/ Failed 三 phase / `pause: {}` → Progressing + `AwaitingPromotion` / pod 镜像失败 / Unknown 类；两跳 RS owner 链 pod 失败 |
+| v1.8-02（#93） | D4 提取 | unit · `internal/controller/subscription_observer_test.go` | unstructured 逐字段提取断言 + `observedGeneration` 字符串防御解析边界表（空白/非数字/小数/溢出/缺失 → 不信任 status） |
+| v1.8-02（#93） | envtest 5+1 例 | envtest · `internal/controller/subscription_observer_argorollout_envtest_test.go` | CRD 在、controller 不在（status 经 /status 子资源手工落库）：5 例 D5 决定性行端到端 + 1 例提取断言（含 API Server Create 剥离 status 的自证） |
+| v1.8-02（#93） | 契约扩充 | unit · `internal/controller/metrics_cardinality_test.go`、`subscription_observer_test.go` | 失败 reason 闭集**负表**加 `AwaitingPromotion`（进 health 词汇、绝不进 failure 指标词汇，ADR-015 决策 8 / spec D10）；observer kind 闭集加 `rollout`（系列上限 27→31）；`isEngineOwnedReason` 守卫放行 |
+| v1.8-04（#95） | kind e2e（t87 车道） | kind · `test/e2e/rollout_e2e_test.go`（CI 安装 argo-rollouts v1.10.2，pin install.yaml） | 两场景表与断言详见下文 v1.8-04 专节：spec D11 (a) 无 pause canary 收敛 Succeeded（真实 digest + 决策 7 三合一全兑现）；(b) `pause: {}` 步停 → Progressing + `AwaitingPromotion`（no-op 播种 Unknown，Consistently 70s 永不 Succeeded）；(c) SSA 409 升级明确只在 unit 层（已由 v1.8-01 覆盖）；envtest 无 controller 无法闭环，故收敛判定只在 kind e2e；本机未实跑（无 Podman）、首跑在 CI `E2E Tests` job |
+
+## Argo Rollout 投递支持（v1.8-01，#92）
+
+### Adapter 单元测试（`internal/delivery/delivery_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestRolloutAdapterIsRegistered` | `argoproj.io/v1alpha1, Kind=Rollout` 精确 GVK 命中内建注册表（D2：init 注册，零引擎改动） | 已实现 |
+| `TestBuiltInPlanDeclaresOnlyTheNamedContainerImages`（Rollout 行） | 表驱动沿用五内建 Kind 同一缝：Rollout fixture 的 Plan 只声明具名容器字段，路径为标准 apply-nest `.spec.template.spec.containers`（与 Deployment 同形） | 已实现（表加行） |
+| `TestClassifyServesFirstBatchAndRefusesTheRest`（Rollout 行） | Classify 对 Rollout 走 KindAdapter 车道；不新增分类枚举 | 已实现（表加行） |
+
+### 引擎单元测试（`internal/controller/subscription_delivery_controller_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestSubscriptionDeliverySSAConflictEscalatesForceOnce` | 首发不 force 遇 409（foreign manager `rollouts-controller` 持有 image 字段，上游 argo/argo-rollouts#3281 形态）→ 升级 force 重试**恰一次**（applies=2：conflict 1 + success 1）→ digest 落盘且字段归订阅 field manager 所有；恰 1 条 Warning `ApplyConflictEscalated` 事件**命名目标与冲突 manager**；值变更投递的双命名空间 ImageApplied 审计不变（ADR-015 决策 9 先礼后兵） | 已实现 |
+| `TestSubscriptionDeliverySSAConflictPersistentFailsHonestly` | 强制重试仍 409（budget 1/reconcile pass 用尽）：如实 Failed（`ApplyFailed`、消息承认 forced retry 预算耗尽）、**无 retry bookkeeping**（RetryCount=0，非 transient）、正常等待 requeue（`waitingStateRequeue`）而非 workqueue 退避风暴；对象零写入；`failures{apply_error}`=1；升级事件与失败 Warning 各 1 条 | 已实现 |
+| `TestSubscriptionDeliveryDeliversToNamedRollout` | named 形态端到端：一次 apply + 一次 status write，digest 落盘、字段归订阅 manager、Applied 条目引用 Rollout kind | 已实现 |
+| `TestSubscriptionDeliverySelectorFanOutToRollouts` | selector 形态自动通用（v1.7 路径零改动）：resolver 以 Rollout selector 键被查一次，2 成员各一次 SSA 写入，单条 selector 聚合 entry（matched=2、Rollout kind 回显） | 已实现 |
+
+### envtest 集成（`internal/controller/subscription_delivery_rollout_envtest_test.go`）
+
+| 用例 | 断言 | 状态 |
+|---|---|---|
+| `TestRolloutDeliveryEnvtestSSAWritePath`（lane A） | 共享环境装 vendored Rollout CRD（`test/testdata/thirdparty/argoproj.io_rollouts.yaml`，结构式 schema、containers 为 name 键 map-list）而**无 rollouts-controller**：CR 经真实 API server admission 原样往返 pod-template 巢；一次投递经真实 SSA 写入 digest 且 managedFields 含订阅 manager 的 Apply 条目；Applied 条目 + ImageApplied 事件；第二次 pass 稳态零写入（rollout 与订阅的 resourceVersion 均不变） | 已实现（本机 `KUBEBUILDER_ASSETS` 实跑通过） |
+| `TestRolloutDeliveryEnvtestKindNotInstalled`（lane B） | 专用环境只装 imageflow CRD（无 Rollout CRD）：named Rollout target 的 REST-mapping miss 如实映射为 `KindNotInstalled` 等待态（spec D9，不新增枚举），正常等待 requeue、零写入 | 已实现（本机实跑通过） |
+
+### 覆盖率要点
+
+- **先礼后兵的预算语义**：force 升级只在「首发 409」单点发生，预算恰为 1/reconcile pass（ADR-015 决策 9）；orphan 接管（首发即 force）与升级重试共用同一 `IsConflict` 错误车道——持续冲突一律诚实 Failed，不做超预算重试；
+- **升级审计无 reasonChanged 门控**：每次真实强制接管都发 Warning（真实集群 event correlator 聚合为 series）；稳态成功 churn 中每次升级都对应真实 ownership 争夺，必须可见；失败词汇表与指标基数均不增（复用 `TargetReasonApplyFailed`/`failureLabelApplyError`）；
+- **foreign vs other-subscription**：首发 force 仍只对 `OwnershipOtherSubscription`（孤儿接管，v1.7 既有语义）触发；foreign manager（如 rollouts-controller）首发展望 409 升级车道——冲突竞态重分类（terminal Conflict、零写入）优先级仍高于强制重试；
+- **RBAC 增量**：`+kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch`（spec D8），`make manifests` 重生成 `config/rbac/role.yaml` 纯增量一个 rule 块；
+- **selector 形态零改动**：resolver 与 match-informer 通道是 GVK 无关的（v1.7 #81 车道），Rollout selector 仅需注册表条目，单测与 envtest 双侧证明；
+- **已知环境限制**：e2e 需 Podman（本机 socket 拒连，不跑），本票无 e2e 车道新增；`test/integration` webhook lane 既有环境限制同 v1.7-02 小节说明。
+## Argo Rollout 观察与完成判定（v1.8-02，#93）
+
+本票（ADR-015，docs/spec/imageflow-v1.8-argo-rollouts-support.md D4/D5/D6/D10）把 Argo Rollout（`argoproj.io/v1alpha1`）
+纳入 observer 内建 Kind 白名单：unstructured 提取 `status.observedGeneration`（字符串，防御解析）/`status.phase`/
+`status.stableRS`/`status.currentPodHash`/`status.pauseConditions` 与 4 个 replica 计数字段（D4，零新 Go 依赖，
+`runtime.DefaultUnstructuredConverter` 把 `.spec.template.spec` 转成与 Deployment 同构的 `corev1.PodSpec` 复用容器
+状态分析），D5 判定矩阵（untrusted→Progressing；三合一→Succeeded；Degraded/ReplicaFailure/ProgressDeadlineExceeded
+→Failed；pause→Progressing+AwaitingPromotion；reconcile 永不冻结）。本车道两层：unit 判定表（假客户端）+ envtest
+（CRD 在、controller 不在——真实 API Server，手工 status 经 /status 子资源落库）。
+
+| 测试名 | 行为 | 状态 |
+|---|---|---|
+| `TestObserverDetermineArgoRolloutVerdictStates` | D5 判定矩阵 18 例（untrusted 三种：observedGeneration 空串/非数字/小于 generation；Succeeded 三合一：phase=Healthy + stableRS==currentPodHash + observedGeneration==generation，及 stableRS 为空、两者不等两个负例；Failed 三种 phase；Paused 无 pauseConditions 非 pause；pause→Progressing+AwaitingPromotion 且 message 含 "awaiting promotion"；pod ImagePullBackOff→Failed；镜像漂移/缺容器/缺 template→Unknown；Succeeded 后 health 走 v1.5 native health=NoMatchingPods） | 已实现（CI 已实跑） |
+| `TestObserverGetWorkloadFactsArgoRolloutExtraction` | D4 提取逐字段断言：generation=3/observedGeneration 字符串 "3"→int64 3（parsed=true）、phase/stableRS/currentPodHash/pauseConditions→rolloutPaused、replicas 4 计数、spec.replicas、template 转换出 `corev1.PodSpec{Containers:[app@digest]}` | 已实现（CI 已实跑） |
+| `TestParseArgoRolloutObservedGeneration` | 字符串防御解析边界表：`"3"`/`" 3 "`→(3,true)；`""`/`"abc"`/`"3.5"`/int64 溢出→(0,false)；字段缺失→(0,false) | 已实现（CI 已实跑） |
+| `TestObserverDetermineArgoRolloutPodImageFailureAndReplicaSetChain` | Pod 枚举两跳 owner 链（Rollout→ReplicaSet→Pod）：RS 以 Rollout UID 为 owner、Pod 以 RS UID 为 owner 时被列出，pod ImagePullBackOff→Failed（消息 "cannot start image"） | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutAwaitingPromotionHealthMessage` | health 语义：rollout Progressing+awaitingPromotion → Health Unknown + Reason=AwaitingPromotion，message 含 "awaiting promotion"（ADR-015 决策 8：合法稳态，非 NotReady） | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutEnvtestVerdicts` | envtest（CRD 在、controller 不在）：5 例 D5 决定性行端到端走 observeTarget——succeeded 三合一（health=NoMatchingPods，D6 移交 v1.5 native health）、paused→Progressing+AwaitingPromotion、Degraded→Failed（health=WaitingForRollout）、observedGeneration 缺失→Progressing（untrusted）、stale→Progressing；断言 kindLabel=`rollout` 进指标词汇 | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutEnvtestExtraction` | envtest 提取：断言 API Server 在 Create 时剥离 status（CRD 声明 status 子资源）、经 `client.Status().Update` 落库后逐字段读回（含 template→corev1.PodSpec 转换） | 已实现（CI 已实跑） |
+| `TestObserverObservableBuiltinKindClassification`（既有，扩充） | 白名单分类表加 Rollout 行：`argoproj.io/v1alpha1, Kind=Rollout` + containerNames→(rollout, true) | 已实现（CI 已实跑） |
+| `TestIsEngineOwnedReason`（既有，扩充） | 非引擎原因列表加 `AwaitingPromotion`——守卫 `isEngineOwnedReason` 判定为 false，允许其写入 entry.Reason | 已实现（CI 已实跑） |
+| `TestDeliveryFailureLabelVocabularyIsClosed`（既有，扩充） | 失败 reason 闭集**负表**加 `HealthReasonAwaitingPromotion`/`"AwaitingPromotion"`：钉死「进 health 词汇、绝不进 failure 指标词汇」（ADR-015 决策 8 / spec D10） | 已实现（CI 已实跑） |
+| `TestObserverLabelVocabulariesAreClosed`（既有，扩充） | 观察者 kind 闭集正表加 `argoRolloutGVK→observerKindRollout`；负表保持 third-party/imageFields/无 containerNames→other | 已实现（CI 已实跑） |
+
+### 变异自证
+
+- 判定表按 spec §D5 原文 5 步顺序构造，每例断言 status + message 稳定子串 + awaitingPromotion 标志三件套——
+  删掉六步矩阵中任何一步（如跳过 untrusted 检查直接信 phase）至少 3 例 RED；
+- `TestParseArgoRolloutObservedGeneration` 的溢出/小数/空白边界直接对着 `strconv.ParseInt` 的拒绝面，把
+  「非数字视为不匹配（不信任 status）」从注释变成可证伪行为；
+- envtest 的 `t93eCreateRollout` 先断言 API Server **剥离**了 Create 携带的 status——若 fixture CRD 漏声明
+  status 子资源，该断言立即 RED，防止「测试自己骗自己」（手工 status 根本没有落库）；
+- 负表断言（`AwaitingPromotion` 不属于 failure 指标词汇）是反向变异防护：将来若有人把它注册成失败原因，
+  metrics 契约测试 RED 而不是静默污染告警指标。
+
+### 契约文档同步
+
+- `docs/metrics-contract.md`：`kind` 词汇行加 `rollout`（ADR-015 v1.8，#93）；观察者系列上限 6 kinds×4+3=27 →
+  **7 kinds×4+3=31**；
+- `docs/ops.md` Reason 词汇表：Health 原因行加 `AwaitingPromotion`（注明 ADR-015 决策 8 合法稳态、永不进 failure 词汇）；
+- `docs/scenario-map.md` 场景 11（rollout 四态分别报告）补 Argo Rollout 车道两条用例（unit 判定表 + envtest）；
+- `GLOSSARY.md`：AwaitingPromotion 词条在 ADR-015 wave C 已落地，本票无变更；
+- `docs/spec/imageflow-v1.8-argo-rollouts-support.md` D12 要求的 ops/TESTING/scenario-map 三处登记至此全部落账。
+
+### 覆盖率要点
+
+- **CRD 在、controller 不在是本票指定形态**：envtest 只装 `test/testdata/thirdparty/argoproj.io_rollouts.yaml`
+  （最小 CRD：根级 `x-kubernetes-preserve-unknown-fields` + status 子资源），不跑任何 Argo 控制器——所有 status
+  由测试手工经 /status 子资源写入，正是「observer 读的就是上游控制器写的那个形状」的最小可信证明；
+- **transition 语义决定断言面**：`out.detMessage` 只在计划了 rollout 状态翻转时携带——Progressing→Progressing
+  不翻转、消息为空是**正确行为**，故 progressing 三例以 priorStatus=Unknown 播种（翻转携带消息），succeeded/failed
+  两例以 Progressing 播种；这是断言形态而非测试绕行；
+- **零新依赖验证**：`go.mod` 无 diff；unstructured/converter 全部来自已在依赖树里的 `k8s.io/apimachinery`；
+- **本机实跑声明**：unit 层（`go test ./internal/controller/...`）与 envtest 层均本机实跑通过
+  （`KUBEBUILDER_ASSETS` 指向主 checkout 的 `bin/k8s/1.33.0-darwin-arm64`，worktree 不带该目录）；
+  e2e kind 车道本机无 Podman 不在本票范围（本票无 e2e 用例要求）。
+
+## Argo Rollouts kind e2e 闭环（v1.8-04，#95）
+
+本票（ADR-015 决策 15，docs/spec/imageflow-v1.8-argo-rollouts-support.md D11）补 v1.8 的最后一块：
+在**真实 kind 集群 + 真实 rollouts-controller** 上验证 spec D11 的两个闭环场景。envtest 无法替代——
+CRD 在、controller 不在时 native status 永远空白，收敛判定（决策 7 三合一）与步停映射（决策 8）
+都依赖 rollouts-controller 真实写入 status.phase/stableRS/currentPodHash/pauseConditions。
+CI 的 `E2E Tests` job（`.github/workflows/test-e2e.yml`）在建好 kind 集群后安装 **pin 的
+argo-rollouts v1.10.2**（stable 通道，与 ADR-015 研究锚点一致；`kubectl create ns argo-rollouts` +
+`kubectl apply -f …/releases/download/v1.10.2/install.yaml` + `rollout status` 等待就绪），
+然后 `make test-e2e` 照常跑全量车道。
+
+车道文件 `test/e2e/rollout_e2e_test.go`（`Describe(..., Label("t87"), Ordered)`，命名与结构沿用
+t86 车道先例）：双命名空间（订阅侧 `t87-rollout-e2e` / 负载侧 `t87-rollout-e2e-wl`）、manager 裸
+Pod + 生成 RBAC 绑定（`config/rbac/role.yaml`，含 #92 的 argoproj.io verbs）、created-by 注解手工
+注入（webhook 在 e2e 不活跃）、事件断言沿用 t11/t86 的双 ns field-selector 模式。Allure 过渡标注
+（ADR-009）：AllureID **IF-95** · TMS **IF-95**/**SPEC-91** · Epic *Phase 1.8: Argo Rollouts
+Support* · Feature *ADR-015 Argo Rollouts Adoption* · Suite **t87-rollout**（文件头与逐 It 注释块）。
+
+| 场景 | 用例 | 断言要点 |
+|---|---|---|
+| 无 pause 收敛（D11-a，US-8/US-20） | `t87-e2e-rollout-canary-without-pause-converges-succeeded-after-image-write` | `canary: {}` 基础金丝雀；真实 digest（registry.k8s.io/pause 多架构锚点，与 t11 同一 digest，kubelet 真拉取）经引擎写入 pod-template 标准路径（决策 4）；原生门控 phase=Healthy 且 stableRS==currentPodHash（决策 7 三合一全部兑现）；entry Succeeded + Reason=Applied（R3）+ health Healthy + 聚合 Succeeded；双 ns RolloutSucceeded 事件含审计四段与 `succeeded per native` |
+| pause:{} 步停（D11-b，US-11/US-21） | `t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded` | Rollout 出生即持目标 digest + `steps: [setWeight:50, pause:{}]`，先门控原生 `pauseConditions[0].reason==CanaryPauseStep` 再建订阅；no-op 投递播种 Unknown → observer Unknown→Progressing 翻转携带判定消息；entry Progressing + health Unknown（ADR-005 §3 门）+ Reason 保持 Applied（AwaitingPromotion 只走事件 detMessage）+ 聚合 Progressing；双 ns RolloutProgressing 事件含 `awaiting promotion` + `ADR-015 decision 8`；Consistently 70s（两个 30s observer 轮询周期）断言永不 Succeeded、双 ns 无 RolloutSucceeded |
+
+### 覆盖率要点
+
+- **场景 b 的 no-op 形态是确定性设计而非绕行**：值变更投递由引擎直接播种 `entry.RolloutStatus=
+  Progressing`（delivery controller 收敛路径），observer 的 Progressing→Progressing 不翻转、永不
+  发出携带 detMessage 的 transition 事件（v1.8-02 已记录该语义）——步停场景若走值变更路径，
+  AwaitingPromotion 在 e2e 层**原则上不可断言**。让 Rollout 先在原生层步停、订阅后到，引擎即播种
+  Unknown，observer 的 Unknown→Progressing 翻转确定性携带 `awaiting promotion` 判定（车道文件头
+  有完整推导）；
+- **观察靠 30s 轮询**：observer 不 watch Rollout informer，Progressing 时按 `waitingStateRequeue`
+  （30s）重排——场景 a 收敛 Eventually 预算 5m，场景 b 的 Consistently 70s 覆盖两个完整轮询周期；
+- **真实收敛是真凭证**：注册镜像取 t11 的 pause:3.9 真实多架构 digest，kubelet 拉取、金丝雀 RS
+  pod Ready、rollouts-controller 推进——observer 的 Succeeded/Progressing 判定全部挣得，非模拟；
+- **本机未实跑声明**：本机无 Podman（kind 集群起不来），本票只做到编译级验收——
+  `gofmt -l` 干净、`go vet ./test/e2e/...` 通过、`go build ./...` 通过；
+- **CI 首跑声明**：t87 车道的首次真实运行发生在 CI 的 `E2E Tests` job（含 argo-rollouts v1.10.2
+  安装步骤）；若首跑暴露时序问题，只允许调整 t87 车道的超时与门控预算，不允许放松断言面。

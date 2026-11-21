@@ -257,4 +257,16 @@ func init() {
 		containerPath:  cronJobContainerPath,
 		applyNest:      cronJobApplyNest,
 	})
+	// Argo Rollouts (v1.8-01, spec D2 / ADR-015 decision 3): the Rollout pod
+	// template lives at the SAME standard path as the apps/v1 workloads
+	// (.spec.template.spec.containers[name=X].image), so the shared
+	// pod-template adapter serves it. Registration here keeps the engine
+	// untouched and strategy fields (canary steps, pause, promote) forever
+	// out of ImageFlow's write surface (ADR-015 decision 4).
+	RegisterKindAdapter(podTemplateAdapter{
+		gvk:            schema.GroupVersion{Group: "argoproj.io", Version: "v1alpha1"}.WithKind("Rollout"),
+		containersPath: podTemplateContainersPath,
+		containerPath:  podTemplateContainerPath,
+		applyNest:      standardApplyNest,
+	})
 }

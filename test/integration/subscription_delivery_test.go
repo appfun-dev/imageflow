@@ -586,10 +586,21 @@ var _ = Describe("T9 delivery write engine", Label("t9"), Ordered, func() {
 				To(Equal(metav1.ConditionFalse))
 
 			events := t9iDrainEvents(recorder)
-			Expect(events).To(HaveLen(2), "dual-namespace ImageApplied events")
+			applied, escalated := 0, 0
 			for _, e := range events {
-				Expect(e).To(ContainSubstring(controller.EventReasonImageApplied))
+				switch {
+				case strings.Contains(e, controller.EventReasonApplyConflictEscalated):
+					escalated++
+				case strings.Contains(e, controller.EventReasonImageApplied):
+					applied++
+				}
 			}
+			// First ImageFlow write against the client-created object
+			// escalates 409→force once (ADR-015 decision 9), then the
+			// dual-namespace ImageApplied pair lands.
+			Expect(events).To(HaveLen(3), "dual-namespace ImageApplied plus the SSA escalation audit")
+			Expect(applied).To(Equal(2), "dual-namespace ImageApplied events")
+			Expect(escalated).To(Equal(1), "first-write SSA escalation audit (ADR-015 decision 9)")
 		})
 
 		// arrangeFirstBatch runs the shared AC1 arrange+act for any first-batch

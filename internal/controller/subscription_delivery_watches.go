@@ -54,6 +54,10 @@ const (
 	kindDaemonSet   = "DaemonSet"
 	kindJob         = "Job"
 	kindCronJob     = "CronJob"
+	// kindRollout is the Argo Rollouts kind (v1.8, ADR-015). No argo-rollouts
+	// Go module is imported (decision 11): the GVK is spelled out from this
+	// constant in argoRolloutGVK.
+	kindRollout = "Rollout"
 )
 
 // streamChangePredicate fires on stream creation/deletion and on updates that

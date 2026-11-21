@@ -1048,6 +1048,240 @@ func TestSubscriptionDeliveryOrphanOwnershipTakeoverForcesApply(t *testing.T) {
 	}
 }
 
+// --- SSA 409 escalation (v1.8-01, issue #92, ADR-015 decision 9) ----------
+//
+// The rollouts-controller can claim .spec.template.spec.containers ownership
+// during field normalization (upstream argo/argo-rollouts#3281). First apply
+// never forces; a 409 escalates to exactly ONE forced retry per reconcile
+// pass, audited by a Warning Event naming the target and the conflicting
+// manager. A retry that still conflicts reports Failed honestly and settles
+// at the normal requeue — the retry budget is 1 per pass, not per storm.
+
+func TestSubscriptionDeliverySSAConflictEscalatesForceOnce(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	t9cSeedOwnership(deploy, "rollouts-controller", t9cContainer) // foreign manager (#3281)
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("escalation pass must settle after one forced retry: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("expected the 409 plus exactly one forced retry, got %+v", f.audit)
+	}
+	if v := t9cCounterVal(t, f.metrics.applies, applyResultConflict); v != 1 {
+		t.Fatalf("applies{conflict} = %v, want 1", v)
+	}
+	if v := t9cCounterVal(t, f.metrics.applies, applyResultSuccess); v != 1 {
+		t.Fatalf("applies{success} = %v, want 1 (the forced retry landed)", v)
+	}
+	stored := f.getDeploy(t)
+	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
+		t.Fatalf("forced retry must write the digest, got %s", image)
+	}
+	if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
+		t.Fatalf("self must own the field after the forced retry: %v", stored.GetManagedFields())
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonApplied || !entry.ImageApplied {
+		t.Fatalf("escalation must end in an Applied entry, got %+v", entry)
+	}
+	events := drainT9cEvents(f.recorder)
+	escalated := t9cEventsWith(events, EventReasonApplyConflictEscalated)
+	if len(escalated) != 1 {
+		t.Fatalf("expected exactly one Warning %s event, got %v", EventReasonApplyConflictEscalated, events)
+	}
+	if !strings.Contains(escalated[0], "rollouts-controller") ||
+		!strings.Contains(escalated[0], t9cDeployName) {
+		t.Fatalf("escalation event must name the target and the conflicting manager: %q", escalated[0])
+	}
+	if v := len(t9cEventsWith(events, EventReasonImageApplied)); v != 2 {
+		t.Fatalf("value-changing delivery keeps the dual-namespace audit: want 2 ImageApplied, got %v", events)
+	}
+}
+
+func TestSubscriptionDeliverySSAConflictPersistentFailsHonestly(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
+	deploy := t9cDeployment(t9cDeployName, [2]string{t9cContainer, t9cInitialImage})
+	t9cSeedOwnership(deploy, "rollouts-controller", t9cContainer)
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), deploy)
+	// The forced retry conflicts too (budget exhausted): every apply 409s.
+	f.audit.blockApply = apierrors.NewConflict(t9cAppsGR, t9cDeployName,
+		fmt.Errorf(`Apply failed with 409: conflict with "rollouts-controller"`))
+
+	result, err := f.reconcile(t)
+	if err != nil {
+		t.Fatalf("persistent conflict must fail honestly, not error the reconcile: %v", err)
+	}
+	if result.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("persistent conflict settles at the waiting requeue, got %+v", result)
+	}
+	if f.audit.applies != 2 {
+		t.Fatalf("retry budget is 1 per reconcile pass: want exactly 2 applies, got %+v", f.audit)
+	}
+	entry := t9cEntry(f.getSub(t), t9cDeployName)
+	if entry == nil || entry.Reason != TargetReasonApplyFailed || entry.RetryCount != 0 {
+		t.Fatalf("expected an honest Failed entry without retry bookkeeping, got %+v", entry)
+	}
+	if !strings.Contains(entry.Message, "forced retry") {
+		t.Fatalf("message must admit the exhausted retry budget: %q", entry.Message)
+	}
+	if image := t9cContainerImage(t, f.getDeploy(t), t9cContainer); image != t9cInitialImage {
+		t.Fatalf("a persistent conflict must not write, got %s", image)
+	}
+	if v := t9cCounterVal(t, f.metrics.failures, failureLabelApplyError); v != 1 {
+		t.Fatalf("failures{apply_error} = %v, want 1", v)
+	}
+	events := drainT9cEvents(f.recorder)
+	if v := len(t9cEventsWith(events, EventReasonApplyConflictEscalated)); v != 1 {
+		t.Fatalf("the escalation itself must still be audited, got %v", events)
+	}
+	if v := len(t9cEventsWith(events, TargetReasonApplyFailed)); v != 1 {
+		t.Fatalf("the honest failure must emit one %s Warning, got %v", TargetReasonApplyFailed, events)
+	}
+}
+
+// --- Argo Rollout targets (v1.8-01, issue #92, ADR-015 decisions 3/9) ------
+//
+// Rollout is a registered built-in kind on the standard pod-template path
+// (.spec.template.spec.containers, same as a Deployment), so the v1.7
+// delivery paths apply unchanged. These two tests pin that BOTH target forms
+// reach it: the named form and the selector form (acceptance criterion 2) —
+// the selector resolver is GVK-agnostic, so fan-out to Rollouts needs no
+// engine change, only the registry entry proven here end to end.
+
+const (
+	t9cRolloutName     = "checkout-canary"
+	t9cAPIArgoRollouts = "argoproj.io/v1alpha1"
+	t9cKindRollout     = "Rollout"
+)
+
+func t9cRolloutTarget(name string, containers ...string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion: t9cAPIArgoRollouts,
+			Kind:       t9cKindRollout,
+			Namespace:  t9cNamespace,
+			Name:       name,
+		},
+		ContainerNames: containers,
+	}
+}
+
+func t9cRolloutSelectorTarget(matchLabels map[string]string, containers ...string) imageflowv1alpha1.SubscriptionTarget {
+	return imageflowv1alpha1.SubscriptionTarget{
+		TargetRef: imageflowv1alpha1.TargetReference{
+			APIVersion:    t9cAPIArgoRollouts,
+			Kind:          t9cKindRollout,
+			Namespace:     t9cNamespace,
+			LabelSelector: &metav1.LabelSelector{MatchLabels: matchLabels},
+		},
+		ContainerNames: containers,
+	}
+}
+
+// t9cRollout builds an Argo Rollout workload; the pod-template nest is the
+// Deployment-identical .spec.template.spec.containers (ADR-015 decision 3).
+func t9cRollout(name string, images ...[2]string) *unstructured.Unstructured {
+	containers := make([]any, 0, len(images))
+	for _, pair := range images {
+		containers = append(containers, map[string]any{"name": pair[0], "image": pair[1]})
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": t9cAPIArgoRollouts,
+		"kind":       t9cKindRollout,
+		"metadata":   map[string]any{"namespace": t9cNamespace, "name": name},
+		"spec": map[string]any{
+			"template": map[string]any{"spec": map[string]any{"containers": containers}},
+		},
+	}}
+}
+
+func t9cRolloutByName(t *testing.T, f *t9cFixture, name string) *unstructured.Unstructured {
+	t.Helper()
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion(t9cAPIArgoRollouts)
+	u.SetKind(t9cKindRollout)
+	key := types.NamespacedName{Namespace: t9cNamespace, Name: name}
+	if err := f.client.Get(context.Background(), key, u); err != nil {
+		t.Fatalf("get rollout %s: %v", name, err)
+	}
+	return u
+}
+
+func TestSubscriptionDeliveryDeliversToNamedRollout(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cRolloutTarget(t9cRolloutName, t9cContainer))
+	rollout := t9cRollout(t9cRolloutName, [2]string{t9cContainer, t9cInitialImage})
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-time.Minute)), rollout)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("named Rollout delivery failed: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 1 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("one apply plus one status write expected, got %+v", f.audit)
+	}
+	stored := t9cRolloutByName(t, f, t9cRolloutName)
+	if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
+		t.Fatalf("rollout image = %s, want digest %s", image, t9cDigestA)
+	}
+	if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
+		t.Fatalf("image field must be owned by the subscription's field manager")
+	}
+	entry := t9cEntry(f.getSub(t), t9cRolloutName)
+	if entry == nil || entry.Reason != TargetReasonApplied || !entry.ImageApplied {
+		t.Fatalf("named Rollout delivery must record an Applied entry, got %+v", entry)
+	}
+	if entry.TargetRef.Kind != t9cKindRollout {
+		t.Fatalf("entry must reference the Rollout, got kind %q", entry.TargetRef.Kind)
+	}
+}
+
+func TestSubscriptionDeliverySelectorFanOutToRollouts(t *testing.T) {
+	sub := t9cAuthorizedSub(t9cRolloutSelectorTarget(t9cAppCheckout, t9cContainer))
+	selectorKey := imageflowv1alpha1.CanonicalTargetKey(sub.Spec.Targets[0].TargetRef)
+	web1 := t9cRollout(t9cWeb1, [2]string{t9cContainer, t9cInitialImage})
+	web1.SetLabels(t9cAppCheckout)
+	web2 := t9cRollout(t9cWeb2, [2]string{t9cContainer, t9cInitialImage})
+	web2.SetLabels(t9cAppCheckout)
+	matcher := &t9cFakeMatcher{byKey: map[string][]string{selectorKey: {t9cWeb1, t9cWeb2}}}
+	f := newT9cFixture(t, config.Config{}, sub, t9cStream(t9cDigestA, t9cStart.Add(-10*time.Minute)), web1, web2)
+	f.reconciler.SetMatchResolver(matcher)
+
+	result, err := f.reconcile(t)
+	if err != nil || result.RequeueAfter != 0 {
+		t.Fatalf("selector fan-out to Rollouts failed: (%+v, %v)", result, err)
+	}
+	if f.audit.applies != 2 || f.audit.statusWrites != 1 || f.audit.otherWrites != 0 {
+		t.Fatalf("one apply PER OBJECT plus one status write expected, got %+v", f.audit)
+	}
+	if calls := matcher.calls; len(calls) != 1 || calls[0] != selectorKey {
+		t.Fatalf("resolver must be consulted once with the Rollout selector key, got %v", calls)
+	}
+	for _, name := range []string{t9cWeb1, t9cWeb2} {
+		stored := t9cRolloutByName(t, f, name)
+		if image := t9cContainerImage(t, stored, t9cContainer); image != t9cDigestA {
+			t.Fatalf("%s image = %s, want digest %s", name, image, t9cDigestA)
+		}
+		if !t9cOwnsImage(stored, t9cSelfManager, t9cContainer) {
+			t.Fatalf("%s image field must be owned by the subscription's field manager", name)
+		}
+	}
+	got := f.getSub(t)
+	entry := t9cEntryByKey(got, selectorKey)
+	if entry == nil {
+		t.Fatalf("aggregate entry must keep the Rollout selector-form ref, got %+v", got.Status.Targets)
+	}
+	assertT9cDeliveredEntry(t, entry)
+	if entry.MatchedObjects == nil || *entry.MatchedObjects != 2 {
+		t.Fatalf("aggregate entry must carry the matched count 2, got %+v", entry.MatchedObjects)
+	}
+	if entry.TargetRef.Kind != t9cKindRollout {
+		t.Fatalf("aggregate entry kind = %q, want Rollout", entry.TargetRef.Kind)
+	}
+}
+
 func TestSubscriptionDeliveryDifferentContainersCoexist(t *testing.T) {
 	const shipperImage = "quay.io/example/shipper:v1.2.3"
 	sub := t9cAuthorizedSub(t9cContainerTarget(t9cDeployName, t9cContainer))
