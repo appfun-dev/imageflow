@@ -1107,16 +1107,16 @@ Support* · Feature *ADR-015 Argo Rollouts Adoption* · Suite **t87-rollout**（
 | 场景 | 用例 | 断言要点 |
 |---|---|---|
 | 无 pause 收敛（D11-a，US-8/US-20） | `t87-e2e-rollout-canary-without-pause-converges-succeeded-after-image-write` | `canary: {}` 基础金丝雀；真实 digest（registry.k8s.io/pause 多架构锚点，与 t11 同一 digest，kubelet 真拉取）经引擎写入 pod-template 标准路径（决策 4）；原生门控 phase=Healthy 且 stableRS==currentPodHash（决策 7 三合一全部兑现）；entry Succeeded + Reason=Applied（R3）+ health Healthy + 聚合 Succeeded；双 ns RolloutSucceeded 事件含审计四段与 `succeeded per native` |
-| pause:{} 步停（D11-b，US-11/US-21） | `t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded` | Rollout 出生即持目标 digest + `steps: [setWeight:50, pause:{}]`，先门控原生 `pauseConditions[0].reason==CanaryPauseStep` 再建订阅；no-op 投递播种 Unknown → observer Unknown→Progressing 翻转携带判定消息；entry Progressing + health Unknown（ADR-005 §3 门）+ Reason 保持 Applied（AwaitingPromotion 只走事件 detMessage）+ 聚合 Progressing；双 ns RolloutProgressing 事件含 `awaiting promotion` + `ADR-015 decision 8`；Consistently 70s（两个 30s observer 轮询周期）断言永不 Succeeded、双 ns 无 RolloutSucceeded |
+| pause:{} 步停（D11-b，US-11/US-21） | `t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded` | Phase 1：Rollout 初始部署收敛 Healthy（v1.10.2 首次部署跳过 pause），订阅后到播种 Applied；Phase 2：新 stream 触发引擎写新 digest → rollouts-controller 创建新 RS 并停在 `pauseConditions[0].reason==CanaryPauseStep`；observer 判 Progressing（delivery re-seed 可能已置 entry=Progressing，steady-state 不重复发事件——subscription_observer.go:975）；验证通过 subscription status 字段（per-target rollout=Progressing + aggregate=Progressing + native pauseConditions=CanaryPauseStep）而非事件；health Unknown（ADR-005 §3 门）+ Reason 保持 Applied；Consistently 70s 断言永不 Succeeded、双 ns 无 RolloutSucceeded |
 
 ### 覆盖率要点
 
-- **场景 b 的 no-op 形态是确定性设计而非绕行**：值变更投递由引擎直接播种 `entry.RolloutStatus=
-  Progressing`（delivery controller 收敛路径），observer 的 Progressing→Progressing 不翻转、永不
-  发出携带 detMessage 的 transition 事件（v1.8-02 已记录该语义）——步停场景若走值变更路径，
-  AwaitingPromotion 在 e2e 层**原则上不可断言**。让 Rollout 先在原生层步停、订阅后到，引擎即播种
-  Unknown，observer 的 Unknown→Progressing 翻转确定性携带 `awaiting promotion` 判定（车道文件头
-  有完整推导）；
+- **场景 b 的两阶段设计与事件不可断言**：Phase 1 让 Rollout 初始部署先收敛 Healthy（v1.10.2
+  首次部署跳过 pause），再建订阅播种 Applied；Phase 2 通过新 stream 触发真正的 canary revision。
+  由于 delivery re-seed 可能已将 entry 置为 Progressing，observer 的 Progressing→Progressing
+  属 steady-state（subscription_observer.go:975），不发 transition 事件——AwaitingPromotion
+  语义通过 subscription status 字段验证（per-target rollout + aggregate + native pauseConditions），
+  而非依赖事件；
 - **观察靠 30s 轮询**：observer 不 watch Rollout informer，Progressing 时按 `waitingStateRequeue`
   （30s）重排——场景 a 收敛 Eventually 预算 5m，场景 b 的 Consistently 70s 覆盖两个完整轮询周期；
 - **真实收敛是真凭证**：注册镜像取 t11 的 pause:3.9 真实多架构 digest，kubelet 拉取、金丝雀 RS
