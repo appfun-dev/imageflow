@@ -471,6 +471,19 @@ spec:
 					"--sort-by=.lastTimestamp"))
 				_, _ = fmt.Fprintf(GinkgoWriter, "T87 %s events:\n%s\n", namespace, events)
 			}
+			// Pod-level diagnostics for the workload namespace: when a Rollout
+			// stays Progressing the root cause is usually at the pod/RS level
+			// (image pull, scheduling, crash loop). The namespace-wide event
+			// dump above only shows Rollout-level events.
+			pods, _ := utils.Run(exec.Command("kubectl", "get", "pods", "-n", t87sWorkloadNS,
+				"-o", "wide"))
+			_, _ = fmt.Fprintf(GinkgoWriter, "T87 workload pods:\n%s\n", pods)
+			rsList, _ := utils.Run(exec.Command("kubectl", "get", "rs", "-n", t87sWorkloadNS,
+				"-o", "wide"))
+			_, _ = fmt.Fprintf(GinkgoWriter, "T87 workload replicasets:\n%s\n", rsList)
+			rolloutYAML, _ := utils.Run(exec.Command("kubectl", "get", "rollout",
+				"-n", t87sWorkloadNS, "-o", "yaml"))
+			_, _ = fmt.Fprintf(GinkgoWriter, "T87 workload rollout YAML:\n%s\n", rolloutYAML)
 		}
 	})
 
