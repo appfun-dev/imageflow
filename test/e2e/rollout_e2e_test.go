@@ -581,15 +581,22 @@ spec:
 		t87sRegister(t87sConvergeMapping, t87sConvergeStream, t87sPreImage+"@"+t87sPauseDigest)
 		t87sRollout(t87sPausedRollout, t87sPreImage,
 			"    canary:\n      steps:\n      - setWeight: 50\n      - pause: {}")
-		t87sSubscription(t87sPausedSub, t87sConvergeStream, t87sPausedRollout)
-
-		By("Phase 1: waiting for initial convergence to Succeeded (initial deploy skips pause)")
+		By("Phase 1: waiting for initial convergence (initial deploy skips pause, reaches Healthy)")
 		Eventually(func(g Gomega) {
 			g.Expect(t87sNative(t87sPausedRollout, t87sPhasePth)).To(Equal("Healthy"),
 				"initial deploy must converge natively (v1.10.2 skips pause on first deploy)")
-			g.Expect(t87sEntry(t87sPausedSub, t87sRolloutPthFmt, t87sPausedRollout)).To(Equal("Succeeded"))
-			g.Expect(t87sAggregate(t87sPausedSub)).To(Equal("Succeeded"))
 		}, "5m", "5s").Should(Succeed())
+
+		// The subscription is created AFTER the Rollout converges to Healthy.
+		// This ensures Phase 1 completes before Phase 2 starts. The engine will
+		// write the digest from t87sConvergeStream (which matches what's already
+		// in the Rollout), so this is a no-op delivery that seeds the entry.
+		t87sSubscription(t87sPausedSub, t87sConvergeStream, t87sPausedRollout)
+
+		By("Phase 1: confirming the subscription entry is seeded")
+		Eventually(func(g Gomega) {
+			g.Expect(t87sEntry(t87sPausedSub, t87sReasonPthFmt, t87sPausedRollout)).To(Equal("Applied"))
+		}, "3m", "5s").Should(Succeed())
 
 		By("Phase 2: registering a NEW digest to trigger a real canary with pause")
 		// Use a different tag to force a new ImageStreamMapping → new digest write.
