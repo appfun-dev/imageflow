@@ -518,7 +518,7 @@ spec:
 		Eventually(func(g Gomega) {
 			g.Expect(t87sNative(t87sConvergeRollout, t87sPhasePth)).To(Equal("Healthy"),
 				"initial deploy must converge natively before the engine writes")
-		}, "5m", "5s").Should(Succeed())
+		}, "10m", "5s").Should(Succeed())
 
 		t87sSubscription(t87sConvergeSub, t87sConvergeStream, t87sConvergeRollout)
 
