@@ -506,6 +506,20 @@ spec:
 
 		By("creating the Rollout with a no-step canary strategy and the tag-form pre-image")
 		t87sRollout(t87sConvergeRollout, t87sPreImage, "    canary: {}")
+
+		// Wait for initial convergence BEFORE creating the subscription.
+		// The engine's SSA force-write (409→force retry on first delivery)
+		// triggers a new revision in argo-rollouts v1.10.2, which creates a
+		// second RS that races with the initial one. If the subscription is
+		// created concurrently, the force-write may fire before the initial
+		// RS has any Ready pods, leaving both RS stuck at "more replicas
+		// need to be updated". Deferring the subscription ensures the
+		// initial deploy completes cleanly first.
+		Eventually(func(g Gomega) {
+			g.Expect(t87sNative(t87sConvergeRollout, t87sPhasePth)).To(Equal("Healthy"),
+				"initial deploy must converge natively before the engine writes")
+		}, "5m", "5s").Should(Succeed())
+
 		t87sSubscription(t87sConvergeSub, t87sConvergeStream, t87sConvergeRollout)
 
 		By("the engine writes the digest at the standard pod-template path (ADR-015 decision 4)")
