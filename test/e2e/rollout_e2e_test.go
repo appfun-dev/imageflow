@@ -555,7 +555,7 @@ spec:
 		}, "2m", "5s").Should(Succeed())
 	})
 
-	// ── 场景 2/2：pause:{} 步停 ─────────────────────────────────────────
+	// ── 场景 2/2：pause:{} 步停（多 revision 触发）──────────────────────
 	// Allure (ADR-009): AllureID IF-95 · TMS IF-95 / SPEC-91 (issues/95,
 	// issues/91) · Epic "Phase 1.8: Argo Rollouts Support" · Feature
 	// "ADR-015 Argo Rollouts Adoption" · Story US-11, US-21 · ParentSuite
@@ -565,41 +565,72 @@ spec:
 	// A canary with an indefinite pause:{} step is a LEGITIMATE STEADY
 	// STATE, not a failure (ADR-015 decision 8): the observer must hold the
 	// entry at Progressing and surface AwaitingPromotion — and must never
-	// reach Succeeded while the pause holds. The Rollout is born already
-	// holding the desired digest and is gated NATIVELY at the pause step
-	// before the subscription exists, so the delivery is a no-op: the
-	// engine seeds the entry Unknown (it seeds Progressing only on a
-	// value-changing write), and the observer's Unknown→Progressing
-	// transition deterministically carries the awaiting-promotion
-	// detMessage into the dual-namespace RolloutProgressing events. This
-	// is the ONLY deterministic shape for the assertion — see the lane
-	// design notes at the top of the file.
+	// reach Succeeded while the pause holds.
+	//
+	// IMPORTANT: argo-rollouts v1.10.2 does NOT set pauseConditions on
+	// initial deploy — it advances currentStepIndex past all steps in one
+	// reconcile cycle (fullyPromoted=true, isFastRollback=true). The pause
+	// only triggers on a SUBSEQUENT image update that creates a new
+	// ReplicaSet. This lane therefore uses a two-phase approach:
+	//   Phase 1: create Rollout with pre-image + subscription → converges to Succeeded
+	//   Phase 2: register new digest → engine writes new image → rollouts-controller
+	//            creates new RS, advances to pause step, sets pauseConditions
+	// This tests the REAL pause behavior as users would encounter it.
 	It("t87-e2e-rollout-canary-pause-step-holds-progressing-awaiting-promotion-never-succeeded", func() {
-		By("creating a Rollout that is BORN holding the desired digest, with an indefinite pause step")
-		t87sRollout(t87sPausedRollout, t87sPauseRef,
+		By("Phase 1: creating a Rollout with pre-image and letting it converge to Succeeded")
+		t87sRegister(t87sConvergeMapping, t87sConvergeStream, t87sPreImage+"@"+t87sPauseDigest)
+		t87sRollout(t87sPausedRollout, t87sPreImage,
 			"    canary:\n      steps:\n      - setWeight: 50\n      - pause: {}")
+		t87sSubscription(t87sPausedSub, t87sConvergeStream, t87sPausedRollout)
 
-		By("the rollouts-controller reaches the pause step BEFORE the subscription exists")
-		// Gating the subscription on the native pause removes every race:
-		// when the observer first looks, observedGeneration already covers
-		// generation and pauseConditions is already set, so the verdict is
-		// the decision-8 mapping on the very first pass.
+		By("Phase 1: waiting for initial convergence to Succeeded (initial deploy skips pause)")
 		Eventually(func(g Gomega) {
+			g.Expect(t87sNative(t87sPausedRollout, t87sPhasePth)).To(Equal("Healthy"),
+				"initial deploy must converge natively (v1.10.2 skips pause on first deploy)")
+			g.Expect(t87sEntry(t87sPausedSub, t87sRolloutPthFmt, t87sPausedRollout)).To(Equal("Succeeded"))
+			g.Expect(t87sAggregate(t87sPausedSub)).To(Equal("Succeeded"))
+		}, "5m", "5s").Should(Succeed())
+
+		By("Phase 2: registering a NEW digest to trigger a real canary with pause")
+		// Use a different tag to force a new ImageStreamMapping → new digest write.
+		// The pause container image is the same repo but we reference it via a
+		// different stream so the engine sees a value-changing write.
+		newStream := "t87s-paused-stream-v2"
+		newMapping := "t87s-paused-push-v2"
+		t87sRegister(newMapping, newStream, t87sPauseRef)
+
+		By("Phase 2: updating the subscription to point at the new stream")
+		t87sYAML(t87sPausedSub, fmt.Sprintf(`
+apiVersion: imageflow.appfun.dev/v1alpha1
+kind: ImageSubscription
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+  annotations:
+    imageflow.appfun.dev/created-by: system:serviceaccount:%[2]s:%[3]s
+spec:
+  source:
+    stream: %[4]s
+    tag: %[5]s
+  targets:
+  - targetRef:
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      namespace: %[6]s
+      name: %[7]s
+    containerNames: [%[8]s]
+`, t87sPausedSub, t87sNamespace, t87sCreatorSA, newStream, t87sTag,
+			t87sWorkloadNS, t87sPausedRollout, t87sContainer))
+
+		By("Phase 2: the engine writes the new digest and the rollouts-controller pauses")
+		Eventually(func(g Gomega) {
+			g.Expect(t87sImage(t87sPausedRollout)).To(Equal(t87sPauseRef),
+				"the engine must write the new digest to trigger a new canary")
 			g.Expect(t87sNative(t87sPausedRollout, t87sPauseCondPth)).To(Equal("CanaryPauseStep"),
-				"the rollouts-controller must sit at the indefinite pause first")
-		}, "3m", "2s").Should(Succeed())
+				"the rollouts-controller must now sit at the indefinite pause (second deploy)")
+		}, "5m", "5s").Should(Succeed())
 
-		t87sRegister(t87sPausedMapping, t87sPausedStream, t87sPauseRef)
-		t87sSubscription(t87sPausedSub, t87sPausedStream, t87sPausedRollout)
-
-		By("the no-op delivery converges immediately — the field already holds the desired digest")
-		Eventually(func(g Gomega) {
-			g.Expect(t87sEntry(t87sPausedSub, t87sReasonPthFmt, t87sPausedRollout)).To(Equal("Applied"))
-			g.Expect(t87sEntry(t87sPausedSub, t87sAppliedPthFmt, t87sPausedRollout)).To(Equal("true"),
-				"imageApplied is the field-write fact: the digest IS in place (no write needed)")
-		}, "3m", "2s").Should(Succeed())
-
-		By("the observer holds Progressing — never Succeeded — while the pause holds (US-11)")
+		By("Phase 2: the observer holds Progressing with AwaitingPromotion (US-11)")
 		Eventually(func(g Gomega) {
 			g.Expect(t87sEntry(t87sPausedSub, t87sRolloutPthFmt, t87sPausedRollout)).To(Equal("Progressing"))
 			g.Expect(t87sEntry(t87sPausedSub, t87sReasonPthFmt, t87sPausedRollout)).To(Equal("Applied"),
@@ -610,11 +641,11 @@ spec:
 			g.Expect(t87sAggregate(t87sPausedSub)).To(Equal("Progressing"))
 		}, "3m", "5s").Should(Succeed())
 
-		By("the awaiting-promotion mapping is audited with dual-namespace RolloutProgressing events (US-21)")
+		By("Phase 2: the awaiting-promotion mapping is audited with dual-namespace RolloutProgressing events (US-21)")
 		Eventually(func(g Gomega) {
 			subMsgs := t87sEventMessages(t87sNamespace, t87sPausedSub, "RolloutProgressing")
 			g.Expect(subMsgs).NotTo(BeEmpty(), "subscription-side event")
-			t87sAuditFragments(g, subMsgs[0], t87sPausedStream, t87sPauseRef, t87sPauseRef,
+			t87sAuditFragments(g, subMsgs[0], newStream, t87sPauseRef, t87sPauseRef,
 				t87sPausedRollout, "Progressing")
 			g.Expect(subMsgs[0]).To(ContainSubstring("awaiting promotion"),
 				"the detMessage carries the AwaitingPromotion determination")
@@ -622,15 +653,12 @@ spec:
 				"the pause is recorded as a legitimate steady state, not a failure")
 			wlMsgs := t87sEventMessages(t87sWorkloadNS, t87sPausedRollout, "RolloutProgressing")
 			g.Expect(wlMsgs).NotTo(BeEmpty(), "target-side event in the workload namespace")
-			t87sAuditFragments(g, wlMsgs[0], t87sPausedStream, t87sPauseRef, t87sPauseRef,
+			t87sAuditFragments(g, wlMsgs[0], newStream, t87sPauseRef, t87sPauseRef,
 				t87sPausedRollout, "Progressing")
 			g.Expect(wlMsgs[0]).To(ContainSubstring("awaiting promotion"))
 		}, "2m", "5s").Should(Succeed())
 
-		By("Succeeded is NEVER reached while the indefinite pause holds")
-		// Two full observer poll cycles (waitingStateRequeue = 30s): any
-		// late flip to Succeeded would surface here. A pause:{} step waits
-		// for a HUMAN promotion — the controller never clears it by itself.
+		By("Phase 2: Succeeded is NEVER reached while the indefinite pause holds")
 		Consistently(func(g Gomega) {
 			g.Expect(t87sEntry(t87sPausedSub, t87sRolloutPthFmt, t87sPausedRollout)).To(Equal("Progressing"))
 			g.Expect(t87sAggregate(t87sPausedSub)).To(Equal("Progressing"))
