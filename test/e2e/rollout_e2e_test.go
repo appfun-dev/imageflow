@@ -233,7 +233,6 @@ spec:
       containers:
       - name: %[3]s
         image: %[4]s
-        resources: {}
   strategy:
 %[5]s
 `, name, t87sWorkloadNS, t87sContainer, image, strategyBody))
