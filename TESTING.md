@@ -1052,6 +1052,8 @@ v1.8（ADR-015，`docs/spec/imageflow-v1.8-argo-rollouts-support.md`）把 Argo 
 | `TestIsEngineOwnedReason`（既有，扩充） | 非引擎原因列表加 `AwaitingPromotion`——守卫 `isEngineOwnedReason` 判定为 false，允许其写入 entry.Reason | 已实现（CI 已实跑） |
 | `TestDeliveryFailureLabelVocabularyIsClosed`（既有，扩充） | 失败 reason 闭集**负表**加 `HealthReasonAwaitingPromotion`/`"AwaitingPromotion"`：钉死「进 health 词汇、绝不进 failure 指标词汇」（ADR-015 决策 8 / spec D10） | 已实现（CI 已实跑） |
 | `TestObserverLabelVocabulariesAreClosed`（既有，扩充） | 观察者 kind 闭集正表加 `argoRolloutGVK→observerKindRollout`；负表保持 third-party/imageFields/无 containerNames→other | 已实现（CI 已实跑） |
+| `TestObserverArgoRolloutKindNotInstalledSilence` | D9 分工（spec review 补钉）：(a) 引擎 KindNotInstalled 报告形状的 entry（DesiredImage 已写、Reason=KindNotInstalled）在 CRD 缺席时 observer 全程沉默——entry 原样保留、零事件、`rolloutOutcomes{rollout,*}` 零采样、第二次 reconcile resourceVersion 不变、无 observer requeue（引擎自己按等待间隔重试）；(b) 投递后 CRD 被删：持久化 Progressing entry 原样保留、零事件、`RequeueAfter=waitingStateRequeue`（钉 subscription_observer.go:940-945 的 poll requeue 覆盖 CRD 再装回） | 已实现（本机实跑） |
+| `TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals` | D10 reconcile 级正向断言（spec review 补钉）：`pause: {}` 步（phase=Paused、stableRS 未追上 currentPodHash）→ entry Succeeded→Progressing transition；RolloutProgressing 事件双命名空间各一条、message 含 "awaiting promotion"（detMessage 经 observerAuditMessage 截断 320）；`rolloutOutcomes{rollout,progressing}=1`；Health Healthy→Unknown；entry Reason 恒为引擎 `Applied`、Message 不变（`isEngineOwnedReason` 守卫，R3——AwaitingPromotion 只骑 transition 事件，不覆写引擎面）；aggregate=Progressing、`RequeueAfter=waitingStateRequeue` | 已实现（本机实跑） |
 
 ### 变异自证
 

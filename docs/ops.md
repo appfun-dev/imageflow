@@ -193,7 +193,7 @@ Progressing > Superseded > Succeeded`。per-target `healthStatus` v1 恒 `Unknow
 | `InvalidImageReference` | digest 引用不合语法 |
 | `InvalidTarget` | targetRef 非法（apiVersion/kind/name 缺失等） |
 | `InvalidImageField` | imageFields 路径无效（不存在/非字符串/选择不到元素/原子列表/系统字段/只读/不唯一——message 有按类判别） |
-| `KindNotInstalled` | 目标 Kind 未安装（CRD 缺失） |
+| `KindNotInstalled` | 目标 Kind 未安装（CRD 缺失）→ 处置 = 安装 CRD 或修正 targetRef。分工（spec v1.8 D9）：**引擎拥有该 WHY** 并按等待间隔自重试，装好 CRD 后自动补投；**observer 保持沉默**——不覆写该 entry、不发事件、不计度量（投递后 CRD 被删时持久化状态原样保留，poll requeue 覆盖装回） |
 | `NoMatches` | selector target 匹配零个存活对象（合法空匹配集，ADR-014 决策 8）：条目为 selector 形态报告（Unknown）+ 订阅侧 Warning 事件（matched=0），**非失败指标**（刻意不在 failures 指标词汇表内）、不阻塞订阅内其它 target；处置 = 等待对象打标 / 核对 selector——匹配对象一出现，informer 事件即自动补投（无轮询） |
 | `MatchLimitExceeded` | selector target 有效匹配数超过 `--selector-match-limit`（默认 50，ADR-014 决策 7）：超限部分不投递（按名字排序取前 N），条目为 selector 形态终态报告（Failed）；处置 = 收窄 selector / 拆分订阅 / 调大 flag。结束态对象不占配额 |
 | `Forbidden` | T8 授权门拒绝（创建者缺 update 权限）→ 补授权等复核 |
@@ -238,6 +238,7 @@ message 含 "awaiting promotion" 子串，对应 per-target Health Reason
 |---|---|---|
 | 订阅一直不投递 | `kubectl get imagesubscription X -o jsonpath='{.status.conditions}'` | `Forbidden=True` → 创建者缺目标 ns update 权限（补 RoleBinding，等 `--sar-recheck-period`）；`SourceUnresolved` → 源 stream:tag 尚无 digest（先导入/登记）；无 status → 看 manager 日志 |
 | 投递成功但 rollout 卡 Progressing/Failed | `kubectl -n <ns> rollout status <workload>` | digest 不可拉取（ErrImagePull）→ 修 Registry/凭据后重新登记；`rolloutStatus=Failed` 是如实报告，`imageApplied=true` 不回滚（v1 无自动回滚） |
+| SSA 持续 409（`ApplyConflictEscalated` 后仍 `ApplyFailed`） | `kubectl get events -A \| grep ApplyConflictEscalated` + `kubectl get imagesubscription X -o jsonpath='{.status.targets[*].reason}'` | 对端 controller 持续持有字段（典型：rollouts-controller 归一化抓字段，上游 argo/argo-rollouts#3281）→ force 重试预算每 reconcile 恰 1 次已耗尽（ADR-015 决策 9 先礼后兵），引擎如实 `ApplyFailed` 并按正常 requeue 间隔重试，**绝不自动反复 force**；处置 = 人工裁决字段归属：`imageFields` 精确圈定绕行、让对端放手（改对端配置）、或接受对端值，见 §5 `ApplyConflictEscalated` |
 | healthStatus 恒 Unknown + `StatusPolicyEvaluated=False` | — | v1 设计行为（ADR-005），非故障；v1.1 提供评估器 |
 | 导入任务失败 | `kubectl get imagestreamimport X -o jsonpath='{.status.conditions[?(@.type=="Complete")]}'` | reason 即 12 码之一，对照 §5；`RegistryDenied` → 检查 `--registry-allowlist`；`PullSecret*` → 检查任务 `spec.pullSecretRef`（仅按需导入支持凭据；计划导入 v1 匿名） |
 | 任务对象"消失" | `kubectl get events -A \| grep TaskGarbageCollected` | TTL GC 正常回收（成功 1h/失败 24h）；结果在 stream/artifact 上持久 |

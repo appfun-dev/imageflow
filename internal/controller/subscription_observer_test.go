@@ -4036,3 +4036,183 @@ func TestObserverArgoRolloutAwaitingPromotionHealthMessage(t *testing.T) {
 		t.Fatalf("message %q must name the awaiting-promotion state", hv.message)
 	}
 }
+
+// TestObserverArgoRolloutKindNotInstalledSilence pins the D9 division of
+// labor (spec v1.8 D9, ADR-006): the delivery engine OWNS the
+// KindNotInstalled WHY — it writes Reason=KindNotInstalled on the entry and
+// requeues itself at the waiting interval; the observer stays silent, keeps
+// the persisted entry untouched, and never races its own explanation over
+// the engine's (subscription_observer.go:940-945, getWorkloadFacts
+// found=false covers NotFound AND NoKindMatch). Covered from both ends: the
+// pre-delivery case (engine report present, CRD never installed) and the
+// post-delivery case (rollout converged earlier, CRD then removed).
+func TestObserverArgoRolloutKindNotInstalledSilence(t *testing.T) {
+	target := t11uContainerTarget(t11uRolloutRef())
+
+	t.Run("engine KindNotInstalled report survives the observer pass untouched", func(t *testing.T) {
+		engineMessage := "kind argoproj.io/v1alpha1, Kind=Rollout is not served by this cluster " +
+			"(CRD absent?); delivery is impossible until the kind exists"
+		engineEntry := imageflowv1alpha1.TargetDeliveryStatus{
+			TargetRef:     t11uRolloutRef(),
+			DesiredImage:  t11uRefB,
+			RolloutStatus: imageflowv1alpha1.RolloutUnknown,
+			HealthStatus:  imageflowv1alpha1.HealthUnknown,
+			Reason:        TargetReasonKindNotInstalled,
+			Message:       engineMessage,
+		}
+		sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{engineEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutUnknown,
+			ObservedGeneration: 1,
+		})
+		// No argo Rollout object: the CRD is absent from this cluster.
+		f := newT11uFixture(t, config.Config{}, sub)
+		f.applyStatus(sub, func() {})
+
+		res, err := f.reconcileSub()
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if res.RequeueAfter != 0 {
+			t.Fatalf("observer does not poll an unobservable target: RequeueAfter = %v, want 0 "+
+				"(the delivery engine requeues itself at the waiting interval)", res.RequeueAfter)
+		}
+		if events := f.drainEvents(); len(events) != 0 {
+			t.Fatalf("observer must stay silent on KindNotInstalled: %v", events)
+		}
+		entry := f.getSub().Status.Targets[0]
+		if !equality.Semantic.DeepEqual(engineEntry, entry) {
+			t.Fatalf("engine-owned entry must be preserved untouched:\n got %+v\nwant %+v", entry, engineEntry)
+		}
+		for _, result := range []string{observerResultProgressing, observerResultSucceeded, observerResultFailed} {
+			if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindRollout, result)); v != 0 {
+				t.Fatalf("rolloutOutcomes{rollout,%s} = %v, want 0 (no transition, no sample)", result, v)
+			}
+		}
+
+		// The second pass must be a pure no-op (resourceVersion stable):
+		// silence is a steady state, not a one-shot.
+		rv1 := f.getSub().GetResourceVersion()
+		if _, err := f.reconcileSub(); err != nil {
+			t.Fatalf("second reconcile: %v", err)
+		}
+		if rv2 := f.getSub().GetResourceVersion(); rv2 != rv1 {
+			t.Fatalf("second pass must not write: rv %s -> %s", rv1, rv2)
+		}
+	})
+
+	t.Run("post-delivery CRD removal keeps persisted state and polls", func(t *testing.T) {
+		seedEntry := t11uSeededEntry(t11uRolloutRef(), t11uRefB)
+		sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{seedEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+			ObservedGeneration: 1,
+		})
+		// The rollout object existed at delivery time; the CRD is now gone.
+		f := newT11uFixture(t, config.Config{}, sub)
+		f.applyStatus(sub, func() {})
+
+		res, err := f.reconcileSub()
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if res.RequeueAfter != waitingStateRequeue {
+			t.Fatalf("in-flight rollout must keep polling (the CRD may be reinstalled): "+
+				"RequeueAfter = %v, want %v", res.RequeueAfter, waitingStateRequeue)
+		}
+		if events := f.drainEvents(); len(events) != 0 {
+			t.Fatalf("observer must stay silent while the workload is unobservable: %v", events)
+		}
+		entry := f.getSub().Status.Targets[0]
+		if !equality.Semantic.DeepEqual(seedEntry, entry) {
+			t.Fatalf("persisted entry must be kept, not degraded:\n got %+v\nwant %+v", entry, seedEntry)
+		}
+
+		rv1 := f.getSub().GetResourceVersion()
+		if _, err := f.reconcileSub(); err != nil {
+			t.Fatalf("second reconcile: %v", err)
+		}
+		if rv2 := f.getSub().GetResourceVersion(); rv2 != rv1 {
+			t.Fatalf("second pass must not write: rv %s -> %s", rv1, rv2)
+		}
+	})
+}
+
+// TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals is the D10
+// positive assertion at reconcile level (spec v1.8 D10, ADR-015 decision 8):
+// a canary paused at an indefinite pause: {} step transitions the entry
+// Succeeded -> Progressing, emits the RolloutProgressing event dual-namespace
+// (subscription + target, ADR-014 decision 5) carrying the awaiting-promotion
+// WHY in its determination message, and increments the
+// imageflow_observer_rollout_outcomes_total{kind="rollout",result="progressing"}
+// series. The engine-owned entry Reason (Applied) is NEVER overwritten —
+// AwaitingPromotion rides the transition event's detMessage (R3).
+func TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals(t *testing.T) {
+	target := t11uContainerTarget(t11uRolloutRef())
+	seedEntry := t11uSeededEntry(t11uRolloutRef(), t11uRefB)
+	seedEntry.RolloutStatus = imageflowv1alpha1.RolloutSucceeded
+	seedEntry.HealthStatus = imageflowv1alpha1.HealthHealthy
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions:         t11uAuthorizedConditions(),
+		Targets:            []imageflowv1alpha1.TargetDeliveryStatus{seedEntry},
+		RolloutStatus:      imageflowv1alpha1.RolloutSucceeded,
+		ObservedGeneration: 1,
+	})
+	// A canary paused at an indefinite step: phase Paused, the stable RS has
+	// not caught up with the new pod hash, and the controller wrote
+	// pauseConditions.
+	pausedStatus := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
+	pausedStatus["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	rollout := t11uArgoRollout(t11uRefB, pausedStatus)
+	f := newT11uFixture(t, config.Config{}, rollout, sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("a paused canary is an in-flight rollout and must poll: RequeueAfter = %v, want %v",
+			res.RequeueAfter, waitingStateRequeue)
+	}
+	got := f.getSub()
+	entry := got.Status.Targets[0]
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("rolloutStatus = %q, want Progressing (pause: {} step holds the rollout)", entry.RolloutStatus)
+	}
+	if entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
+		t.Fatalf("healthStatus = %q, want Unknown (health is not evaluated until the rollout Succeeds)",
+			entry.HealthStatus)
+	}
+	if entry.Reason != TargetReasonApplied {
+		t.Fatalf("Reason = %q, want %q — AwaitingPromotion never overwrites the engine-owned "+
+			"surface (R3, ADR-015 decision 8)", entry.Reason, TargetReasonApplied)
+	}
+	if entry.Message != seedEntry.Message {
+		t.Fatalf("Message = %q, want the engine's %q (health reasons never overwrite an engine-owned entry)",
+			entry.Message, seedEntry.Message)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate rolloutStatus = %q, want Progressing", got.Status.RolloutStatus)
+	}
+	events := f.drainEvents()
+	if len(events) != 2 {
+		t.Fatalf("the paused transition emits the event dual-namespace (subscription + target): "+
+			"got %d events (%v)", len(events), events)
+	}
+	for _, ev := range events {
+		if !strings.Contains(ev, EventReasonRolloutProgressing) {
+			t.Fatalf("unexpected event during the paused transition: %q", ev)
+		}
+		if !strings.Contains(ev, "awaiting promotion") {
+			t.Fatalf("transition event %q must carry the awaiting-promotion determination", ev)
+		}
+	}
+	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(
+		observerKindRollout, observerResultProgressing)); v != 1 {
+		t.Fatalf("rolloutOutcomes{rollout,progressing} = %v, want 1 (D10: the kind=rollout "+
+			"series records the paused-canary outcome)", v)
+	}
+}
