@@ -295,6 +295,21 @@ func planEffects(
 	limitSteady := base.Reason == TargetReasonMatchLimitExceeded &&
 		out.reason == TargetReasonMatchLimitExceeded
 
+	// SSA 409 escalation audit (v1.8-01, issue #92, ADR-015 decision 9):
+	// orthogonal to the lanes below — EVERY pass that escalated to the
+	// forced retry emits one Warning per escalated object, whether the retry
+	// landed (delivery proceeds normally) or exhausted the retry budget (the
+	// honest Failed is planned below). No reasonChanged de-dup: each event
+	// marks a REAL ownership takeover the API server contested, and the
+	// cluster's event correlator folds repeats into one series.
+	if len(out.objectOutcomes) > 0 {
+		for i := range out.objectOutcomes {
+			planSSAEscalationEvent(plan, &out.objectOutcomes[i])
+		}
+	} else {
+		planSSAEscalationEvent(plan, out)
+	}
+
 	switch {
 	case out.conflictNow && out.reason != TargetReasonMatchLimitExceeded:
 		// Terminal Conflict transition (ADR-008): recorded with the Conflict
@@ -429,6 +444,24 @@ func planDeliveryEvents(
 			plan.events = append(plan.events, imageAppliedEvent(obj, source, false))
 		}
 	}
+}
+
+// planSSAEscalationEvent audits one SSA 409 → forced-retry escalation
+// (v1.8-01, issue #92, ADR-015 decision 9): a Warning on the subscription
+// naming the target and the conflicting field manager the API server
+// reported (e.g. the rollouts-controller of upstream argo/argo-rollouts#3281).
+func planSSAEscalationEvent(plan *entryPlan, out *deliveryOutcome) {
+	if !out.ssaEscalated {
+		return
+	}
+	plan.events = append(plan.events, plannedEvent{
+		eventType: corev1.EventTypeWarning,
+		reason:    EventReasonApplyConflictEscalated,
+		message: fmt.Sprintf(
+			"Server-side apply to %s met a 409 conflict and escalated to the single forced retry "+
+				"(retry budget 1 per reconcile pass, ADR-015 decision 9): %s",
+			authz.FormatTarget(out.ref), out.ssaEscalationDetail),
+	})
 }
 
 // deliveryLatency reports one stream-creation-to-apply latency sample, or

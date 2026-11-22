@@ -21,8 +21,10 @@ const (
 	t9uKindStatefulSet = "StatefulSet"
 	t9uKindDaemonSet   = "DaemonSet"
 	t9uKindCronJob     = "CronJob"
+	t9uKindRollout     = "Rollout"
 	t9uAPIAppsV1       = "apps/v1"
 	t9uAPIBatchV1      = "batch/v1"
+	t9uAPIArgoV1alpha1 = "argoproj.io/v1alpha1"
 	t9uContainerApp    = "app"
 	t9uContainerSide   = "sidecar"
 	t9uImageField      = "image"
@@ -34,6 +36,9 @@ var (
 	t9uGVKDaemonSet   = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: t9uKindDaemonSet}
 	t9uGVKJob         = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
 	t9uGVKCronJob     = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}
+	// t9uGVKRollout is the Argo Rollouts GVK served since v1.8 (ADR-015
+	// decision 3): same pod-template path as the apps/v1 workloads.
+	t9uGVKRollout = schema.GroupVersionKind{Group: "argoproj.io", Version: "v1alpha1", Kind: t9uKindRollout}
 )
 
 const t9uDigestRef = "quay.io/example/ledger@sha256:" +
@@ -130,6 +135,7 @@ func TestBuiltInPlanDeclaresOnlyTheNamedContainerImages(t *testing.T) {
 		{t9uKindStatefulSet, t9uGVKStatefulSet, t9uAPIAppsV1},
 		{t9uKindDaemonSet, t9uGVKDaemonSet, t9uAPIAppsV1},
 		{"Job", t9uGVKJob, "batch/v1"},
+		{t9uKindRollout, t9uGVKRollout, t9uAPIArgoV1alpha1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind, func(t *testing.T) {
@@ -328,7 +334,7 @@ func TestJobDeliveryAdapterContainersNotFound(t *testing.T) {
 }
 
 func TestClassifyServesFirstBatchAndRefusesTheRest(t *testing.T) {
-	for _, gvk := range []schema.GroupVersionKind{t9uGVKDeployment, t9uGVKJob} {
+	for _, gvk := range []schema.GroupVersionKind{t9uGVKDeployment, t9uGVKJob, t9uGVKRollout} {
 		if _, _, _, ok := Classify(gvk, false); !ok {
 			t.Fatalf("%s with containerNames must be served", gvk)
 		}
@@ -524,6 +530,25 @@ func TestCronJobAdapterIsRegistered(t *testing.T) {
 	}
 	if adapter.GVK() != t9uGVKCronJob {
 		t.Fatalf("adapter GVK = %v, want %v", adapter.GVK(), t9uGVKCronJob)
+	}
+}
+
+// TestRolloutAdapterIsRegistered pins the v1.8-01 adapter decision (spec D2,
+// ADR-015 decision 3): argoproj.io/v1alpha1 Rollout is a built-in Kind
+// registered from init, sharing the standard pod-template apply-nest with
+// Deployment — the engine code itself is untouched.
+func TestRolloutAdapterIsRegistered(t *testing.T) {
+	adapter := LookupKindAdapter(t9uGVKRollout)
+	if adapter == nil {
+		t.Fatal("argoproj.io/v1alpha1 Rollout must have a registered delivery adapter (v1.8-01)")
+	}
+	if adapter.GVK() != t9uGVKRollout {
+		t.Fatalf("adapter GVK = %v, want %v", adapter.GVK(), t9uGVKRollout)
+	}
+	// Exact-GVK discipline (ADR-006): no cross-group/version guessing.
+	if LookupKindAdapter(schema.GroupVersionKind{Group: "argoproj.io", Version: "v1beta1",
+		Kind: t9uKindRollout}) != nil {
+		t.Fatal("adapters are registered per exact GVK: no cross-version guessing")
 	}
 }
 

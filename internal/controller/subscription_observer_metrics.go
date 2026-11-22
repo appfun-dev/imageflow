@@ -54,6 +54,7 @@ const (
 	observerKindDaemonSet   = "daemonset"
 	observerKindJob         = "job"
 	observerKindCronJob     = "cronjob"
+	observerKindRollout     = "rollout"
 	observerKindOther       = "other"
 )
 
@@ -75,7 +76,7 @@ func newObserverMetrics() *observerMetrics {
 	return &observerMetrics{
 		rolloutOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: metricNameObserverRolloutOutcomes,
-			Help: "Total per-target rolloutStatus transitions written by the workload observer, by bounded kind (deployment|statefulset|daemonset|job|cronjob|other) and result (progressing|succeeded|failed|unknown). Rollout-stage failure rate = failed / (succeeded+failed+unknown) per kind.",
+			Help: "Total per-target rolloutStatus transitions written by the workload observer, by bounded kind (deployment|statefulset|daemonset|job|cronjob|rollout|other) and result (progressing|succeeded|failed|unknown). Rollout-stage failure rate = failed / (succeeded+failed+unknown) per kind.",
 		}, []string{"kind", "result"}),
 		healthOutcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: metricNameObserverHealthOutcomes,

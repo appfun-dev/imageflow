@@ -195,6 +195,13 @@ const (
 	// EventReasonDeliveryConflict announces the terminal first-wins Conflict:
 	// Warning on the subscription (zero writes were performed).
 	EventReasonDeliveryConflict = "DeliveryConflict"
+	// EventReasonApplyConflictEscalated announces one SSA 409 → forced-retry
+	// escalation (ADR-015 decision 9, 先礼后兵): Warning on the subscription,
+	// naming the target and the conflicting manager the API server reported.
+	// One event per escalated object per pass — the audit trail of every
+	// forced takeover (e.g. the rollouts-controller's normalization grabs,
+	// upstream argo/argo-rollouts#3281).
+	EventReasonApplyConflictEscalated = "ApplyConflictEscalated"
 	// EventReasonUnsupportedTarget announces an Unsupported per-target reason:
 	// Warning on the subscription.
 	EventReasonUnsupportedTarget = "UnsupportedTarget"
@@ -254,7 +261,8 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // `make manifests`. The delivery engine holds the ADR-003 controller-SA
 // write surface: cluster-level update/patch on the whitelisted built-in
 // workload kinds ONLY (SSA writes use patch; update is included per the
-// frozen ADR-003 wording), plus the subscription status subresource and
+// frozen ADR-003 wording) — since v1.8 including argoproj.io rollouts
+// (spec v1.8 D8) — plus the subscription status subresource and
 // Events in both namespaces (dual-namespace audit, ADR-003 §4). No wildcard
 // verbs, no other workload kinds.
 //
@@ -263,6 +271,7 @@ func (subscriptionDeliveryRegistrar) Register(mgr ctrl.Manager, opts Options) er
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagesubscriptions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=imageflow.appfun.dev,resources=imagestreams,verbs=get;list;watch
@@ -1167,11 +1176,30 @@ func (r *SubscriptionDeliveryReconciler) deliverObjectTarget(
 			return out
 		}
 		out.targetObject = fresh
+		// ADR-015 decision 9 (先礼后兵): the first attempt never forces; on a
+		// 409 the pass escalates to exactly ONE forced retry and records the
+		// escalation for the audit Event. The server message names the
+		// conflicting manager (e.g. the rollouts-controller of #3281).
+		out.ssaEscalated = true
+		out.ssaEscalationDetail = applyErr.Error()
 		applyErr = r.applyOnce(ctx, plan, fieldManager, true)
 	}
 	if applyErr != nil {
 		r.metrics.applies.WithLabelValues(applyResultError).Inc()
 		switch {
+		case apierrors.IsConflict(applyErr):
+			// The forced retry ALSO conflicted (or the forced orphan takeover
+			// did): the other manager keeps the field. Report Failed honestly
+			// and settle at the normal waiting requeue — the retry budget
+			// (1 per reconcile pass, ADR-015 decision 9) is exhausted, so no
+			// workqueue-backoff storm on top of it.
+			out = out.failed(TargetReasonApplyFailed, fmt.Sprintf(
+				"server-side apply to %s still conflicts after the single forced retry "+
+					"(retry budget 1 per reconcile pass exhausted, ADR-015 decision 9): %v; "+
+					"delivery retries at the normal requeue interval",
+				authz.FormatTarget(ref), applyErr))
+			out.requeue = waitingStateRequeue
+			return out
 		case apierrors.IsForbidden(applyErr):
 			out = out.transient(TargetReasonApplyForbidden, fmt.Sprintf(
 				"the API server denied this controller's write to %s: %v; fix the manager RBAC "+
@@ -1390,6 +1418,13 @@ type deliveryOutcome struct {
 	previousValue    string
 	converged        bool // target ended the pass equal-and-owned
 	conflictNow      bool // terminal Conflict detected this pass
+
+	// ssaEscalated marks that this pass met an SSA 409 apply-conflict and
+	// escalated to the single forced retry (ADR-015 decision 9, retry budget
+	// 1 per reconcile pass); ssaEscalationDetail carries the API server's
+	// conflict message, which names the conflicting field manager.
+	ssaEscalated        bool
+	ssaEscalationDetail string
 
 	// targetObject is the fresh target read, used as the target-namespace
 	// Event involved object (nil when the object was never read).

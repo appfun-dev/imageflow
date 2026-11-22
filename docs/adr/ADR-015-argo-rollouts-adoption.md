@@ -23,7 +23,7 @@ ADR-006（v1.6 修订）留下唯一未解决问题：是否纳入 Argo Rollouts
 ### 实现契约层（Wave B）
 
 7. **终态判定 = 三合一**：`status.observedGeneration`（**字符串**，types.go 警告仅其与 generation 相等时其余 status 字段可信）== generation 且 `phase == Healthy` 且 `stableRS == currentPodHash` → Succeeded；`phase` 为 Degraded / ReplicaFailure / ProgressDeadlineExceeded → Failed。
-8. **Paused 映射 = AwaitingPromotion**：`pauseConditions` 含 CanaryPauseStep（`pause: {}` 无限期步，等人工 promote；pauseConditions 由 rollouts-controller 写入、人工清除后恢复）→ Progressing + 新 Condition Reason `AwaitingPromotion`——合法稳态，非故障，不计 failure 指标词汇。
+8. **Paused 映射 = AwaitingPromotion**：`pauseConditions` 非空（主要为 CanaryPauseStep——`pause: {}` 无限期步等人工 promote；blue-green pause 等同理等待人工恢复；pauseConditions 由 rollouts-controller 写入、人工清除后恢复）→ Progressing + 新 Condition Reason `AwaitingPromotion`——合法稳态，非故障，不计 failure 指标词汇。（Amended 2026-11-21：由「含 CanaryPauseStep」放宽为「非空」判定，对齐实现语义——任何 pause 均为等待人工 promote 的合法稳态。）
 9. **SSA 冲突 = 先礼后兵**：首发不 force；遇 409（rollouts-controller 在字段规范化场景夺走 `.spec.template.spec.containers` ownership，上游 issue #3281）升级 force 重试一次并记 Event。
 10. **未装 CRD = 沿用既有 WHY**：集群未装 Rollout CRD 时复用引擎既有 `KindNotInstalled` 报告路径，不加 feature gate、零新机制。
 11. **status 读取 = unstructured 提取**：observer 以 unstructured 提取约 8 个判定字段（observedGeneration/phase/stableRS/currentPodHash/pauseConditions/updatedReplicas/replicas/readyReplicas），pod template 经 converter 转 `corev1.PodSpec` 定位容器；**零新 Go 依赖**，不引 argo-rollouts module。
@@ -70,3 +70,4 @@ ADR-006（v1.6 修订）留下唯一未解决问题：是否纳入 Argo Rollouts
 | 日期 | 变更 | 理由 |
 |------|------|------|
 | 2026-11-20 | 初始版本，Accepted | v1.8 grill Wave A/B/C 决策（15 题共识） |
+| 2026-11-21 | 决策 8 措辞放宽：「`pauseConditions` 含 CanaryPauseStep」→「`pauseConditions` 非空」（决策内附 Amended 注记） | v1.8 双轴 code-review C1（Spec 轴）：实现按非空判定；语义上任何 pause 均为等待人工 promote 的合法稳态，采放宽而非收窄 |

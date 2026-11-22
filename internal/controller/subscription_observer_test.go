@@ -980,7 +980,7 @@ func TestObserverDetermineDeploymentHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDeployment); got.status != tc.want {
+			if got := determineHealth(rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded}, pods, t11uRefA, observerKindDeployment); got.status != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
@@ -1045,7 +1045,7 @@ func TestObserverDetermineStatefulSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindStatefulSet); got.status != tc.want {
+			if got := determineHealth(rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded}, pods, t11uRefA, observerKindStatefulSet); got.status != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
@@ -1110,7 +1110,7 @@ func TestObserverDetermineDaemonSetHealthStates(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(imageflowv1alpha1.RolloutSucceeded, pods, t11uRefA, observerKindDaemonSet); got.status != tc.want {
+			if got := determineHealth(rolloutDetermination{status: imageflowv1alpha1.RolloutSucceeded}, pods, t11uRefA, observerKindDaemonSet); got.status != tc.want {
 				t.Fatalf("determineHealth = %q, want %q", got.status, tc.want)
 			}
 		})
@@ -1145,7 +1145,7 @@ func TestObserverHealthRolloutGateBlocksEvaluation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("listWorkloadPods: %v", err)
 			}
-			if got := determineHealth(tc.rollout, pods, t11uRefA, observerKindDeployment); got.status != imageflowv1alpha1.HealthUnknown {
+			if got := determineHealth(rolloutDetermination{status: tc.rollout}, pods, t11uRefA, observerKindDeployment); got.status != imageflowv1alpha1.HealthUnknown {
 				t.Fatalf("determineHealth = %q, want Unknown behind the rollout gate (the seeded pod would be Healthy if scanned)", got.status)
 			}
 		})
@@ -1266,6 +1266,7 @@ func TestObserverObservableBuiltinKindClassification(t *testing.T) {
 			},
 			ContainerNames: []string{t11uContainer},
 		}, observerKindCronJob, true},
+		{"argo rollout by container name is observable", argoRolloutGVK, t11uContainerTarget(t11uRolloutRef()), observerKindRollout, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2784,7 +2785,7 @@ func TestObserverDetermineJobHealthFromCompletion(t *testing.T) {
 			// For Job kind, determineHealth must NOT call scanPodsForHealth.
 			// We pass nil pods to prove no pod-scan occurs (it would panic on
 			// nil dereference if scanPodsForHealth were invoked).
-			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindJob)
+			got := determineHealth(rolloutDetermination{status: tc.rollout}, nil, t11uRefA, observerKindJob)
 			if got.status != tc.want {
 				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
 					tc.rollout, observerKindJob, got.status, tc.want)
@@ -2825,7 +2826,7 @@ func TestObserverDetermineCronJobHealthFromCompletion(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := determineHealth(tc.rollout, nil, t11uRefA, observerKindCronJob)
+			got := determineHealth(rolloutDetermination{status: tc.rollout}, nil, t11uRefA, observerKindCronJob)
 			if got.status != tc.want {
 				t.Fatalf("determineHealth(rollout=%q, kind=%q) = %q, want %q",
 					tc.rollout, observerKindCronJob, got.status, tc.want)
@@ -3077,7 +3078,7 @@ func TestIsEngineOwnedReason(t *testing.T) {
 			t.Errorf("isEngineOwnedReason(%q) = false, want true", r)
 		}
 	}
-	nonEngine := []string{"", "AllContainersReady", "NotReady", "NoMatchingPods", "WaitingForRollout", "JobCompleted"}
+	nonEngine := []string{"", "AllContainersReady", "NotReady", "NoMatchingPods", "WaitingForRollout", "JobCompleted", "AwaitingPromotion"}
 	for _, r := range nonEngine {
 		if isEngineOwnedReason(r) {
 			t.Errorf("isEngineOwnedReason(%q) = true, want false", r)
@@ -3108,7 +3109,7 @@ func TestHealthVerdictD6MessageFormats(t *testing.T) {
 		},
 		{
 			name:    "rollout gate",
-			verdict: determineHealth(imageflowv1alpha1.RolloutProgressing, nil, "img@sha256:aaa", "Deployment"),
+			verdict: determineHealth(rolloutDetermination{status: imageflowv1alpha1.RolloutProgressing}, nil, "img@sha256:aaa", "Deployment"),
 			wantMsg: "health stage is not evaluated: rollout is Progressing, health assessment requires rollout Succeeded (ADR-005 §3)",
 		},
 	}
@@ -3606,5 +3607,612 @@ func TestObserverSkipsMatchLimitExceededSelectorEntry(t *testing.T) {
 	case ev := <-recorder.Events:
 		t.Fatalf("a skipped target emits nothing, got event %q", ev)
 	default:
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Argo Rollout determination (v1.8-02, #93; spec D4/D5, ADR-015 decisions
+// 7/8/11/12)
+//
+// The Rollout is read UNSTRUCTURED (no argo-rollouts Go module): the wire
+// shape is what the tests build. status.observedGeneration is a STRING
+// upstream — the defensive parse lives at the extraction boundary and a
+// missing/empty/non-numeric value means "not yet observed" (untrusted).
+// ---------------------------------------------------------------------------
+
+const (
+	t11uRolloutName = "t11u-rollout"
+	t11uRolloutAPI  = "argoproj.io/v1alpha1"
+)
+
+var t11uRolloutUID = types.UID("t11u-rollout-uid")
+
+func t11uRolloutRef() imageflowv1alpha1.TargetReference {
+	return imageflowv1alpha1.TargetReference{
+		APIVersion: t11uRolloutAPI, Kind: kindRollout,
+		Namespace: t11uNamespace, Name: t11uRolloutName,
+	}
+}
+
+// t11uArgoRollout builds the unstructured Argo Rollout the observer reads
+// (D4/D11): spec.template is a corev1.PodTemplateSpec-shaped map so the
+// converter path produces the same corev1.PodSpec a Deployment carries.
+func t11uArgoRollout(image string, status map[string]interface{}) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": t11uRolloutAPI,
+		"kind":       kindRollout,
+		"metadata": map[string]interface{}{
+			"namespace":  t11uNamespace,
+			"name":       t11uRolloutName,
+			"uid":        string(t11uRolloutUID),
+			"generation": int64(3),
+		},
+		"spec": map[string]interface{}{
+			"replicas": int64(2),
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"containers": []interface{}{
+						map[string]interface{}{"name": t11uContainer, "image": image},
+					},
+				},
+			},
+		},
+		"status": status,
+	}}
+}
+
+// t11uArgoRolloutReadyStatus is the controller-observed (generation 3) status
+// shared by most matrix cases; each case mutates the copy it needs.
+func t11uArgoRolloutReadyStatus(phase, stableRS string) map[string]interface{} {
+	return map[string]interface{}{
+		"observedGeneration": "3",
+		"phase":              phase,
+		"stableRS":           stableRS,
+		"currentPodHash":     "rs-v2",
+		"replicas":           int64(2),
+		"updatedReplicas":    int64(2),
+		"readyReplicas":      int64(2),
+		"availableReplicas":  int64(2),
+	}
+}
+
+func t11uArgoRolloutPauseConditions() []interface{} {
+	return []interface{}{
+		map[string]interface{}{"reason": "StepPause", "startTime": "2026-10-05T12:00:00Z"},
+	}
+}
+
+func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
+	paused := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
+	paused["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	pausedCaughtUp := t11uArgoRolloutReadyStatus("Paused", "rs-v2")
+	pausedCaughtUp["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	degradedPaused := t11uArgoRolloutReadyStatus("Degraded", "rs-v1")
+	degradedPaused["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	succeededLingeringPause := t11uArgoRolloutReadyStatus("Healthy", "rs-v2")
+	succeededLingeringPause["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	rolling := map[string]interface{}{
+		"observedGeneration": "3",
+		"phase":              "Progressing",
+		"stableRS":           "rs-v1",
+		"currentPodHash":     "rs-v2",
+		"replicas":           int64(2),
+		"updatedReplicas":    int64(1),
+		"readyReplicas":      int64(1),
+		"availableReplicas":  int64(1),
+	}
+
+	cases := []struct {
+		name             string
+		rollout          *unstructured.Unstructured
+		desired          string
+		want             imageflowv1alpha1.RolloutStatus
+		wantSub          string
+		wantAwaitingProm bool
+		wantHealthReason string
+	}{
+		{
+			name:    "succeeded when observedGeneration covers generation, phase Healthy and stableRS equals currentPodHash",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "covers generation 3",
+			// D6: after Succeeded the health verdict reuses the v1.5 native
+			// pod scan — with no pods in the fixture that is NoMatchingPods.
+			wantHealthReason: "NoMatchingPods",
+		},
+		{
+			name:    "progressing while the controller has not observed the current generation",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutProgressing,
+			wantSub: "does not cover generation 3",
+			// overwritten below to observedGeneration "2"
+		},
+		{
+			name:             "progressing when observedGeneration is an empty string",
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "", "phase": "Healthy"}),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "not a number",
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:             "progressing when observedGeneration is not numeric",
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "abc", "phase": "Healthy"}),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "not a number",
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:             "progressing when observedGeneration is absent",
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"phase": "Healthy"}),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "not a number",
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:             "a stale degraded status of an old generation stays progressing",
+			rollout:          t11uArgoRollout(t11uRefB, map[string]interface{}{"observedGeneration": "2", "phase": "Degraded"}),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "does not cover generation 3",
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:    "failed on Degraded phase",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Degraded", "rs-v1")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: `status.phase "Degraded"`,
+		},
+		{
+			name:    "failed on ReplicaFailure phase",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("ReplicaFailure", "rs-v1")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: `status.phase "ReplicaFailure"`,
+		},
+		{
+			name:    "failed on ProgressDeadlineExceeded phase",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("ProgressDeadlineExceeded", "rs-v1")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: `status.phase "ProgressDeadlineExceeded"`,
+		},
+		{
+			name:             "progressing with AwaitingPromotion while paused at a canary step",
+			rollout:          t11uArgoRollout(t11uRefB, paused),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "awaiting promotion",
+			wantAwaitingProm: true,
+			wantHealthReason: HealthReasonAwaitingPromotion,
+		},
+		{
+			name:             "paused with a caught-up stable ReplicaSet still awaits promotion",
+			rollout:          t11uArgoRollout(t11uRefB, pausedCaughtUp),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantAwaitingProm: true,
+			wantHealthReason: HealthReasonAwaitingPromotion,
+		},
+		{
+			name:    "failed beats paused when the phase is Degraded",
+			rollout: t11uArgoRollout(t11uRefB, degradedPaused),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutFailed,
+			wantSub: `status.phase "Degraded"`,
+		},
+		{
+			name:    "succeeded beats a lingering pause condition when the three-in-one holds",
+			rollout: t11uArgoRollout(t11uRefB, succeededLingeringPause),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutSucceeded,
+			wantSub: "covers generation 3",
+		},
+		{
+			name:             "progressing while phase is Healthy but stableRS has not caught up with currentPodHash",
+			rollout:          t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v1")),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          "rs-v1",
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:             "progressing on phase Progressing",
+			rollout:          t11uArgoRollout(t11uRefB, rolling),
+			desired:          t11uRefB,
+			want:             imageflowv1alpha1.RolloutProgressing,
+			wantSub:          `status.phase "Progressing"`,
+			wantHealthReason: "WaitingForRollout",
+		},
+		{
+			name:    "unknown when the spec no longer holds the desired image",
+			rollout: t11uArgoRollout(t11uRefA, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "currently references",
+		},
+		{
+			name:    "unknown when the declared container is missing from the pod template",
+			rollout: t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Healthy", "rs-v2")),
+			// container renamed below
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "not present in the pod template",
+		},
+		{
+			name: "unknown when the rollout carries no pod template at all",
+			rollout: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": t11uRolloutAPI,
+				"kind":       kindRollout,
+				"metadata": map[string]interface{}{
+					"namespace": t11uNamespace, "name": t11uRolloutName,
+					"uid": string(t11uRolloutUID), "generation": int64(3),
+				},
+				"spec":   map[string]interface{}{"replicas": int64(2)},
+				"status": t11uArgoRolloutReadyStatus("Healthy", "rs-v2"),
+			}},
+			desired: t11uRefB,
+			want:    imageflowv1alpha1.RolloutUnknown,
+			wantSub: "not present in the pod template",
+		},
+	}
+	// Stale-trust case: observedGeneration "2" against generation 3.
+	cases[1].rollout.Object["status"].(map[string]interface{})["observedGeneration"] = "2"
+	// Missing-container case: rename the only container away from the declared
+	// name so specHoldsDesired reports it missing (name-driven, not index-
+	// driven, so the table can grow safely).
+	for i := range cases {
+		if cases[i].name != "unknown when the declared container is missing from the pod template" {
+			continue
+		}
+		containers := cases[i].rollout.Object["spec"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})
+		containers[0].(map[string]interface{})["name"] = "other"
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newT11uFixture(t, config.Config{}, tc.rollout)
+			ref := t11uRolloutRef()
+			entry := t11uSeededEntry(ref, tc.desired)
+			facts, found, err := fx.reconciler.getWorkloadFacts(context.Background(), argoRolloutGVK, ref)
+			if err != nil || !found {
+				t.Fatalf("getWorkloadFacts = (found=%v, err=%v), want (true, nil)", found, err)
+			}
+			if facts.kind != observerKindRollout {
+				t.Fatalf("facts.kind = %q, want %q", facts.kind, observerKindRollout)
+			}
+			pods, err := fx.reconciler.listWorkloadPods(context.Background(), facts)
+			if err != nil {
+				t.Fatalf("listWorkloadPods: %v", err)
+			}
+			det := determineRollout(facts, t11uContainerTarget(ref), entry, pods)
+			if det.status != tc.want {
+				t.Fatalf("determineRollout = %q (%q), want %q", det.status, det.message, tc.want)
+			}
+			if tc.wantSub != "" && !strings.Contains(det.message, tc.wantSub) {
+				t.Fatalf("message %q must contain %q", det.message, tc.wantSub)
+			}
+			if det.awaitingPromotion != tc.wantAwaitingProm {
+				t.Fatalf("awaitingPromotion = %v, want %v", det.awaitingPromotion, tc.wantAwaitingProm)
+			}
+			if tc.wantHealthReason != "" {
+				hv := determineHealth(det, pods, entry.DesiredImage, facts.kind)
+				if hv.reason != tc.wantHealthReason {
+					t.Fatalf("health reason = %q, want %q", hv.reason, tc.wantHealthReason)
+				}
+			}
+		})
+	}
+}
+
+func TestObserverGetWorkloadFactsArgoRolloutExtraction(t *testing.T) {
+	status := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
+	status["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	status["updatedReplicas"] = int64(1)
+	status["readyReplicas"] = int64(1)
+	status["availableReplicas"] = int64(0)
+	wl := t11uArgoRollout(t11uRefB, status)
+	fx := newT11uFixture(t, config.Config{}, wl)
+
+	ref := t11uRolloutRef()
+	facts, found, err := fx.reconciler.getWorkloadFacts(context.Background(), argoRolloutGVK, ref)
+	if err != nil || !found {
+		t.Fatalf("getWorkloadFacts = (found=%v, err=%v), want (true, nil)", found, err)
+	}
+	if facts.kind != observerKindRollout || facts.namespace != t11uNamespace || facts.uid != t11uRolloutUID {
+		t.Fatalf("identity = (%q, %q, %q)", facts.kind, facts.namespace, facts.uid)
+	}
+	if facts.generation != 3 || facts.observedGeneration != 3 || !facts.rolloutObservedParsed {
+		t.Fatalf("generations = (%d observed %d parsed=%v), want (3, 3, true)",
+			facts.generation, facts.observedGeneration, facts.rolloutObservedParsed)
+	}
+	if facts.rolloutPhase != "Paused" || facts.rolloutStableRS != "rs-v1" || facts.rolloutCurrentPodHash != "rs-v2" {
+		t.Fatalf("argo status = (phase=%q stableRS=%q currentPodHash=%q)",
+			facts.rolloutPhase, facts.rolloutStableRS, facts.rolloutCurrentPodHash)
+	}
+	if !facts.rolloutPaused {
+		t.Fatal("pauseConditions must set rolloutPaused")
+	}
+	if facts.desiredReplicas != 2 || facts.updatedReplicas != 1 || facts.totalReplicas != 2 ||
+		facts.readyReplicas != 1 || facts.availableReplicas != 0 {
+		t.Fatalf("replica counts = (desired %d updated %d total %d ready %d available %d)",
+			facts.desiredReplicas, facts.updatedReplicas, facts.totalReplicas,
+			facts.readyReplicas, facts.availableReplicas)
+	}
+	// D4: .spec.template.spec converts to the SAME corev1.PodSpec shape the
+	// container-state analysis consumes for typed kinds.
+	if facts.template == nil || len(facts.template.Containers) != 1 {
+		t.Fatalf("template = %+v, want one container", facts.template)
+	}
+	if facts.template.Containers[0].Name != t11uContainer || facts.template.Containers[0].Image != t11uRefB {
+		t.Fatalf("container = %+v", facts.template.Containers[0])
+	}
+	if facts.uninitialized {
+		t.Fatal("a Rollout with reported status must not be uninitialized")
+	}
+}
+
+// TestParseArgoRolloutObservedGeneration pins the D4 defensive boundary:
+// status.observedGeneration is a STRING upstream; anything that does not
+// parse as an integer means "not yet observed" (untrusted → Progressing).
+func TestParseArgoRolloutObservedGeneration(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		found bool
+		want  int64
+		ok    bool
+	}{
+		{"numeric string parses", "3", true, 3, true},
+		{"whitespace is tolerated", " 3 ", true, 3, true},
+		{"empty string is unobserved", "", true, 0, false},
+		{"non-numeric is unobserved", "abc", true, 0, false},
+		{"fractional is unobserved", "3.5", true, 0, false},
+		{"absent is unobserved", "", false, 0, false},
+		{"overflow is unobserved", "9223372036854775808", true, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseArgoRolloutObservedGeneration(tc.raw, tc.found)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("parseArgoRolloutObservedGeneration(%q, %v) = (%d, %v), want (%d, %v)",
+					tc.raw, tc.found, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// The pod-image-failure scan and the ReplicaSet two-hop pod listing work
+// exactly like the Deployment lane (D4): Argo Rollouts manages ReplicaSets
+// owned by the Rollout, and those own the pods.
+func TestObserverDetermineArgoRolloutPodImageFailureAndReplicaSetChain(t *testing.T) {
+	rollout := t11uArgoRollout(t11uRefB, t11uArgoRolloutReadyStatus("Progressing", "rs-v1"))
+	rs := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: t11uNamespace, Name: t11uRSName, UID: t11uRSUID,
+			OwnerReferences: []metav1.OwnerReference{
+				t11uOwnerRef(kindRollout, t11uRolloutName, t11uRolloutUID),
+			},
+		},
+	}
+	pod := t11uPod(t11uOwnerRef("ReplicaSet", t11uRSName, t11uRSUID),
+		t11uWaitingStatus(t11uRefB, t11uWaitingPullBackOff, "Back-off pulling image"))
+	fx := newT11uFixture(t, config.Config{}, rollout, rs, pod)
+
+	ref := t11uRolloutRef()
+	entry := t11uSeededEntry(ref, t11uRefB)
+	facts, found, err := fx.reconciler.getWorkloadFacts(context.Background(), argoRolloutGVK, ref)
+	if err != nil || !found {
+		t.Fatalf("getWorkloadFacts = (found=%v, err=%v), want (true, nil)", found, err)
+	}
+	pods, err := fx.reconciler.listWorkloadPods(context.Background(), facts)
+	if err != nil {
+		t.Fatalf("listWorkloadPods: %v", err)
+	}
+	if len(pods) != 1 || pods[0].Name != t11uPodName {
+		t.Fatalf("the two-hop ReplicaSet chain must list the pod, got %d pods", len(pods))
+	}
+	det := determineRollout(facts, t11uContainerTarget(ref), entry, pods)
+	if det.status != imageflowv1alpha1.RolloutFailed || !strings.Contains(det.message, "cannot start image") {
+		t.Fatalf("determineRollout = %q (%q), want Failed (image pull)", det.status, det.message)
+	}
+}
+
+// The paused verdict writes the registered AwaitingPromotion health reason
+// into the per-target entry (ADR-015 decision 8), while a plain progressing
+// rollout keeps the shared WaitingForRollout wording.
+func TestObserverArgoRolloutAwaitingPromotionHealthMessage(t *testing.T) {
+	det := rolloutDetermination{status: imageflowv1alpha1.RolloutProgressing, awaitingPromotion: true}
+	hv := determineHealth(det, nil, t11uRefB, observerKindRollout)
+	if hv.status != imageflowv1alpha1.HealthUnknown || hv.reason != HealthReasonAwaitingPromotion {
+		t.Fatalf("health = (%q, %q), want (Unknown, AwaitingPromotion)", hv.status, hv.reason)
+	}
+	if !strings.Contains(hv.message, "awaiting promotion") {
+		t.Fatalf("message %q must name the awaiting-promotion state", hv.message)
+	}
+}
+
+// TestObserverArgoRolloutKindNotInstalledSilence pins the D9 division of
+// labor (spec v1.8 D9, ADR-006): the delivery engine OWNS the
+// KindNotInstalled WHY — it writes Reason=KindNotInstalled on the entry and
+// requeues itself at the waiting interval; the observer stays silent, keeps
+// the persisted entry untouched, and never races its own explanation over
+// the engine's (subscription_observer.go:940-945, getWorkloadFacts
+// found=false covers NotFound AND NoKindMatch). Covered from both ends: the
+// pre-delivery case (engine report present, CRD never installed) and the
+// post-delivery case (rollout converged earlier, CRD then removed).
+func TestObserverArgoRolloutKindNotInstalledSilence(t *testing.T) {
+	target := t11uContainerTarget(t11uRolloutRef())
+
+	t.Run("engine KindNotInstalled report survives the observer pass untouched", func(t *testing.T) {
+		engineMessage := "kind argoproj.io/v1alpha1, Kind=Rollout is not served by this cluster " +
+			"(CRD absent?); delivery is impossible until the kind exists"
+		engineEntry := imageflowv1alpha1.TargetDeliveryStatus{
+			TargetRef:     t11uRolloutRef(),
+			DesiredImage:  t11uRefB,
+			RolloutStatus: imageflowv1alpha1.RolloutUnknown,
+			HealthStatus:  imageflowv1alpha1.HealthUnknown,
+			Reason:        TargetReasonKindNotInstalled,
+			Message:       engineMessage,
+		}
+		sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{engineEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutUnknown,
+			ObservedGeneration: 1,
+		})
+		// No argo Rollout object: the CRD is absent from this cluster.
+		f := newT11uFixture(t, config.Config{}, sub)
+		f.applyStatus(sub, func() {})
+
+		res, err := f.reconcileSub()
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if res.RequeueAfter != 0 {
+			t.Fatalf("observer does not poll an unobservable target: RequeueAfter = %v, want 0 "+
+				"(the delivery engine requeues itself at the waiting interval)", res.RequeueAfter)
+		}
+		if events := f.drainEvents(); len(events) != 0 {
+			t.Fatalf("observer must stay silent on KindNotInstalled: %v", events)
+		}
+		entry := f.getSub().Status.Targets[0]
+		if !equality.Semantic.DeepEqual(engineEntry, entry) {
+			t.Fatalf("engine-owned entry must be preserved untouched:\n got %+v\nwant %+v", entry, engineEntry)
+		}
+		for _, result := range []string{observerResultProgressing, observerResultSucceeded, observerResultFailed} {
+			if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(observerKindRollout, result)); v != 0 {
+				t.Fatalf("rolloutOutcomes{rollout,%s} = %v, want 0 (no transition, no sample)", result, v)
+			}
+		}
+
+		// The second pass must be a pure no-op (resourceVersion stable):
+		// silence is a steady state, not a one-shot.
+		rv1 := f.getSub().GetResourceVersion()
+		if _, err := f.reconcileSub(); err != nil {
+			t.Fatalf("second reconcile: %v", err)
+		}
+		if rv2 := f.getSub().GetResourceVersion(); rv2 != rv1 {
+			t.Fatalf("second pass must not write: rv %s -> %s", rv1, rv2)
+		}
+	})
+
+	t.Run("post-delivery CRD removal keeps persisted state and polls", func(t *testing.T) {
+		seedEntry := t11uSeededEntry(t11uRolloutRef(), t11uRefB)
+		sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+			Conditions:         t11uAuthorizedConditions(),
+			Targets:            []imageflowv1alpha1.TargetDeliveryStatus{seedEntry},
+			RolloutStatus:      imageflowv1alpha1.RolloutProgressing,
+			ObservedGeneration: 1,
+		})
+		// The rollout object existed at delivery time; the CRD is now gone.
+		f := newT11uFixture(t, config.Config{}, sub)
+		f.applyStatus(sub, func() {})
+
+		res, err := f.reconcileSub()
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if res.RequeueAfter != waitingStateRequeue {
+			t.Fatalf("in-flight rollout must keep polling (the CRD may be reinstalled): "+
+				"RequeueAfter = %v, want %v", res.RequeueAfter, waitingStateRequeue)
+		}
+		if events := f.drainEvents(); len(events) != 0 {
+			t.Fatalf("observer must stay silent while the workload is unobservable: %v", events)
+		}
+		entry := f.getSub().Status.Targets[0]
+		if !equality.Semantic.DeepEqual(seedEntry, entry) {
+			t.Fatalf("persisted entry must be kept, not degraded:\n got %+v\nwant %+v", entry, seedEntry)
+		}
+
+		rv1 := f.getSub().GetResourceVersion()
+		if _, err := f.reconcileSub(); err != nil {
+			t.Fatalf("second reconcile: %v", err)
+		}
+		if rv2 := f.getSub().GetResourceVersion(); rv2 != rv1 {
+			t.Fatalf("second pass must not write: rv %s -> %s", rv1, rv2)
+		}
+	})
+}
+
+// TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals is the D10
+// positive assertion at reconcile level (spec v1.8 D10, ADR-015 decision 8):
+// a canary paused at an indefinite pause: {} step transitions the entry
+// Succeeded -> Progressing, emits the RolloutProgressing event dual-namespace
+// (subscription + target, ADR-014 decision 5) carrying the awaiting-promotion
+// WHY in its determination message, and increments the
+// imageflow_observer_rollout_outcomes_total{kind="rollout",result="progressing"}
+// series. The engine-owned entry Reason (Applied) is NEVER overwritten —
+// AwaitingPromotion rides the transition event's detMessage (R3).
+func TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals(t *testing.T) {
+	target := t11uContainerTarget(t11uRolloutRef())
+	seedEntry := t11uSeededEntry(t11uRolloutRef(), t11uRefB)
+	seedEntry.RolloutStatus = imageflowv1alpha1.RolloutSucceeded
+	seedEntry.HealthStatus = imageflowv1alpha1.HealthHealthy
+	sub := t11uSub([]imageflowv1alpha1.SubscriptionTarget{target}, imageflowv1alpha1.ImageSubscriptionStatus{
+		Conditions:         t11uAuthorizedConditions(),
+		Targets:            []imageflowv1alpha1.TargetDeliveryStatus{seedEntry},
+		RolloutStatus:      imageflowv1alpha1.RolloutSucceeded,
+		ObservedGeneration: 1,
+	})
+	// A canary paused at an indefinite step: phase Paused, the stable RS has
+	// not caught up with the new pod hash, and the controller wrote
+	// pauseConditions.
+	pausedStatus := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
+	pausedStatus["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	rollout := t11uArgoRollout(t11uRefB, pausedStatus)
+	f := newT11uFixture(t, config.Config{}, rollout, sub)
+	f.applyStatus(sub, func() {})
+
+	res, err := f.reconcileSub()
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.RequeueAfter != waitingStateRequeue {
+		t.Fatalf("a paused canary is an in-flight rollout and must poll: RequeueAfter = %v, want %v",
+			res.RequeueAfter, waitingStateRequeue)
+	}
+	got := f.getSub()
+	entry := got.Status.Targets[0]
+	if entry.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("rolloutStatus = %q, want Progressing (pause: {} step holds the rollout)", entry.RolloutStatus)
+	}
+	if entry.HealthStatus != imageflowv1alpha1.HealthUnknown {
+		t.Fatalf("healthStatus = %q, want Unknown (health is not evaluated until the rollout Succeeds)",
+			entry.HealthStatus)
+	}
+	if entry.Reason != TargetReasonApplied {
+		t.Fatalf("Reason = %q, want %q — AwaitingPromotion never overwrites the engine-owned "+
+			"surface (R3, ADR-015 decision 8)", entry.Reason, TargetReasonApplied)
+	}
+	if entry.Message != seedEntry.Message {
+		t.Fatalf("Message = %q, want the engine's %q (health reasons never overwrite an engine-owned entry)",
+			entry.Message, seedEntry.Message)
+	}
+	if got.Status.RolloutStatus != imageflowv1alpha1.RolloutProgressing {
+		t.Fatalf("aggregate rolloutStatus = %q, want Progressing", got.Status.RolloutStatus)
+	}
+	events := f.drainEvents()
+	if len(events) != 2 {
+		t.Fatalf("the paused transition emits the event dual-namespace (subscription + target): "+
+			"got %d events (%v)", len(events), events)
+	}
+	for _, ev := range events {
+		if !strings.Contains(ev, EventReasonRolloutProgressing) {
+			t.Fatalf("unexpected event during the paused transition: %q", ev)
+		}
+		if !strings.Contains(ev, "awaiting promotion") {
+			t.Fatalf("transition event %q must carry the awaiting-promotion determination", ev)
+		}
+	}
+	if v := testutil.ToFloat64(f.metrics.rolloutOutcomes.WithLabelValues(
+		observerKindRollout, observerResultProgressing)); v != 1 {
+		t.Fatalf("rolloutOutcomes{rollout,progressing} = %v, want 1 (D10: the kind=rollout "+
+			"series records the paused-canary outcome)", v)
 	}
 }
