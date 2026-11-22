@@ -171,6 +171,10 @@ func (f *t11uFixture) reconcileSub() (ctrl.Result, error) {
 	}})
 }
 
+// drainEvents returns every event recorded so far. Each observer transition
+// emits the SAME event twice — once anchored on the subscription and once on
+// the target namespace (ADR-014 decision 5) — so assertions must expect
+// pairs, not single events.
 func (f *t11uFixture) drainEvents() []string {
 	var out []string
 	for {
@@ -3663,6 +3667,13 @@ func t11uArgoRollout(image string, status map[string]interface{}) *unstructured.
 
 // t11uArgoRolloutReadyStatus is the controller-observed (generation 3) status
 // shared by most matrix cases; each case mutates the copy it needs.
+//
+// CAUTION: the (phase, stableRS) combination IS the verdict input — the same
+// pauseConditions on a Healthy/caught-up shape means succeeded-with-lingering-
+// pause, not paused (see the matrix in
+// TestObserverDetermineArgoRolloutVerdictStates). Compose raw shapes only for
+// states without a named constructor; for a canary paused at an indefinite
+// step use t11uArgoRolloutPausedStatus.
 func t11uArgoRolloutReadyStatus(phase, stableRS string) map[string]interface{} {
 	return map[string]interface{}{
 		"observedGeneration": "3",
@@ -3676,6 +3687,17 @@ func t11uArgoRolloutReadyStatus(phase, stableRS string) map[string]interface{} {
 	}
 }
 
+// t11uArgoRolloutPausedStatus is the canary-paused-at-an-indefinite-step
+// shape: phase Paused, the stable RS has not caught up with the new pod hash,
+// and the controller wrote pauseConditions. Using Healthy/rs-v2 with
+// pauseConditions instead is the succeeded-lingering-pause shape and asserts
+// the OPPOSITE verdict.
+func t11uArgoRolloutPausedStatus() map[string]interface{} {
+	status := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
+	status["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	return status
+}
+
 func t11uArgoRolloutPauseConditions() []interface{} {
 	return []interface{}{
 		map[string]interface{}{"reason": "StepPause", "startTime": "2026-10-05T12:00:00Z"},
@@ -3683,8 +3705,7 @@ func t11uArgoRolloutPauseConditions() []interface{} {
 }
 
 func TestObserverDetermineArgoRolloutVerdictStates(t *testing.T) {
-	paused := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
-	paused["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	paused := t11uArgoRolloutPausedStatus()
 	pausedCaughtUp := t11uArgoRolloutReadyStatus("Paused", "rs-v2")
 	pausedCaughtUp["pauseConditions"] = t11uArgoRolloutPauseConditions()
 	degradedPaused := t11uArgoRolloutReadyStatus("Degraded", "rs-v1")
@@ -4160,11 +4181,9 @@ func TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals(t *testing.T) 
 		RolloutStatus:      imageflowv1alpha1.RolloutSucceeded,
 		ObservedGeneration: 1,
 	})
-	// A canary paused at an indefinite step: phase Paused, the stable RS has
-	// not caught up with the new pod hash, and the controller wrote
-	// pauseConditions.
-	pausedStatus := t11uArgoRolloutReadyStatus("Paused", "rs-v1")
-	pausedStatus["pauseConditions"] = t11uArgoRolloutPauseConditions()
+	// A canary paused at an indefinite step (see t11uArgoRolloutPausedStatus
+	// for why the shape must not be composed by hand).
+	pausedStatus := t11uArgoRolloutPausedStatus()
 	rollout := t11uArgoRollout(t11uRefB, pausedStatus)
 	f := newT11uFixture(t, config.Config{}, rollout, sub)
 	f.applyStatus(sub, func() {})

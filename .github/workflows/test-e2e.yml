@@ -17,9 +17,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      # Pin kind: `dl/latest` served the unreleased v0.34.0-alpha build, whose
+      # default node image (kindest/node:v1.37.0) wedged argo-rollouts
+      # v1.10.2 on ~half of the runs (Rollout CRD status fields pruned,
+      # initial RS never scaled; #97). v0.33.0 is the latest stable release;
+      # the node image is pinned separately in the Makefile (KIND_NODE_IMAGE).
+      - name: Install kind (pinned stable)
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
@@ -32,6 +37,24 @@ jobs:
       # is idempotent; `make test-e2e` below re-runs it as a no-op).
       - name: Create the kind cluster
         run: make setup-test-e2e
+
+      # Pre-pull every image the e2e lanes run as a pod into the node's
+      # containerd, so cold registry pulls cannot stall rollout convergence
+      # mid-test (pause:3.9 pulls exceeded 5m in CI more than once; #97).
+      # `kind load docker-image` hits "content digest not found" with
+      # multi-arch images on containerd 2.x nodes, so pull directly inside
+      # the node instead. Keep this list in sync with the image constants
+      # in test/e2e/. The cluster name matches KIND_CLUSTER in the Makefile.
+      - name: Preload workload images into kind
+        run: |
+          set -euo pipefail
+          for img in \
+            registry.k8s.io/pause:3.9 \
+            docker.io/library/busybox:1.36.1 \
+            docker.io/library/registry:2.8.3 \
+            quay.io/argoproj/argo-rollouts:v1.10.2; do
+            docker exec imageflow-test-e2e-control-plane ctr --namespace=k8s.io images pull "$img"
+          done
 
       - name: Install Argo Rollouts (pinned stable, ADR-015)
         run: |

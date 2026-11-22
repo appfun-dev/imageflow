@@ -44,6 +44,16 @@
 
 **审查要点**：当 diff 修改 TESTING.md 时，验证所声称的测试确实存在于代码中。
 
+## Observer 断言：status 优先于事件
+
+**规则**：observer 的 rollout 事件只在 status transition 时发射（`internal/controller/subscription_observer.go` 稳态分支）；delivery re-seed、控制器重启重放等合法时序会使 entry 在 observer 看到 workload 之前就已处于目标状态，从而合法地抑制事件。
+
+- 断言稳态语义（AwaitingPromotion、Progressing、Succeeded 等）必须落在持久化 status 字段（`TargetSlice[].RolloutStatus` / `HealthStatus` / 聚合 `status.rolloutStatus`）
+- 事件断言只允许用于 transition 保证发生的路径（测试自身驱动状态从 A→B，如 `TestObserverArgoRolloutPausedTransitionEmitsPromotionSignals`）
+- `awaiting promotion` 等判定 WHY 骑在 transition 事件的 detMessage 上，不构成稳态断言对象
+
+**审查要点**：当 diff 在 e2e/集成测试中以事件存在性断言稳态语义时，要求改为 status 字段断言（反例：t87 曾因等待被 delivery re-seed 合法抑制的事件而 CI 超时，见 ADR-015 decision 8）。
+
 ## 语言约定
 
 **规则**：项目以中文为主要交互语言，保留核心技术领域词汇。

@@ -484,6 +484,15 @@ spec:
 			rolloutYAML, _ := utils.Run(exec.Command("kubectl", "get", "rollout",
 				"-n", t87sWorkloadNS, "-o", "yaml"))
 			_, _ = fmt.Fprintf(GinkgoWriter, "T87 workload rollout YAML:\n%s\n", rolloutYAML)
+			// CRD schema probe: the kindest/node:v1.37.0 flake pruned argo
+			// status fields (currentStepHash, conditions, canary, ...) on
+			// write, which wedges the rollouts controller at
+			// checkStepHashChange (#97). Dumping the served schema lets the
+			// next failure confirm or rule out a partial CRD in one look.
+			crdSchema, _ := utils.Run(exec.Command("kubectl", "get", "crd",
+				"rollouts.argoproj.io", "-o",
+				`jsonpath={.spec.versions[0].schema.openAPIV3Schema.properties.status}`))
+			_, _ = fmt.Fprintf(GinkgoWriter, "T87 rollouts CRD status schema:\n%s\n", crdSchema)
 		}
 	})
 
