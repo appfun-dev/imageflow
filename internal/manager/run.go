@@ -16,6 +16,14 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	// Registers controller-runtime's workqueue metrics provider
+	// (workqueue_depth and friends) through this package's transitive
+	// init(); client-go v0.33 defaults to a noop provider, so without
+	// this import the metrics are silently absent. It lives in this
+	// package — not cmd/main.go — so the integration lane, which runs
+	// manager.Run directly, is covered too (#97).
+	_ "sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+
 	"github.com/appfun-dev/imageflow/internal/controller"
 )
 
