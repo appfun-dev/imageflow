@@ -118,6 +118,16 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= imageflow-test-e2e
 
+# Pin the node image: an unpinned `kind create cluster` picks the binary's
+# default image, and the `dl/latest` kind binary (v0.34.0-alpha) defaulted to
+# kindest/node:v1.37.0 where argo-rollouts v1.10.2 intermittently wedged on
+# its initial deploy (apiserver pruned status.currentStepHash/conditions on
+# the Rollout CRD, so checkStepHashChange looped forever and the new RS was
+# never scaled; #97). v1.34.11 matches our client-go v0.33 support window and
+# is a pre-built image of the pinned kind release (v0.33.0). The digest is
+# from the kind v0.33.0 release notes; keep both pins in sync.
+KIND_NODE_IMAGE ?= kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	@command -v $(KIND) >/dev/null 2>&1 || { \
@@ -129,7 +139,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(KIND) create cluster --name $(KIND_CLUSTER) --image $(KIND_NODE_IMAGE) ;; \
 	esac
 
 .PHONY: test-e2e
