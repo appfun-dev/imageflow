@@ -60,7 +60,7 @@ const (
 	t10eRepo           = "quay.io/example/edge@sha256:"
 	t10ePreImage       = "registry.k8s.io/pause:3.9"
 	t10eResource       = "edgeservices"
-	t10eCRDDir         = "test/testdata/thirdparty"
+	t10eCRDFile        = "test/testdata/thirdparty/apps.thirdparty.test_edgeservices.yaml"
 	t10eCRDName        = "edgeservices.apps.thirdparty.test"
 
 	t10eStreamA      = "t10e-edge-stream-a"
@@ -252,7 +252,14 @@ spec:
 		Expect(err).NotTo(HaveOccurred(), "make install: %s", out)
 
 		By("installing the third-party test CRD and waiting for establishment")
-		crdOut, crdErr := utils.Run(exec.Command("kubectl", "apply", "-f", t10eCRDDir))
+		// Apply ONLY the EdgeService CRD file, never the whole thirdparty
+		// dir: the directory is a shared fixture library (it also carries a
+		// PARTIAL argoproj.io rollouts stand-in for envtest), and applying
+		// the directory replaced the real rollouts CRD's schema (kubectl
+		// merge-patch replaces spec.versions atomically), which wedged
+		// argo-rollouts for the rest of the suite whenever Ginkgo's random
+		// container order put T10 before T87 (#97).
+		crdOut, crdErr := utils.Run(exec.Command("kubectl", "apply", "-f", t10eCRDFile))
 		Expect(crdErr).NotTo(HaveOccurred(), "apply test CRD: %s", crdOut)
 		waitOut, waitErr := utils.Run(exec.Command("kubectl", "wait",
 			"--for=condition=Established", "crd/"+t10eCRDName, "--timeout=90s"))

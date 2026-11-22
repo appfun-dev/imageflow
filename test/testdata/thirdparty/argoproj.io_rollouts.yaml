@@ -2,6 +2,11 @@
 # v1.8-02 #93, ADR-015). NOT the upstream CRD — only the shapes ImageFlow
 # touches, merged from both lanes' requirements:
 #
+# NEVER apply this file to a cluster running the real argo-rollouts
+# controller (e.g. the e2e kind lane): its partial status schema makes the
+# apiserver prune status.conditions/currentStepHash/..., which wedges the
+# controller's initial deploy (checkStepHashChange loops forever; #97).
+#
 #   - .spec.template.spec.containers as a name-keyed map-list so real
 #     Server-Side Apply merges (and owns) per element — the shape the
 #     pod-template Kind adapter writes (v1.8-01 delivery lane);

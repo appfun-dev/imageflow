@@ -22,7 +22,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -538,45 +537,10 @@ spec:
 		// RS has any Ready pods, leaving both RS stuck at "more replicas
 		// need to be updated". Deferring the subscription ensures the
 		// initial deploy completes cleanly first.
-		//
-		// Environment self-healing (#97): in the kind CI lane the freshly
-		// installed argo-rollouts controller occasionally wedges the initial
-		// deploy — it creates the revision-1 ReplicaSet at desired=0 and
-		// then only re-patches a torn Rollout status (conditions written,
-		// then lost, then re-initialized) without ever scaling the RS up
-		// (CI runs 44918305395, 44930544203, 44978282102; also seen on main
-		// before this branch). The subject of this spec is ImageFlow's
-		// delivery, not argo's scheduler, so after a first short budget we
-		// heal the environment once — restart the rollouts-controller and
-		// recreate the Rollout for a clean from-scratch reconcile — and keep
-		// waiting inside roughly the original 10m budget. A real product
-		// regression is not masked: the engine has written nothing at this
-		// point (the subscription is created only after this wait), so the
-		// second wait still fails honestly when convergence never happens.
-		converged := func(g Gomega) {
+		Eventually(func(g Gomega) {
 			g.Expect(t87sNative(t87sConvergeRollout, t87sPhasePth)).To(Equal("Healthy"),
 				"initial deploy must converge natively before the engine writes")
-		}
-		healthy := false
-		deadline := time.Now().Add(3 * time.Minute)
-		for !healthy && time.Now().Before(deadline) {
-			healthy = t87sNative(t87sConvergeRollout, t87sPhasePth) == "Healthy"
-			if !healthy {
-				time.Sleep(5 * time.Second)
-			}
-		}
-		if !healthy {
-			By("healing the wedged argo-rollouts initial deploy " +
-				"(RS stuck at desired=0; restart controller + recreate Rollout)")
-			_, _ = utils.Run(exec.Command("kubectl", "rollout", "restart",
-				"deployment/argo-rollouts", "-n", "argo-rollouts"))
-			_, _ = utils.Run(exec.Command("kubectl", "rollout", "status",
-				"deployment/argo-rollouts", "-n", "argo-rollouts", "--timeout=3m"))
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "rollout", t87sConvergeRollout,
-				"-n", t87sWorkloadNS, "--ignore-not-found", "--wait=true", "--timeout=2m"))
-			t87sRollout(t87sConvergeRollout, t87sPreImage, "    canary: {}")
-		}
-		Eventually(converged, "6m", "5s").Should(Succeed())
+		}, "10m", "5s").Should(Succeed())
 
 		t87sSubscription(t87sConvergeSub, t87sConvergeStream, t87sConvergeRollout)
 
