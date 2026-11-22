@@ -22,6 +22,13 @@ import (
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	// Registers controller-runtime's workqueue metrics provider
+	// (workqueue_depth and friends) through this package's transitive
+	// init(); client-go v0.33 defaults to a noop provider, so without
+	// this import the metrics are silently absent in production and the
+	// integration assertion passes only by link-order luck (#97).
+	_ "sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
